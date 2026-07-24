@@ -17,10 +17,7 @@
         "js-yaml": "^4.1.0"
     },
     "devDependencies": {},
-    "scripts": {
-        "build-package": "node build-package.js",
-        "prepublishOnly": "npm run build-package"
-    },
+    "scripts": {},
     "node-red": {
         "version": ">=4.0.0",
         "nodes": {
