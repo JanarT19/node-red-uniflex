@@ -1,0 +1,670 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-floor-loop", {
+        category: "uniflex home",
+        color: "#CFE8FF",
+        icon: "node-red/serial.svg",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return (
+                        typeof v === "string" &&
+                        v.length > 0 &&
+                        /^[a-zA-Z0-9_-]+$/.test(v) && // Only safe filename chars
+                        v.length <= 50
+                    ); // Reasonable length limit
+                }
+            },
+            minOpenSec: { value: 300, validate: RED.validators.number() },
+
+            // Topics
+            setpointTopic: { value: "", required: true },
+            returnTopic: { value: "", required: true },
+            forceOpenTopic: { value: "" },
+            forceCloseTopic: { value: "" },
+
+            // Embedded PID parameters
+            Kp: { value: 1.0, validate: RED.validators.number() },
+            Ii: { value: 0.0, validate: RED.validators.number() },
+
+            valveType: { value: "NC" },
+            valveCmdTopic: { value: "", required: true },
+            roomTickTopic: { value: "", required: true },
+            coolingModeTopic: { value: "" },
+            dewPointTopic: { value: 20.0, validate: RED.validators.number() },
+            dewMarginC: { value: 1.0, validate: RED.validators.number() },
+
+            persistencePath: { value: "/home/nodered/heating_state" },
+
+            // Shared building config (optional - if set, overrides local ff settings)
+            thermalModel: { value: "", type: "uniflex-thermal-model-config" },
+            // Legacy alias kept so existing flows that linked uniflex-heating-config still load.
+            // Prefer thermalModel; runtime warns when heatingConfig is used.
+            heatingConfig: { value: "", type: "uniflex-heating-config" },
+
+            // Local feedforward configuration (used if no thermalModel selected)
+            ffEnable: { value: false },
+            ffHorizon1: { value: 6, validate: RED.validators.number() },
+            ffHorizon2: { value: 12, validate: RED.validators.number() },
+            ffGainTout: { value: 0.25, validate: RED.validators.number() },
+            ffGainWind: { value: 0.02, validate: RED.validators.number() },
+            ffTbalance: { value: 15, validate: RED.validators.number() },
+
+            // Iolayer topic prefixes (data from forecast-publisher)
+            ffToutTopicPrefix: { value: "FCTW" },
+            ffWindTopicPrefix: { value: "FCWW" }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "floor loop";
+        },
+        paletteLabel: "floor loop",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            function updateTipText() {
+                const sp = $("#node-input-setpointTopic").val() || "<not set>";
+                const ret = $("#node-input-returnTopic").val() || "<not set>";
+                const tick = $("#node-input-roomTickTopic").val() || "<not set>";
+                const valve = $("#node-input-valveCmdTopic").val() || "<not set>";
+                const minOpen = Number($("#node-input-minOpenSec").val() || 0);
+
+                const tipText1 = `On room tick (${tick}), wait for next setpoint sample (${sp}), then compute duty.`;
+                const tipText2 = `If duty + carryover >= ${minOpen}s, the valve (${valve}) is opened for that many seconds.`;
+                const tipText3 = `If duty + carryover < ${minOpen}s, the seconds are carried over to the next period.`;
+                const forceOpen = $("#node-input-forceOpenTopic").val() || "<not set>";
+                const forceClose = $("#node-input-forceCloseTopic").val() || "<not set>";
+                const tipText4 = `Floor return (${ret}) is used to compute error; force topics (${forceOpen}, ${forceClose}) can override.`;
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+                $("#node-input-tip-text-4").text(tipText4);
+            }
+
+            // Define event listeners for form fields
+            $("#node-input-minOpenSec, #node-input-setpointTopic, #node-input-returnTopic, #node-input-forceOpenTopic, #node-input-forceCloseTopic, #node-input-valveCmdTopic").on(
+                "input change",
+                updateTipText
+            );
+
+            // Initialize topic dropdown and tip text
+            queryControllerConfig();
+            updateTipText();
+
+            // Show/hide local feedforward settings based on whether shared config is selected
+            function updateFfVisibility() {
+                const configId = $("#node-input-thermalModel").val() || $("#node-input-heatingConfig").val();
+                if (configId && configId !== "_ADD_") {
+                    $("#ff-local-settings").hide();
+                    $("#ff-using-shared").show();
+                } else {
+                    $("#ff-local-settings").show();
+                    $("#ff-using-shared").hide();
+                }
+            }
+            $("#node-input-thermalModel, #node-input-heatingConfig").on("change", updateFfVisibility);
+            // Defer initial check until after Node-RED populates the config selector
+            setTimeout(updateFfVisibility, 100);
+
+            // Autocomplete for forecast iolayer datastreams (write topics)
+            const forecastDatastreams = [
+                { label: "FCTW - ForecaTemp (temperature)", value: "FCTW" },
+                { label: "FCWW - ForecaWind (wind speed)", value: "FCWW" },
+                { label: "FCCW - ForecaClouds (cloudiness)", value: "FCCW" }
+            ];
+
+            function initForecastAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const matches = forecastDatastreams.filter(function (item) {
+                            return item.label.toLowerCase().indexOf(term) >= 0 ||
+                                item.value.toLowerCase().indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    select: function (event, ui) {
+                        element.val(ui.item.value);
+                        return false;
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", "");
+                });
+            }
+
+            initForecastAutocomplete($("#node-input-ffToutTopicPrefix"));
+            initForecastAutocomplete($("#node-input-ffWindTopicPrefix"));
+
+            // Query topics defined in read and write nodes
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-setpointTopic"));
+                    initializeAutocomplete($("#node-input-returnTopic"));
+                    initializeAutocomplete($("#node-input-forceOpenTopic"));
+                    initializeAutocomplete($("#node-input-forceCloseTopic"));
+
+                    initializeAutocomplete($("#node-input-valveCmdTopic"));
+                    console.log("About to initialize room tick autocomplete");
+                    const roomTickElement = $("#node-input-roomTickTopic");
+                    console.log("Room tick element found:", roomTickElement.length > 0, roomTickElement);
+
+                    // HEATING_CURSOR_VERSION_2024_12_19 - Fixed autocomplete with proper text selection
+                    roomTickElement.autocomplete({
+                        minLength: 0, // Show suggestions immediately when clicking
+                        delay: 100, // Quick response
+                        source: function (request, response) {
+                            // Get actual room tick topics from configured room-loop nodes
+                            const roomTickTopics = [];
+                            RED.nodes.eachNode(function (node) {
+                                if (node.type === "uniflex-room-loop" && node.name) {
+                                    const topic = `heating/${node.name}/tick`;
+                                    roomTickTopics.push({
+                                        label: topic,
+                                        value: topic
+                                    });
+                                }
+                            });
+
+                            // Filter based on current input
+                            const filtered = roomTickTopics.filter(function (item) {
+                                return item.value.toLowerCase().indexOf(request.term.toLowerCase()) >= 0;
+                            });
+
+                            console.log("Room tick autocomplete suggestions:", filtered);
+                            response(filtered);
+                        },
+                        select: function (event, ui) {
+                            // Set the value but allow further editing
+                            this.value = ui.item.value;
+                            return false; // Don't close the dropdown
+                        },
+                        focus: function (event, ui) {
+                            // Don't auto-fill on focus
+                            return false;
+                        },
+                        open: function () {
+                            // Ensure dropdown is visible
+                            $(this).autocomplete("widget").css("z-index", 9999);
+                        }
+                    });
+
+                    console.log("Room tick autocomplete initialized with dynamic source - HEATING_CURSOR_VERSION_2024_12_19");
+
+                    // HEATING_CURSOR_VERSION_2024_12_19 - Fix mouse text selection
+                    roomTickElement.on("mousedown", function (e) {
+                        // Allow normal mouse selection behavior
+                        e.stopPropagation();
+                    });
+
+                    roomTickElement.on("mouseup", function (e) {
+                        // Allow normal mouse selection behavior
+                        e.stopPropagation();
+                    });
+
+                    roomTickElement.on("click", function (e) {
+                        // Allow normal mouse selection behavior
+                        e.stopPropagation();
+                    });
+
+                    console.log("Mouse selection handlers added to roomTickTopic field - HEATING_CURSOR_VERSION_2024_12_19");
+                    initializeAutocomplete($("#node-input-coolingModeTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            // Initialize autocomplete for topic inputs in the editable list
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            // Don't change the input value on hover/focus
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            // Call the onSelect callback if provided
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            // Return a list of topics from the controller configuration
+            // Structure: [ { key: "ABC", member: 1, topic: test/1, label: ... } ]
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                return result;
+            }
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .floor-loop-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .floor-loop-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .floor-loop-div .form-row div,
+    .floor-loop-div .form-row input,
+    .floor-loop-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .floor-loop-div .form-row select {
+        width: 66% !important;
+    }
+
+    .floor-loop-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .floor-loop-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .floor-loop-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    /* Autocomplete widget styling */
+    .floor-loop-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .floor-loop-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+        position: relative;
+    }
+
+    .floor-loop-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    /* Ensure text selection works in all input fields */
+    .floor-loop-div input[type="text"] {
+        user-select: text !important;
+        -webkit-user-select: text !important;
+        -moz-user-select: text !important;
+        -ms-user-select: text !important;
+        cursor: text !important;
+    }
+
+    /* Specifically ensure roomTickTopic field works properly */
+    #node-input-roomTickTopic {
+        user-select: text !important;
+        -webkit-user-select: text !important;
+        -moz-user-select: text !important;
+        -ms-user-select: text !important;
+        cursor: text !important;
+        pointer-events: auto !important;
+    }
+</style>
+
+<!-- Form fields for the node -->
+<script type="text/html" data-template-name="uniflex-floor-loop">
+    <div class="floor-loop-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g., livingroom-main" />
+            <div class="help-text">Unique identifier for this floor loop. Used in persistence filename. Only letters, numbers, underscore, and hyphen allowed.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Timing</b>
+
+        <div class="form-row">
+            <label for="node-input-minOpenSec"><i class="fa fa-clock-o"></i> Min open (s)</label>
+            <input type="number" id="node-input-minOpenSec" min="0" />
+            <div class="help-text">Minimum open time to avoid short-cycling. Duty seconds below this are carried over until threshold is met.</div>
+        </div>
+
+        <!-- warmup/relay removed -->
+
+        <div class="form-divider"></div>
+        <b>Topics</b>
+
+        <div class="form-row">
+            <label for="node-input-setpointTopic"><i class="fa fa-thermometer-half"></i> Floor setpoint</label>
+            <input type="text" id="node-input-setpointTopic" />
+            <div class="help-text">Topic publishing desired floor temperature (°C) from Room Loop.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-returnTopic"><i class="fa fa-thermometer-empty"></i> Floor return</label>
+            <input type="text" id="node-input-returnTopic" />
+            <div class="help-text">Topic publishing measured floor return temperature (°C).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-forceOpenTopic"><i class="fa fa-toggle-on"></i> Force open topic</label>
+            <input type="text" id="node-input-forceOpenTopic" />
+            <div class="help-text">IO topic for force open command (0/1).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-forceCloseTopic"><i class="fa fa-toggle-off"></i> Force close topic</label>
+            <input type="text" id="node-input-forceCloseTopic" />
+            <div class="help-text">IO topic for force close command (0/1).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>PID parameters</b>
+
+        <div class="form-row">
+            <label for="node-input-Kp"><i class="fa fa-bolt"></i> Kp</label>
+            <input type="number" id="node-input-Kp" step="0.01" />
+            <div class="help-text">Proportional gain for the embedded PID controller.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-Ii"><i class="fa fa-refresh"></i> Ii</label>
+            <input type="number" id="node-input-Ii" step="0.001" />
+            <div class="help-text">Integral increment per reference sample.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Actuation</b>
+
+        <div class="form-row">
+            <label for="node-input-roomTickTopic"><i class="fa fa-clock-o"></i> Room tick topic</label>
+            <input type="text" id="node-input-roomTickTopic" placeholder="heating/<roomId>/tick" />
+            <div class="help-text">
+                Topic used by Room Loop to publish periodic tick messages that synchronize loop operation.
+                <span style="color: #0066cc; font-weight: bold;">💡 Configure room loops first to select from available room tick topics</span>
+            </div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-valveType"><i class="fa fa-toggle-off"></i> Valve type</label>
+            <select id="node-input-valveType">
+                <option value="NC">Normally closed (NC)</option>
+                <option value="NO">Normally open (NO)</option>
+            </select>
+            <div class="help-text">Select valve wiring: NC = valve closed when output=0; NO = valve open when output=0.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-valveCmdTopic"><i class="fa fa-exchange"></i> Valve output</label>
+            <input type="text" id="node-input-valveCmdTopic" />
+            <div class="help-text">Topic where valve ON/OFF commands are published. Payloads: 1=open, 0=close.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-coolingModeTopic"><i class="fa fa-snowflake-o"></i> Cooling mode (0/1)</label>
+            <input type="text" id="node-input-coolingModeTopic" placeholder="heating/mode/cooling" />
+            <div class="help-text">Optional topic indicating cooling mode (1 = cooling). Node will invert control when cooling is active.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-dewPointTopic"><i class="fa fa-tint"></i> Dew point (°C)</label>
+            <input type="number" id="node-input-dewPointTopic" step="0.1" placeholder="20.0" />
+            <div class="help-text">Optional dew point temperature (°C) used for safety interlocks (handled by Coordinator).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-dewMarginC"><i class="fa fa-arrows-h"></i> Dew margin (°C)</label>
+            <input type="number" id="node-input-dewMarginC" step="0.1" />
+            <div class="help-text">Temperature margin to avoid condensation (used with dew point if provided).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-persistencePath"><i class="fa fa-save"></i> Persistence path</label>
+            <input type="text" id="node-input-persistencePath" placeholder="/home/nodered/heating_state" title="Directory path only -- no filename. The node creates its own state file inside this directory. Leave blank to disable." />
+            <div class="help-text">Directory path where PI state JSON files are saved.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Weather Feedforward</b>
+        <div class="help-text" style="margin-bottom: 10px;">
+            Anticipates heating demand changes based on weather forecast. Adjusts floor setpoint before the PI controller sees it.
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-thermalModel"><i class="fa fa-cog"></i> Building config</label>
+            <input type="text" id="node-input-thermalModel" />
+            <div class="help-text">Optional: select shared thermal-model-config for feedforward settings.</div>
+        </div>
+
+        <div id="ff-using-shared" style="display: none; padding: 10px; background: #e8f4e8; border-radius: 4px; margin-bottom: 10px;">
+            <i class="fa fa-check-circle" style="color: #5a5;"></i>
+            Using settings from building config. Edit the thermal-model-config node to change feedforward parameters.
+        </div>
+
+        <div id="ff-local-settings">
+            <div class="form-row">
+                <label for="node-input-ffEnable"><i class="fa fa-magic"></i> Enable feedforward</label>
+                <input type="checkbox" id="node-input-ffEnable" style="width: auto; max-width: none;" />
+                <div class="help-text">Enable weather-based feedforward adjustment of floor setpoint.</div>
+            </div>
+            <div class="form-row">
+                <label for="node-input-ffHorizon1"><i class="fa fa-clock-o"></i> Horizon 1 (h)</label>
+                <input type="number" id="node-input-ffHorizon1" step="1" min="1" max="24" />
+                <div class="help-text">Short-term forecast horizon in hours (default: 6h).</div>
+            </div>
+            <div class="form-row">
+                <label for="node-input-ffHorizon2"><i class="fa fa-clock-o"></i> Horizon 2 (h)</label>
+                <input type="number" id="node-input-ffHorizon2" step="1" min="1" max="48" />
+                <div class="help-text">Medium-term forecast horizon in hours (default: 12h). Used to detect trend continuity/reversal.</div>
+            </div>
+            <div class="form-row">
+                <label for="node-input-ffGainTout"><i class="fa fa-thermometer-half"></i> Gain Tout</label>
+                <input type="number" id="node-input-ffGainTout" step="0.01" />
+                <div class="help-text">Setpoint adjustment (°C) per 1°C outdoor temperature drop. Default: 0.25</div>
+            </div>
+            <div class="form-row">
+                <label for="node-input-ffGainWind"><i class="fa fa-flag"></i> Gain wind</label>
+                <input type="number" id="node-input-ffGainWind" step="0.01" />
+                <div class="help-text">Setpoint adjustment (°C) per 1 m/s wind speed increase. Default: 0.02</div>
+            </div>
+            <div class="form-row">
+                <label for="node-input-ffTbalance"><i class="fa fa-balance-scale"></i> T balance (°C)</label>
+                <input type="number" id="node-input-ffTbalance" step="0.5" />
+                <div class="help-text">Building balance temperature (no heating needed). Default: 15°C</div>
+            </div>
+
+            <div class="form-divider"></div>
+            <b style="font-size: 0.9em;">Iolayer Topics (from forecast-publisher)</b>
+
+            <div class="form-row">
+                <label for="node-input-ffToutTopicPrefix"><i class="fa fa-thermometer-half"></i> Temp topic</label>
+                <input type="text" id="node-input-ffToutTopicPrefix" placeholder="FCTW" />
+                <div class="help-text">FCTW.1 (3h), .2 (6h), .3 (12h), .4 (24h).</div>
+            </div>
+            <div class="form-row">
+                <label for="node-input-ffWindTopicPrefix"><i class="fa fa-flag"></i> Wind topic</label>
+                <input type="text" id="node-input-ffWindTopicPrefix" placeholder="FCWW" />
+                <div class="help-text">FCWW.1 (3h), .2 (6h), .3 (12h), .4 (24h).</div>
+            </div>
+        </div>
+
+        <!-- force topics are room-scoped and auto-derived; no need to show here -->
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+        <div class="form-tips" id="node-input-tip-text-4"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-floor-loop">
+    <h3>Floor-loop</h3>
+    <p>Floor loop PWM controller. Computes per-period valve open seconds from an embedded PID core and publishes valve output commands.</p>
+
+    <h4>Inputs (single input)</h4>
+    <ul>
+        <li><b>Floor setpoint</b> -- topic configured in <code>Floor setpoint</code>. Payload: numeric (°C).</li>
+        <li><b>Floor return</b> -- topic configured in <code>Floor return</code>. Payload: numeric (°C).</li>
+        <li>
+            <b>Room tick</b> -- topic configured in <code>Room tick topic</code>. Payload: object with <code>ts</code> (unix seconds) and <code>periodSec</code> (number) to indicate
+            the sample period and synchronize PWM start.
+        </li>
+        <li><b>Cooling mode</b> -- optional topic configured in <code>Cooling mode</code>. Payload: numeric 0 or 1 (1 = cooling).</li>
+        <li><b>Dew point</b> -- optional topic configured in <code>Dew point</code>. Payload: numeric (°C).</li>
+        <li><b>Force open / close</b> -- topics configured in <code>Force open topic</code> and <code>Force close topic</code>. Payload: numeric 0 or 1.</li>
+    </ul>
+
+    <h4>Outputs (single output)</h4>
+    <ul>
+        <li>
+            <b>Presence announcement</b> -- emitted once at startup. Topic: <code>heating/&lt;name&gt;/presence</code>. Payload: object with discovery information (see example
+            below).
+        </li>
+        <li>
+            <b>Valve output commands</b> -- published to the configured Valve output topic. Messages are sent on the node output with the <code>topic</code> set to the valve output
+            topic and a numeric payload (0 or 1) representing output state.
+        </li>
+    </ul>
+
+    <h4>Behavior summary</h4>
+    <p>
+        On each room tick the node waits for the next setpoint sample, computes the PID output (0..1) using the embedded PI core, converts that to requested open seconds = pi *
+        periodSec, adds any carryover, and:
+    </p>
+    <ul>
+        <li>If the total requested seconds &lt; <code>minOpenSec</code> it accumulates carryover until the threshold is reached.</li>
+        <li>Otherwise it opens the valve for <code>openSec = min(want, periodSec)</code> and reduces carryover accordingly.</li>
+        <li>Force-close wins over force-open. Manual force topics immediately open/close the valve.</li>
+        <li>When cooling mode is active the PID input is inverted, and a dew-point safety check can prevent opening if setpoint would drop below dew+margin.</li>
+    </ul>
+
+    <h4>Example messages</h4>
+    <p>Room tick message (input):</p>
+    <pre>
+{
+    "ts": 1690000000,
+    "periodSec": 300
+}</pre
+    >
+
+    <p>Setpoint / Return (input):</p>
+    <pre>21.5    // numeric payload (°C)</pre>
+
+    <p>Force topics (input):</p>
+    <pre>1    // numeric payload: apply force (open or close depending on topic)</pre>
+
+    <p>Presence message (output, emitted at startup):</p>
+    <pre>
+{
+    "ts": 1690000000,
+    "version": 1,
+    "name": "livingroom-main",
+    "topics": {
+        "roomTick": "heating/livingroom/tick",
+        "setpoint": "heating/livingroom/main/setpoint",
+        "ret": "heating/livingroom/main/return",
+        "Kp": 1.0,
+        "Ii": 0.0,
+        "Dd": 0.0,
+        "valveCmd": "heating/livingroom/main/valve/cmd",
+        "forceOpen": "heating/livingroom/force/open",
+        "forceClose": "heating/livingroom/force/close"
+    }
+}</pre
+    >
+
+    <p>Valve output command:</p>
+    <pre>
+{
+    "topic": "heating/livingroom/main/valve/cmd",
+    "payload": 1    // numeric 1=open, 0=close (value may be inverted depending on Valve type)
+}</pre
+    >
+
+    <h4>Weather Feedforward</h4>
+    <p>
+        When enabled, the node receives weather forecast data from <code>forecast-publisher</code> via iolayer topics
+        and adjusts the floor setpoint <em>before</em> the PI controller sees it. This anticipates heating demand
+        changes due to outdoor temperature drops or wind increases, helping the floor's large thermal mass (~80h
+        time constant) respond proactively.
+    </p>
+    <p>
+        <b>Shared config:</b> To avoid configuring feedforward settings on each floor loop individually, create a
+        <code>heating config</code> node and select it here. All floor loops using the same config will share the
+        same feedforward parameters. You can create multiple configs for different room types (e.g., "default",
+        "large-windows", "south-facing").
+    </p>
+    <p><b>Iolayer topics:</b></p>
+    <ul>
+        <li><b>FCTW</b>.1 (3h), .2 (6h), .3 (12h), .4 (24h) – temperature forecast</li>
+        <li><b>FCWW</b>.1, .2, .3, .4 – wind speed forecast</li>
+    </ul>
+    <p><b>Dual-horizon logic:</b></p>
+    <ul>
+        <li><b>Horizon 1</b> (default 6h): Short-term forecast for immediate trend detection.</li>
+        <li><b>Horizon 2</b> (default 12h): Medium-term forecast to assess trend continuity.</li>
+        <li>If both horizons show the same trend direction (e.g., both cooling), full feedforward gain is applied.</li>
+        <li>If horizons show opposite trends (reversal), gain is reduced by 50% to avoid overreaction.</li>
+    </ul>
+    <p><b>Feedforward formula:</b></p>
+    <pre>
+ffAdj = -GainTout × ΔTout × confidence + GainWind × max(0, ΔWind) × confidence
+
+Where:
+  ΔTout = Tout(horizon1) - Tout(now)   // negative = cooling
+  ΔWind = Wind(horizon1) - Wind(now)   // positive = increasing
+  confidence = 1.0 (same trend) or 0.5 (reversal)
+</pre>
+    <p>The adjustment is clamped to ±2°C to prevent extreme corrections.</p>
+
+    <h4>Notes</h4>
+    <ul>
+        <li>The node has a single input and a single output. All configured topics are listened on the node input and messages are emitted on the node output.</li>
+        <li>PID configuration is embedded in the node (Kp, Ii). Dd is unused for heating.</li>
+        <li>Carryover is maintained in-memory and is not persistent across restarts.</li>
+        <li>Feedforward data comes from iolayer, published by <code>forecast-publisher</code> every heating tick (~20 min) and republished every 4 min for diagram continuity.</li>
+        <li>Ticks are per-room and staggered for even load distribution across rooms.</li>
+    </ul>
+</script>

@@ -1,0 +1,460 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-pid-controller", {
+        category: "uniflex utils",
+        color: "#E6E0F8",
+        // Define the default values for the node configuration
+        defaults: {
+            name: { value: "" },
+            outputTopic: { value: "", required: true },
+
+            actualTopic: { value: "", required: true },
+            setpointTopic: { value: "", required: true },
+
+            pTopic: { value: "", required: true },
+            iTopic: { value: "", required: true },
+            dTopic: { value: "", required: true },
+
+            upperLimitTopic: { value: "", required: true },
+            lowerLimitTopic: { value: "", required: true },
+            invertTopic: { value: "", required: false },
+
+            iterateOnTrigger: { value: false },
+            iterateTopic: { value: "pid/iterate" }
+        },
+        // Define the inputs and outputs of the node
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-calculator",
+        label: function () {
+            return this.name || "pid controller";
+        },
+        paletteLabel: function () {
+            return "pid controller";
+        },
+        // Update form fields
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-outputTopic").val(node.outputTopic);
+
+            $("#node-input-actualTopic").val(node.actualTopic);
+            $("#node-input-setpointTopic").val(node.setpointTopic);
+
+            $("#node-input-pTopic").val(node.pTopic);
+            $("#node-input-iTopic").val(node.iTopic);
+            $("#node-input-dTopic").val(node.dTopic);
+
+            $("#node-input-upperLimitTopic").val(node.upperLimitTopic);
+            $("#node-input-lowerLimitTopic").val(node.lowerLimitTopic);
+            $("#node-input-invertTopic").val(node.invertTopic);
+
+            $("#node-input-iterateOnTrigger, #node-input-iterateTopic").on("input change", function () {
+                updateTipText();
+            });
+
+            // Define event listeners for form fields
+            $(
+                "#node-input-actualTopic, #node-input-setpointTopic, #node-input-pTopic, #node-input-iTopic, #node-input-dTopic, #node-input-upperLimitTopic, #node-input-lowerLimitTopic, #node-input-invertTopic"
+            ).on("input", function () {
+                updateTipText();
+            });
+
+            // Initialize topic dropdown and tip text
+            queryControllerConfig();
+            updateTipText();
+
+            // Query topics defined in read and write nodes
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-outputTopic"));
+
+                    initializeAutocomplete($("#node-input-actualTopic"));
+                    initializeAutocomplete($("#node-input-setpointTopic"));
+
+                    initializeAutocomplete($("#node-input-pTopic"));
+                    initializeAutocomplete($("#node-input-iTopic"));
+                    initializeAutocomplete($("#node-input-dTopic"));
+
+                    initializeAutocomplete($("#node-input-upperLimitTopic"));
+                    initializeAutocomplete($("#node-input-lowerLimitTopic"));
+                    initializeAutocomplete($("#node-input-invertTopic"));
+                    initializeAutocomplete($("#node-input-iterateTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            // Initialize autocomplete for topic inputs in the editable list
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            // Don't change the input value on hover/focus
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            // Call the onSelect callback if provided
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            // Return a list of topics from the controller configuration
+            // Structure: [ { key: "ABC", member: 1, topic: test/1, label: ... } ]
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                return result;
+            }
+
+            // Update the tip text based on current settings
+            function updateTipText() {
+                const topics = [
+                    $("#node-input-actualTopic").val(),
+                    $("#node-input-setpointTopic").val(),
+                    $("#node-input-pTopic").val(),
+                    $("#node-input-iTopic").val(),
+                    $("#node-input-dTopic").val(),
+                    $("#node-input-upperLimitTopic").val(),
+                    $("#node-input-lowerLimitTopic").val(),
+                    $("#node-input-invertTopic").val(),
+                    $("#node-input-iterateTopic").val()
+                ].filter((t) => t && t.trim());
+
+                const isIterateOnTrigger = $("#node-input-iterateOnTrigger").is(":checked");
+                const iterateTopic = $("#node-input-iterateTopic").val();
+
+                const tipText1 = isIterateOnTrigger
+                    ? `Iterate-on-trigger mode: steps only occur on messages to ${iterateTopic}.`
+                    : `Normal mode: steps occur on all message updates.`;
+
+                const tipText2 = `Current topics configured: ${topics.length}/9`;
+                const tipText3 = `Input formats supported: single topic messages, object messages, and nested payload objects.`;
+                const tipText4 = `Incoming message formats:
+                1. { topic: "pid/actual", payload: 0.5 }
+                2. { "pid/actual": 0.5, "pid/setpoint": 1.0, ... }
+                3. { payload: { "pid/actual": 0.5, "pid/setpoint": 1.0, ... } }`;
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+                $("#node-input-tip-text-4").text(tipText4);
+            }
+        },
+        // Save the values from the UI to the node configuration
+        oneditsave: function () {
+            const node = this;
+
+            node.name = $("#node-input-name").val();
+            node.outputTopic = $("#node-input-outputTopic").val();
+
+            node.actualTopic = $("#node-input-actualTopic").val();
+            node.setpointTopic = $("#node-input-setpointTopic").val();
+
+            node.pTopic = $("#node-input-pTopic").val();
+            node.iTopic = $("#node-input-iTopic").val();
+            node.dTopic = $("#node-input-dTopic").val();
+
+            node.upperLimitTopic = $("#node-input-upperLimitTopic").val();
+            node.lowerLimitTopic = $("#node-input-lowerLimitTopic").val();
+            node.invertTopic = $("#node-input-invertTopic").val();
+
+            node.iterateOnTrigger = $("#node-input-iterateOnTrigger").is(":checked");
+            node.iterateTopic = $("#node-input-iterateTopic").val();
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .pid-controller-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .pid-controller-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .pid-controller-div .form-row div,
+    .pid-controller-div .form-row input,
+    .pid-controller-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .pid-controller-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .pid-controller-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .pid-controller-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    /* Autocomplete widget styling */
+    .pid-controller-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .pid-controller-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+        position: relative;
+    }
+
+    .pid-controller-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+</style>
+
+<!-- Form fields are defined in the template below -->
+<script type="text/html" data-template-name="uniflex-pid-controller">
+    <div class="pid-controller-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-comment"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="" />
+            <div class="help-text">Topic name for the calculated PID output message</div>
+        </div>
+
+        <div class="form-divider"></div>
+
+        <div class="form-row">
+            <label for="node-input-actualTopic"><i class="fa fa-circle-o"></i> Actual value topic</label>
+            <input type="text" id="node-input-actualTopic" placeholder="" />
+            <div class="help-text">Topic for current process value</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-setpointTopic"><i class="fa fa-bullseye"></i> Setpoint topic</label>
+            <input type="text" id="node-input-setpointTopic" placeholder="" />
+            <div class="help-text">Topic for desired target value</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-pTopic"><i class="fa fa-sort-numeric-asc"></i> P coefficient topic</label>
+            <input type="text" id="node-input-pTopic" placeholder="" />
+            <div class="help-text">Topic for proportional gain coefficient</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-iTopic"><i class="fa fa-sort-numeric-asc"></i> I coefficient topic</label>
+            <input type="text" id="node-input-iTopic" placeholder="" />
+            <div class="help-text">Topic for integral gain coefficient</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-dTopic"><i class="fa fa-sort-numeric-asc"></i> D coefficient topic</label>
+            <input type="text" id="node-input-dTopic" placeholder="" />
+            <div class="help-text">Topic for derivative gain coefficient</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-upperLimitTopic"><i class="fa fa-arrow-up"></i> Upper limit topic</label>
+            <input type="text" id="node-input-upperLimitTopic" placeholder="" />
+            <div class="help-text">Topic for maximum output limit</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-lowerLimitTopic"><i class="fa fa-arrow-down"></i> Lower limit topic</label>
+            <input type="text" id="node-input-lowerLimitTopic" placeholder="" />
+            <div class="help-text">Topic for minimum output limit</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-invertTopic"><i class="fa fa-exchange"></i> Invert topic</label>
+            <input type="text" id="node-input-invertTopic" placeholder="" />
+            <div class="help-text">Topic for inverting error calculation</div>
+        </div>
+
+        <div class="form-divider"></div>
+
+        <div class="form-row">
+            <label for="node-input-iterateOnTrigger"><i class="fa fa-bolt"></i> Iterate on trigger</label>
+            <input type="checkbox" id="node-input-iterateOnTrigger" />
+            <div class="help-text">When enabled, the controller steps only when a message arrives on Iterate topic</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-iterateTopic"><i class="fa fa-bolt"></i> Iterate topic</label>
+            <input type="text" id="node-input-iterateTopic" placeholder="pid/iterate" />
+            <div class="help-text">Topic for external trigger (e.g., room tick). In normal mode, this field is ignored.</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+        <div class="form-tips" id="node-input-tip-text-4" style="white-space: pre-line;"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-pid-controller">
+    <p>Calculate the PID output based on the actual value, setpoint, and tuning parameters.</p>
+    <p>This node implements a PID (Proportional-Integral-Derivative) controller algorithm with anti-windup protection.</p>
+
+    <h3>Parameters</h3>
+    <dl class="message-properties">
+        <dt class="optional">name <span class="property-type">string</span></dt>
+        <dd>User-friendly name for the node</dd>
+
+        <dt>outputTopic <span class="property-type">string</span></dt>
+        <dd>The topic name for the output message containing the calculated PID value</dd>
+
+        <dt>actualTopic <span class="property-type">string</span></dt>
+        <dd>Topic name for the current process value (actual measurement)</dd>
+
+        <dt>setpointTopic <span class="property-type">string</span></dt>
+        <dd>Topic name for the desired target value (setpoint)</dd>
+
+        <dt>pTopic <span class="property-type">string</span></dt>
+        <dd>Topic name for the proportional gain coefficient (Kp)</dd>
+
+        <dt>iTopic <span class="property-type">string</span></dt>
+        <dd>Topic name for the integral gain coefficient (Ki)</dd>
+
+        <dt>dTopic <span class="property-type">string</span></dt>
+        <dd>Topic name for the derivative gain coefficient (Kd)</dd>
+
+        <dt>upperLimitTopic <span class="property-type">string</span></dt>
+        <dd>Topic name for the maximum output limit</dd>
+
+        <dt>lowerLimitTopic <span class="property-type">string</span></dt>
+        <dd>Topic name for the minimum output limit</dd>
+
+        <dt class="optional">invertTopic <span class="property-type">string</span></dt>
+        <dd>Topic name for inverting the error calculation (optional - defaults to false)</dd>
+
+        <dt class="optional">iterateOnTrigger <span class="property-type">boolean</span></dt>
+        <dd>
+            When true, the node performs a PID step only when a message arrives on <code>iterateTopic</code> (or when <code>msg.iterate===true</code>). Useful for
+            single-iteration-per-window control.
+        </dd>
+
+        <dt class="optional">iterateTopic <span class="property-type">string</span></dt>
+        <dd>Topic name for the external trigger that causes a PID step when <code>iterateOnTrigger</code> is enabled (e.g., a room tick).</dd>
+    </dl>
+
+    <h3>Inputs</h3>
+    <p>This node accepts input messages in 3 different formats (using your configured topic names):</p>
+    <dl class="message-properties">
+        <dt>Single topic format</dt>
+        <dd><code>{ topic: "your/actual/topic", payload: 0.5 }</code></dd>
+
+        <dt>Object format</dt>
+        <dd><code>{ "your/actual/topic": 0.5, "your/setpoint/topic": 1.0, ... }</code></dd>
+
+        <dt>Nested payload format</dt>
+        <dd><code>{ payload: { "your/actual/topic": 0.5, "your/setpoint/topic": 1.0, ... } }</code></dd>
+    </dl>
+
+    <h3>Trigger policy</h3>
+    <ul>
+        <li>
+            <strong>Normal mode</strong>: Only updates on <code>actualTopic</code> trigger an iteration. Changes to setpoint/tuning update internal state but take effect on the
+            next iteration.
+        </li>
+        <li>
+            <strong>Iterate-on-trigger mode</strong>: Only messages on <code>iterateTopic</code> (or with <code>msg.iterate===true</code>) trigger an iteration. Actual/setpoint
+            updates just refresh internal state.
+        </li>
+    </ul>
+
+    <h3>Output</h3>
+    <p>A successful output message includes the following properties:</p>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>The calculated PID output value</dd>
+
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>The output topic as configured in the node (if specified)</dd>
+
+        <dt>metadata <span class="property-type">object</span></dt>
+        <dd>
+            Internal variables and calculations for debugging, including:
+            <ul>
+                <li><code>actual_value</code> - current process value</li>
+                <li><code>setpoint</code> - target value</li>
+                <li><code>Kp, Ki, Kd</code> - PID coefficients</li>
+                <li><code>upper_limit, lower_limit</code> - output limits</li>
+                <li><code>invert</code> - invert flag</li>
+                <li><code>integral</code> - accumulated integral term</li>
+                <li><code>prevError, prevProcessVariable</code> - previous values</li>
+            </ul>
+        </dd>
+    </dl>
+
+    <h3>Additional details</h3>
+    <p>The PID controller maintains internal state between executions, storing previous error, process variable, integral accumulation, and timing information.</p>
+    <p>Anti-windup protection is implemented to prevent integral saturation when output limits are reached.</p>
+    <p>The derivative term is calculated based on the process variable rather than the error to avoid derivative kick.</p>
+    <p>
+        All 7 required input topics must be received before the PID calculation can begin. The invert topic is optional and defaults to false. The node will wait and display status
+        messages until all required topics are available.
+    </p>
+    <p><strong>Topic Configuration:</strong> Each PID parameter has its own dedicated topic field, allowing complete flexibility in your topic naming convention.</p>
+
+    <p>Example output message:</p>
+    <code style="white-space: pre-wrap;">
+        { "payload": 1.5, "topic": "your/output/topic", "metadata": { "actual_value": 1.0, "setpoint": 2.0, "Kp": 1.0, "Ki": 0.1, "Kd": 0.05, "upper_limit": 10, "lower_limit": -10,
+        "invert": false, "integral": 0.15, "prevError": 1.0, "prevProcessVariable": 1.0 } }
+    </code>
+</script>

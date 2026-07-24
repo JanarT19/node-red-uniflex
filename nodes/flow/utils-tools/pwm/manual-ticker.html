@@ -1,0 +1,122 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-manual-ticker", {
+        category: "uniflex utils",
+        color: "#FFF3CD",
+        icon: "font-awesome/fa-hand-pointer-o",
+        defaults: {
+            name: { value: "" },
+            topic: { value: "heating/tick" },
+            periodSec: {
+                value: 1200,
+                validate: function (v) {
+                    return Number(v) > 0;
+                }
+            }
+        },
+        inputs: 0,
+        outputs: 1,
+        label: function () {
+            return this.name || `manual ticker`;
+        },
+        paletteLabel: "manual ticker",
+        button: {
+            onclick: function () {
+                const node = this;
+                $.ajax({
+                    url: `uniflex/manual-ticker/${node.id}/inject`,
+                    type: "POST",
+                    success: function (data) {
+                        // Success - tick sent
+                    },
+                    error: function (xhr, status, error) {
+                        RED.notify("Failed to send tick: " + (xhr.responseJSON?.error || error), "error");
+                    }
+                });
+            }
+        },
+        oneditprepare: function () {
+            const node = this;
+
+            function updateTips() {
+                const topic = $("#node-input-topic").val() || "heating/tick";
+                const periodSec = Number($("#node-input-periodSec").val()) || 1200;
+                const tipText1 = `Sends a tick message to "${topic}" when triggered.`;
+                const tipText2 = `Payload: {ts: <current_unix_seconds>, periodSec: ${periodSec}}`;
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+            }
+
+            $("#node-input-topic").on("change input", updateTips);
+            $("#node-input-periodSec").on("change input", updateTips);
+            updateTips();
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .manual-ticker-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .manual-ticker-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .manual-ticker-div .form-row div,
+    .manual-ticker-div .form-row input,
+    .manual-ticker-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .manual-ticker-div .form-tips {
+        margin-top: 5px;
+        margin-bottom: 10px;
+        font-size: 11px;
+        color: #666;
+        text-align: center;
+    }
+</style>
+
+<!-- Node configuration form template -->
+<script type="text/html" data-template-name="uniflex-manual-ticker">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="e.g. Manual tick" />
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-topic"><i class="fa fa-topic"></i> Output topic</label>
+        <input type="text" id="node-input-topic" placeholder="e.g. heating/tick" />
+    </div>
+    <div class="form-tips" id="node-input-tip-text-1">Sends a tick message to the configured topic when triggered.</div>
+
+    <div class="form-row">
+        <label for="node-input-periodSec"><i class="fa fa-clock-o"></i> Period (seconds)</label>
+        <input type="number" id="node-input-periodSec" min="1" step="1" placeholder="1200" />
+    </div>
+    <div class="form-tips" id="node-input-tip-text-2">Period value included in the tick payload.</div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-manual-ticker">
+    <p>Manual PWM tick source. Click the node button in the editor to emit one tick with the current Unix timestamp and configured period. No wired input.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>None</dt>
+        <dd>Trigger only via the editor button (HTTP admin inject). Deployed flows do not receive wire inputs.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">object</span></dt>
+        <dd><code>{ ts, periodSec }</code> where <code>ts</code> is Unix seconds at send time and <code>periodSec</code> is the configured period.</dd>
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>Configured output topic (default <code>heating/tick</code>).</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>Use for testing room/floor loops without waiting for <b>clock ticker</b>. Downstream nodes that measure period from successive ticks will see elapsed wall time between button presses, not necessarily <code>periodSec</code>; the payload field still carries the configured period for nodes that read it.</p>
+</script>

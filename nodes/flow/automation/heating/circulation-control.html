@@ -1,0 +1,121 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-circulation-control", {
+        category: "uniflex home",
+        color: "#D9F99D",
+        icon: "font-awesome/fa-tachometer",
+        defaults: {
+            name: { value: "" },
+            flowTargetTopic: { value: "" },
+            measuredFlowTopic: { value: "" },
+            openFracTopic: { value: "" },
+            safeModeTopic: { value: "" },
+            testActiveTopic: { value: "" },
+            outPumpCmdTopic: { value: "" },
+            outFlowErrTopic: { value: "" },
+            kp: { value: 20, validate: RED.validators.number() },
+            ii: { value: 0.05, validate: RED.validators.number() },
+            pumpMinPct: { value: 20, validate: RED.validators.number() },
+            pumpMaxPct: { value: 100, validate: RED.validators.number() },
+            safePumpPct: { value: 30, validate: RED.validators.number() },
+            testPumpPct: { value: 80, validate: RED.validators.number() },
+            flowToPctGain: { value: 20, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () { return this.name || "circulation-control"; },
+        paletteLabel: "circulation control",
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (let i = 0; i < controllers.length; i++) {
+                    result.push.apply(result, controllers[i].formattedTopics || []);
+                }
+                return result;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = (request.term || "").toLowerCase();
+                        const topics = getTopics();
+                        const matches = topics.filter(function (item) {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function () { return false; },
+                    select: function (event, ui) {
+                        this.value = ui.item.topic || ui.item.value || ui.item.label || "";
+                        return false;
+                    }
+                });
+            }
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                [
+                    "#node-input-flowTargetTopic", "#node-input-measuredFlowTopic", "#node-input-openFracTopic",
+                    "#node-input-safeModeTopic", "#node-input-testActiveTopic",
+                    "#node-input-outPumpCmdTopic", "#node-input-outFlowErrTopic"
+                ].forEach((sel) => initializeAutocomplete($(sel)));
+            }).fail(function () {
+                _controllers = {};
+            });
+
+            const labels = $("#dialog-form label[title]");
+            if (!$("#uniflex-help-tooltip-style").length) {
+                $("head").append('<style id="uniflex-help-tooltip-style">.uniflex-help-tooltip{background:#fff8c4 !important;border:1px solid #d4b106 !important;color:#2b2b2b !important;max-width:560px !important;box-shadow:0 2px 6px rgba(0,0,0,.2) !important;padding:8px 10px !important;line-height:1.35 !important;}.uniflex-help-tooltip .ui-tooltip-content{font-size:12px !important;}</style>');
+            }
+            labels.each(function () {
+                if ($(this).data("ui-tooltip")) $(this).tooltip("destroy");
+            });
+            labels.tooltip({
+                track: false,
+                show: { delay: 150 },
+                hide: { delay: 0 },
+                position: { my: "left bottom-10", at: "left top", collision: "flipfit" },
+                classes: { "ui-tooltip": "uniflex-help-tooltip" }
+            });
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-circulation-control">
+    <div class="form-row"><label>Name</label><input type="text" id="node-input-name" /></div>
+    <h4>Inputs</h4>
+    <div class="form-row"><label title="Source: tank-control output Flow target topic">Flow target in</label><input type="text" id="node-input-flowTargetTopic" /></div>
+    <div class="form-row"><label title="Source: measured circulation flow service">Measured flow in</label><input type="text" id="node-input-measuredFlowTopic" /></div>
+    <div class="form-row"><label title="Source: open fraction estimate 0..1 (optional)">Open fraction in</label><input type="text" id="node-input-openFracTopic" /></div>
+    <div class="form-row"><label title="Source: safety-interlock safe mode topic (optional)">Safe mode in</label><input type="text" id="node-input-safeModeTopic" /></div>
+    <div class="form-row"><label title="Source: test activity topic (optional)">Test active in</label><input type="text" id="node-input-testActiveTopic" /></div>
+    <h4>Outputs</h4>
+    <div class="form-row"><label title="Destination: pump command topic (for example CPSV.1)">Pump cmd out (%)</label><input type="text" id="node-input-outPumpCmdTopic" placeholder="CPSV.1" /></div>
+    <div class="form-row"><label title="Optional output of flow error (target-measured)">Flow error out</label><input type="text" id="node-input-outFlowErrTopic" /></div>
+    <h4>Params</h4>
+    <div class="form-row"><label>Kp (pct/flow)</label><input type="number" step="0.1" id="node-input-kp" /></div>
+    <div class="form-row"><label>Ii (pct/flow*s)</label><input type="number" step="0.01" id="node-input-ii" /></div>
+    <div class="form-row"><label>Pump min %</label><input type="number" step="0.1" id="node-input-pumpMinPct" /></div>
+    <div class="form-row"><label>Pump max %</label><input type="number" step="0.1" id="node-input-pumpMaxPct" /></div>
+    <div class="form-row"><label>Safe pump %</label><input type="number" step="0.1" id="node-input-safePumpPct" /></div>
+    <div class="form-row"><label>Test pump %</label><input type="number" step="0.1" id="node-input-testPumpPct" /></div>
+    <div class="form-row"><label>Flow->pct gain (fallback)</label><input type="number" step="0.1" id="node-input-flowToPctGain" /></div>
+    <p class="form-tips">This node is new and does not replace `circ-pump-control`. Use it in parallel/testing until tuned.</p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-circulation-control">
+    <p>Flow-oriented circulation controller. Tracks flow target using PI and outputs pump command percent.</p>
+    <p>Signal format: <b>Purpose</b>, <b>Unit</b>, <b>Source</b>, <b>Destination</b>.</p>
+    <ul>
+        <li><b>Flow target in</b> -- Purpose: desired delivery level. Unit: m3/h. Source: tank-control Flow target output. Destination: PI target.</li>
+        <li><b>Measured flow in</b> -- Purpose: feedback for PI. Unit: m3/h. Source: circulation flow measurement topic. Destination: PI feedback.</li>
+        <li><b>Open fraction in</b> -- Purpose: cap pump command when loops closed. Unit: 0..1. Source: observer/open-fraction topic. Destination: command limiter.</li>
+        <li><b>Safe mode in</b> -- Purpose: force safe command profile. Unit: 0/1 or command trigger. Source: safety-interlock output. Destination: control override.</li>
+        <li><b>Test active in</b> -- Purpose: override command during tests. Unit: 0/1. Source: test status topic. Destination: control override.</li>
+        <li><b>Pump cmd out</b> -- Purpose: final pump command. Unit: %. Source: circulation-control output. Destination: pump setpoint topic (for example CPSV.1).</li>
+        <li><b>Flow error out</b> -- Purpose: diagnostic error signal. Unit: m3/h. Source: circulation-control output. Destination: monitoring/debug optional.</li>
+    </ul>
+</script>

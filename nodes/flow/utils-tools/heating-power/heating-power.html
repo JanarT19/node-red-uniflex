@@ -1,0 +1,184 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-heating-power", {
+        category: "uniflex utils",
+        color: "#FFDDCC",
+        icon: "font-awesome/fa-thermometer-half",
+        defaults: {
+            name: { value: "" },
+            supplyTopic: { value: "" },
+            returnTopic: { value: "" },
+            flowTopic: { value: "" },
+            outputTopic: { value: "" },
+            flowUnit: { value: "m3h" },
+            outputUnit: { value: "kW" },
+            cp: { value: 4186 },
+            rho: { value: 1000 },
+            inputTimeout: { value: 120 },
+            enableLog: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "heating-power";
+        },
+        paletteLabel: "heating power",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data;
+                ["#node-input-supplyTopic", "#node-input-returnTopic",
+                    "#node-input-flowTopic", "#node-input-outputTopic"].forEach(function (sel) {
+                        initAutocomplete($(sel));
+                    });
+            }).fail(function () { _controllers = {}; });
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                controllers.forEach(function (c) {
+                    if (c.formattedTopics) result.push(...c.formattedTopics);
+                });
+                return result;
+            }
+
+            function initAutocomplete(el) {
+                el.autocomplete({
+                    minLength: 0,
+                    source: function (req, resp) {
+                        const term = req.term.toLowerCase();
+                        resp(getTopics().filter(function (t) {
+                            return (t.label || "").toLowerCase().indexOf(term) >= 0;
+                        }));
+                    },
+                    focus: function (e, ui) { e.preventDefault(); },
+                    select: function (e, ui) {
+                        e.preventDefault();
+                        $(this).val(ui.item.value);
+                    }
+                }).autocomplete("instance")._renderItem = function (ul, item) {
+                    return $("<li>").append("<div>" + item.label + "</div>").appendTo(ul);
+                };
+                el.on("focus", function () {
+                    if ($(this).val() === "") $(this).autocomplete("search", "");
+                });
+            }
+
+            // Show computed K in the UI
+            function updateK() {
+                const flowUnit = $("#node-input-flowUnit").val();
+                const outputUnit = $("#node-input-outputUnit").val();
+                const cp = parseFloat($("#node-input-cp").val()) || 4186;
+                const rho = parseFloat($("#node-input-rho").val()) || 1000;
+                const flowFactor = flowUnit === "Lh" ? 1 / 1000 :
+                    flowUnit === "Lmin" ? 60 / 1000 : 1.0;
+                const outputFactor = outputUnit === "W" ? 1 : 1 / 1000;
+                const K = rho * cp / 3600 * flowFactor * outputFactor;
+                const flowLabel = flowUnit === "Lh" ? "L/h" : flowUnit === "Lmin" ? "L/min" : "m\xB3/h";
+                $("#hp-k-display").html(
+                    "\u2192 Q = flow \xD7 \u0394T \xD7 <b>" + K.toFixed(6) + "</b> " +
+                    outputUnit + "/(" + flowLabel + "\xB7\xB0C)"
+                );
+            }
+
+            $("#node-input-flowUnit, #node-input-outputUnit, #node-input-cp, #node-input-rho").on("change input", updateK);
+            updateK();
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-heating-power">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-supplyTopic"><i class="fa fa-arrow-up"></i> Supply temp topic</label>
+        <input type="text" id="node-input-supplyTopic" placeholder="e.g. THW.1">
+        <small>Inlet temperature (&deg;C in NR after read-data-streams coefficient)</small>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-returnTopic"><i class="fa fa-arrow-down"></i> Return temp topic</label>
+        <input type="text" id="node-input-returnTopic" placeholder="e.g. THW.2">
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-flowTopic"><i class="fa fa-tint"></i> Flow topic</label>
+        <input type="text" id="node-input-flowTopic" placeholder="e.g. PFLW.1">
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-flowUnit"><i class="fa fa-exchange"></i> Flow unit</label>
+        <select id="node-input-flowUnit" style="width:120px">
+            <option value="m3h">m&sup3;/h</option>
+            <option value="Lh">L/h</option>
+            <option value="Lmin">L/min</option>
+        </select>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-cp"><i class="fa fa-fire"></i> cp  J/(kg&middot;K)</label>
+        <input type="number" id="node-input-cp" style="width:90px" min="1"> &nbsp;
+        <small>Water: 4186 &nbsp; Glycol 30%: ~3800</small>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-rho"><i class="fa fa-flask"></i> &rho;  kg/m&sup3;</label>
+        <input type="number" id="node-input-rho" style="width:90px" min="1"> &nbsp;
+        <small>Water: 1000</small>
+    </div>
+
+    <div class="form-row">
+        <small id="hp-k-display" style="margin-left:110px; color:#555"></small>
+    </div>
+
+    <hr>
+
+    <div class="form-row">
+        <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+        <input type="text" id="node-input-outputTopic" placeholder="e.g. PPWW.1">
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-outputUnit"><i class="fa fa-bolt"></i> Output unit</label>
+        <select id="node-input-outputUnit" style="width:120px">
+            <option value="kW">kW</option>
+            <option value="W">W</option>
+        </select>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-inputTimeout"><i class="fa fa-clock-o"></i> Input timeout (s)</label>
+        <input type="number" id="node-input-inputTimeout" min="1" style="width:80px">
+        <small>Inputs older than this are considered stale and suppress output</small>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-enableLog"><i class="fa fa-file-text-o"></i> Logging</label>
+        <input type="checkbox" id="node-input-enableLog" style="width:auto; margin-top:6px">
+        <small style="margin-left:6px">Log each computation to NR debug console</small>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-heating-power">
+    <p>Computes hydronic heating power <b>Q = flow × (T_supply − T_return) × K</b>, mirroring iolayer <code>waterpower()</code>. K comes from cp/ρ and selected flow/output units.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Supply / return / flow topics <span class="property-type">number</span></dt>
+        <dd>Exact topic match; payload is numeric. All three must be fresh (within input timeout) before Q is published.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Power in configured unit (kW or W) on the output topic. Suppressed if any input is stale, null, or flow is negative.</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>Flow unit options: m³/h, L/h, L/min. Status shows Q, ΔT, and flow. Optional logging via enable-log checkbox.</p>
+</script>

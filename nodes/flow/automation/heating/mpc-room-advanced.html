@@ -1,0 +1,559 @@
+<script type="text/javascript">
+    console.log("*** uniflex-mpc-room-advanced UI loaded: VERSION 3.0.0-demand-forecast ***");
+
+    function optionalNumber(v) {
+        return v === "" || v === null || v === undefined || RED.validators.number()(v);
+    }
+
+    RED.nodes.registerType("uniflex-mpc-room-advanced", {
+        category: "uniflex home",
+        color: "#B8D4E3",
+        icon: "font-awesome/fa-sun-o",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    if (!v || typeof v !== "string") return true;
+                    if (/[\s#+\x00-\x1F\x7F]/.test(v)) return false;
+                    return true;
+                }
+            },
+            // Timing
+            globalTickTopic: { value: "heating/tick", required: true },
+            tickDelaySec: { value: 0, validate: RED.validators.number() },
+            roomTickTopic: { value: "" },
+
+            // Input topics
+            tRoomTopic: { value: "", required: true },
+            spRoomTopic: { value: "", required: true },
+            tOutTopic: { value: "" },
+            tsupplyTopic: { value: "" },
+            tReturnTopics: { value: "" },
+
+            // Output topics
+            tfSetOutTopic: { value: "", required: true },
+            roomLoadEstOutTopic: { value: "" },
+            ffComponentsOutTopic: { value: "" },
+            ffTotalAdjOutTopic: { value: "" },
+            healthOutTopic: { value: "" },
+
+            // Room parameters
+            floorArea: { value: 0, validate: RED.validators.number() },
+            roomMassGain: { value: 0.05, validate: optionalNumber },
+
+            // Heating curve
+            Tref: { value: 0, validate: RED.validators.number() },
+            hcOffset: { value: 26, validate: optionalNumber },
+            hcSlope: { value: 0.2, validate: optionalNumber },
+            k_e: { value: 0.5, validate: RED.validators.number() },
+            Tf_min: { value: 23, validate: RED.validators.number() },
+            Tf_max: { value: 29, validate: RED.validators.number() },
+
+            // Comfort bands
+            band_low: { value: 0.2, validate: RED.validators.number() },
+            band_high: { value: 0.4, validate: RED.validators.number() },
+
+            // Adaptive bias
+            enableAdaptiveBias: { value: true },
+            biasLearningRate: { value: 0.0001, validate: RED.validators.number() },
+            biasClamp: { value: 1.0, validate: RED.validators.number() },
+
+            // Solar & envelope - per room
+            windowArea: { value: 0, validate: RED.validators.number() },
+            windowAzimuth: { value: 180, validate: RED.validators.number() },
+            windowArea2: { value: 0, validate: optionalNumber },
+            windowAzimuth2: { value: 0, validate: optionalNumber },
+            solarCoeff: { value: 0.5, validate: RED.validators.number() },
+            opaqueArea: { value: 0, validate: RED.validators.number() },
+
+            // Solar & envelope - global
+            latitude: { value: 58.9, validate: RED.validators.number() },
+            longitude: { value: 25.6, validate: RED.validators.number() },
+            uWindow: { value: 1.0, validate: RED.validators.number() },
+            uWall: { value: 0.15, validate: RED.validators.number() },
+
+            // Adaptive FF
+            useAdaptiveFF: { value: false },
+            ffTimeLagsTopic: { value: "" },
+            ffGainsTopic: { value: "" },
+            // Shared building config (supplies learningWindowStart/End and Tbalance)
+            thermalModel: { value: "", type: "uniflex-thermal-model-config", required: false },
+            // Legacy alias for flows still linked to uniflex-heating-config (prefer thermalModel)
+            heatingConfig: { value: "", type: "uniflex-heating-config", required: false },
+            // Fallbacks when no thermalModel linked
+            learningWindowStart: { value: 2, validate: optionalNumber },
+            learningWindowEnd: { value: 4, validate: optionalNumber },
+            Tbalance: { value: 15.0, validate: optionalNumber },
+            // Persistence
+            persistencePath: { value: "/home/nodered/heating_state" },
+            ffLeadHours: { value: 6.0, validate: RED.validators.number() },
+            ffMaxAdj: { value: 3.0, validate: RED.validators.number() },
+            ffMaxTotal: { value: 3.0, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        outputLabels: ["setpoints + monitoring"],
+        label: function () {
+            return this.name || "mpc room adv";
+        },
+        paletteLabel: "mpc room adv",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            function updateTipText() {
+                const delay = $("#node-input-tickDelaySec").val() || "0";
+                const roomName = $("#node-input-name").val() || "unknown";
+                const tfSetOut = $("#node-input-tfSetOutTopic").val() || "<not set>";
+                const roomTickOut = $("#node-input-roomTickTopic").val() || `heating/${roomName}/tick`;
+                const winArea = $("#node-input-windowArea").val() || "0";
+                const winAz = $("#node-input-windowAzimuth").val() || "180";
+
+                $("#node-input-tip-text-1").text(
+                    `On tick, publishes ${roomTickOut} after ${delay}s. Setpoint: ${tfSetOut}.`
+                );
+                $("#node-input-tip-text-2").text(
+                    `Window: ${winArea}m² facing ${winAz}°. Solar FF + envelope compensation applied.`
+                );
+            }
+
+            $(
+                "#node-input-tickDelaySec, #node-input-name, #node-input-tfSetOutTopic, " +
+                "#node-input-roomTickTopic, #node-input-windowArea, #node-input-windowAzimuth"
+            ).on("input change", updateTipText);
+
+            queryControllerConfig();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON("uniflex/controller-config", function (data) {
+                    _controllers = data;
+                    [
+                        "#node-input-tRoomTopic", "#node-input-spRoomTopic",
+                        "#node-input-tOutTopic", "#node-input-tsupplyTopic",
+                        "#node-input-tReturnTopics",
+                        "#node-input-tfSetOutTopic", "#node-input-roomLoadEstOutTopic",
+                        "#node-input-ffTotalAdjOutTopic",
+                        "#node-input-ffTimeLagsTopic", "#node-input-ffGainsTopic"
+                    ].forEach(function (sel) {
+                        initializeAutocomplete($(sel));
+                    });
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+                            const matches = selection?.filter(function (obj) {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+                            response(matches);
+                        },
+                        focus: function (event) { event.preventDefault(); },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        let label = item.label;
+                        if (term) {
+                            const regex = new RegExp(
+                                "(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig"
+                            );
+                            label = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+                        return $("<li></li>")
+                            .data("ui-autocomplete-item", item)
+                            .append(`<div>${label}</div>`)
+                            .appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (const c of controllers) {
+                    result.push(...c.formattedTopics);
+                }
+                return result;
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .mpc-room-adv-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .mpc-room-adv-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .mpc-room-adv-div .form-row input,
+    .mpc-room-adv-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .mpc-room-adv-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        font-size: 0.9em;
+        color: #666;
+        margin: 5px 0;
+    }
+
+    .mpc-room-adv-div .form-tips {
+        max-width: 100% !important;
+    }
+
+    .mpc-room-adv-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 10px 0;
+    }
+
+    .mpc-room-adv-div .narrow-input {
+        width: 80px !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-mpc-room-advanced">
+    <div class="mpc-room-adv-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g. M2_air" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Timing</b>
+        <div class="form-row">
+            <label for="node-input-globalTickTopic"><i class="fa fa-clock-o"></i> Global tick</label>
+            <input type="text" id="node-input-globalTickTopic" placeholder="heating/tick" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-tickDelaySec"><i class="fa fa-hourglass-half"></i> Tick delay (s)</label>
+            <input type="number" id="node-input-tickDelaySec" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-tips">Delay after global tick before computing. Allows inputs to settle.</div>
+        <div class="form-row">
+            <label for="node-input-roomTickTopic"><i class="fa fa-share-square-o"></i> Room tick out</label>
+            <input type="text" id="node-input-roomTickTopic" placeholder="heating/{name}/tick (auto)" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Input Topics</b>
+        <div class="form-row">
+            <label for="node-input-tRoomTopic"><i class="fa fa-thermometer-half"></i> Room temp</label>
+            <input type="text" id="node-input-tRoomTopic" placeholder="e.g. TKW.2" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-spRoomTopic"><i class="fa fa-bullseye"></i> Room setpoint</label>
+            <input type="text" id="node-input-spRoomTopic" placeholder="e.g. TKW.1" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-tOutTopic"><i class="fa fa-cloud"></i> Outdoor temp</label>
+            <input type="text" id="node-input-tOutTopic" placeholder="e.g. TOUV.1" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-tsupplyTopic"><i class="fa fa-tint"></i> Supply temp</label>
+            <input type="text" id="node-input-tsupplyTopic" placeholder="optional, for load est" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-tReturnTopics"><i class="fa fa-exchange"></i> Return temps</label>
+            <input type="text" id="node-input-tReturnTopics" placeholder="comma-separated" />
+        </div>
+        <div class="form-tips">Supply + return temps needed for load estimation and adaptive bias.</div>
+
+        <div class="form-divider"></div>
+        <b>Output Topics</b>
+        <div class="form-row">
+            <label for="node-input-tfSetOutTopic"><i class="fa fa-tachometer"></i> Floor setpoint</label>
+            <input type="text" id="node-input-tfSetOutTopic" placeholder="e.g. TKW.3" title="Output topic for the floor RETURN water temperature setpoint (°C). This is sent to mpc-floor-adv which opens/closes the valve to match the measured return temp. Supply (onflow) is typically 5–8 °C higher than this value." />
+        </div>
+        <div class="form-tips">Floor setpoint = target RETURN water temp (°C). Supply (onflow) is ~5–8 °C higher.</div>
+        <div class="form-row">
+            <label for="node-input-roomLoadEstOutTopic"><i class="fa fa-fire"></i> Room load est</label>
+            <input type="text" id="node-input-roomLoadEstOutTopic" placeholder="optional" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-ffComponentsOutTopic"><i class="fa fa-pie-chart"></i> FF components out</label>
+            <input type="text" id="node-input-ffComponentsOutTopic" placeholder="Base key only, e.g. FFBW" />
+        </div>
+        <div class="form-tips">Base datastream key (NOT full topic). Node auto-appends .1 (solar W), .2 (envelope W), .3 (wind W), .4 (price W).</div>
+        <div class="form-row">
+            <label for="node-input-ffTotalAdjOutTopic"><i class="fa fa-adjust"></i> FF total adj out</label>
+            <input type="text" id="node-input-ffTotalAdjOutTopic" placeholder="e.g. TBW.5, THAW.5 (dC)" />
+        </div>
+        <div class="form-tips">Total FF adjustment in dC (deci-Celsius): environmental FF + price charge, applied to floor setpoint. For monitoring only.</div>
+        <div class="form-row">
+            <label for="node-input-healthOutTopic"><i class="fa fa-heartbeat"></i> Health out</label>
+            <input type="text" id="node-input-healthOutTopic" placeholder="optional, boolean 0/1" />
+        </div>
+        <div class="form-tips">Health output (optional).</div>
+
+        <div class="form-divider"></div>
+        <b>Room Parameters</b>
+        <div class="form-row">
+            <label for="node-input-floorArea"><i class="fa fa-th"></i> Floor area (m²)</label>
+            <input type="number" id="node-input-floorArea" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-roomMassGain"><i class="fa fa-cube"></i> Thermal mass (kWh/K/m²)</label>
+            <input type="number" id="node-input-roomMassGain" step="0.005" class="narrow-input" />
+        </div>
+        <div class="form-tips">Effective thermal mass per m²: air only ≈ 0.0009, furnished room ≈ 0.03–0.10. Default 0.05.</div>
+
+        <div class="form-divider"></div>
+        <b>Heating Curve</b>
+        <div class="form-tips">Tf_base = a + b &times; (T_ref &minus; T_out). Defines the baseline floor return water setpoint as a function of outdoor temperature. <b>Leave a and b empty to use built-in defaults (a=26&thinsp;&deg;C, b=0.2).</b> Per-room -- not shared via config node, as floor circuits may differ.</div>
+        <div class="form-row">
+            <label for="node-input-Tref"><i class="fa fa-thermometer-quarter"></i> T_ref (°C)</label>
+            <input type="number" id="node-input-Tref" step="0.1" class="narrow-input" title="Reference outdoor temperature where floor base setpoint equals 'a'. Leave empty for default 0 °C." />
+        </div>
+        <div class="form-tips">Reference outdoor temp where floor base = a. Default 0 °C.</div>
+        <div class="form-row">
+            <label for="node-input-hcOffset"><i class="fa fa-line-chart"></i> a (°C)</label>
+            <input type="number" id="node-input-hcOffset" step="0.1" class="narrow-input" title="Floor RETURN water setpoint at T_ref outdoor temperature. Leave empty for default 26 °C (supply ≈ 31-34 °C). Typical: 24-30 °C." />
+        </div>
+        <div class="form-row">
+            <label for="node-input-hcSlope"><i class="fa fa-line-chart"></i> b</label>
+            <input type="number" id="node-input-hcSlope" step="0.01" class="narrow-input" title="Heating curve slope: how much to raise floor RETURN setpoint per °C of outdoor temp drop below T_ref. Leave empty for default 0.2. Typical: 0.15-0.5." />
+        </div>
+        <div class="form-tips">a = base return temp at T_ref, b = slope. Supply (onflow) is typically 5-8 °C above return. Leave empty to use defaults (a=26, b=0.2).</div>
+        <div class="form-row">
+            <label for="node-input-k_e"><i class="fa fa-sliders"></i> k_e</label>
+            <input type="number" id="node-input-k_e" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-tips">Tf = Tf_base + k_e × (Tset − Ti) + bias + solar_ff + envelope_ff + charge_ff. Published as floor RETURN water setpoint → mpc-floor-adv controls valve to match measured return temp.</div>
+        <div class="form-row">
+            <label for="node-input-Tf_min"><i class="fa fa-angle-down"></i> Tf min (°C)</label>
+            <input type="number" id="node-input-Tf_min" step="0.1" class="narrow-input" title="Minimum floor return water setpoint. Floor supply (onflow) is typically 5–8 °C above this. 23 °C return ≈ 28–31 °C supply -- minimum useful heating in mild weather." />
+        </div>
+        <div class="form-row">
+            <label for="node-input-Tf_max"><i class="fa fa-angle-up"></i> Tf max (°C)</label>
+            <input type="number" id="node-input-Tf_max" step="0.1" class="narrow-input" title="Maximum floor return water setpoint. Floor supply (onflow) is typically 5–8 °C above this. 35 °C return ≈ 40–43 °C supply -- allows full precharging during cheap electricity hours. Floor surface stays below comfort limit since the screed acts as a thermal buffer." />
+        </div>
+        <div class="form-tips">Tf_min/max = RETURN water limits. Supply (onflow) is ~5–8 °C higher. Price charge FF shifts Tf_set within these bounds -- raise Tf_max to allow precharging.</div>
+
+        <div class="form-divider"></div>
+        <b>Comfort Bands</b>
+        <div class="form-row">
+            <label for="node-input-band_low"><i class="fa fa-compress"></i> Band low (°C)</label>
+            <input type="number" id="node-input-band_low" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-band_high"><i class="fa fa-expand"></i> Band high (°C)</label>
+            <input type="number" id="node-input-band_high" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-tips">Reserved for future demand signalling.</div>
+
+        <div class="form-divider"></div>
+        <b>Adaptive Bias</b>
+        <div class="form-row">
+            <label for="node-input-enableAdaptiveBias"><i class="fa fa-magic"></i> Enable bias</label>
+            <input type="checkbox" id="node-input-enableAdaptiveBias" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-biasLearningRate"><i class="fa fa-graduation-cap"></i> Learning rate</label>
+            <input type="number" id="node-input-biasLearningRate" step="0.00001" class="narrow-input" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-biasClamp"><i class="fa fa-arrows-h"></i> Bias clamp (°C)</label>
+            <input type="number" id="node-input-biasClamp" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-tips">Slowly learns persistent offset. Rate: step per tick, clamp: max bias.</div>
+
+        <div class="form-divider"></div>
+        <b>Solar & Envelope -- Per Room</b>
+        <div class="form-row">
+            <label for="node-input-windowArea"><i class="fa fa-columns"></i> Window area (m²)</label>
+            <input type="number" id="node-input-windowArea" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-windowAzimuth"><i class="fa fa-compass"></i> Window azimuth (°)</label>
+            <input type="number" id="node-input-windowAzimuth" step="1" class="narrow-input" />
+        </div>
+        <div class="form-tips">Primary facade. 0=N, 45=NE, 90=E, 135=SE, 180=S, 225=SW, 270=W, 315=NW. Set area=0 to disable solar FF.</div>
+
+        <div class="form-divider"></div>
+        <b>Secondary Facade (optional)</b>
+        <div class="form-row">
+            <label for="node-input-windowArea2"><i class="fa fa-columns"></i> Window area 2 (m²)</label>
+            <input type="number" id="node-input-windowArea2" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-windowAzimuth2"><i class="fa fa-compass"></i> Window azimuth 2 (°)</label>
+            <input type="number" id="node-input-windowAzimuth2" step="1" class="narrow-input" />
+        </div>
+        <div class="form-tips">For rooms with windows in two directions (e.g., staircase hall NE + SW). Leave area2=0 if not needed.</div>
+
+        <div class="form-row">
+            <label for="node-input-solarCoeff"><i class="fa fa-adjust"></i> Solar coeff</label>
+            <input type="number" id="node-input-solarCoeff" step="0.05" class="narrow-input" />
+        </div>
+        <div class="form-tips">Glass transmittance × shading (0−1). Typical 0.3−0.6. Applies to both facades.</div>
+        <div class="form-row">
+            <label for="node-input-opaqueArea"><i class="fa fa-building-o"></i> Opaque area (m²)</label>
+            <input type="number" id="node-input-opaqueArea" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-tips">Exterior walls + ceiling (top) + floor (ground). Uses U_wall. For wintergarden-adjacent rooms, include single-glass partition area.</div>
+
+        <div class="form-divider"></div>
+        <b>Solar & Envelope -- Global</b>
+        <div class="form-row">
+            <label for="node-input-latitude"><i class="fa fa-globe"></i> Latitude</label>
+            <input type="number" id="node-input-latitude" step="0.01" class="narrow-input" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-longitude"><i class="fa fa-globe"></i> Longitude</label>
+            <input type="number" id="node-input-longitude" step="0.01" class="narrow-input" />
+        </div>
+        <div class="form-tips">Site coordinates for sun position calculation.</div>
+        <div class="form-row">
+            <label for="node-input-uWindow"><i class="fa fa-columns"></i> U window (W/m²K)</label>
+            <input type="number" id="node-input-uWindow" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-tips">Window U-value. Double glazed ≈ 1.0, triple ≈ 0.6.</div>
+        <div class="form-row">
+            <label for="node-input-uWall"><i class="fa fa-building-o"></i> U wall (W/m²K)</label>
+            <input type="number" id="node-input-uWall" step="0.01" class="narrow-input" />
+        </div>
+        <div class="form-tips">Wall/ceiling/floor U-value. Well insulated ~= 0.15.</div>
+
+        <div class="form-divider"></div>
+        <b>Feedforward Parameters</b>
+        <div class="form-tips"><b>All FF gains and time lags come from datastreams (FFTxW, FFGxW)</b> published by monitoring server or iolayer. No manual entry needed.</div>
+        <div class="form-row">
+            <label for="node-input-useAdaptiveFF"><i class="fa fa-magic"></i> Enable adaptive mode</label>
+            <input type="checkbox" id="node-input-useAdaptiveFF" />
+        </div>
+        <div class="form-tips">Checkbox is informational - indicates whether monitoring server learning is active. Gains always come from FFGxW datastream.</div>
+        <div class="form-row">
+            <label for="node-input-ffTimeLagsTopic"><i class="fa fa-clock-o"></i> Time lags topic</label>
+            <input type="text" id="node-input-ffTimeLagsTopic" placeholder="e.g. FFT3W" />
+        </div>
+        <div class="form-tips">Reads .1 (tau_solar, hours) and .2 (tau_thermal, hours). Datastream coeff=3600 converts raw seconds to hours. If empty, uses fallback lead time.</div>
+        <div class="form-row">
+            <label for="node-input-ffGainsTopic"><i class="fa fa-line-chart"></i> Gains topic</label>
+            <input type="text" id="node-input-ffGainsTopic" placeholder="e.g. FFG3W" />
+        </div>
+        <div class="form-tips">Reads .1 (solar), .2 (temp), .3 (wind) in milli-units. If empty or zero, FF is disabled for that component.</div>
+
+        <div class="form-row">
+            <label for="node-input-thermalModel"><i class="fa fa-cog"></i> Building config</label>
+            <input type="text" id="node-input-thermalModel" />
+        </div>
+        <div class="form-tips">Optional. Link the shared thermal-model-config for Tbalance and FF learning window (one place for all rooms). When linked, the fields below are ignored.</div>
+
+        <div class="form-row">
+            <label for="node-input-learningWindowStart"><i class="fa fa-clock-o"></i> Learning window start (h)</label>
+            <input type="number" id="node-input-learningWindowStart" min="-1" max="23" step="1" class="narrow-input" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-learningWindowEnd"><i class="fa fa-clock-o"></i> Learning window end (h)</label>
+            <input type="number" id="node-input-learningWindowEnd" min="-1" max="23" step="1" class="narrow-input" />
+        </div>
+        <div class="form-tips">Fallback when no building config is linked. FF params accepted only in this hour window. Set both to -1 to accept at any time.</div>
+        <div class="form-row">
+            <label for="node-input-Tbalance"><i class="fa fa-thermometer-half"></i> Tbalance (°C)</label>
+            <input type="number" id="node-input-Tbalance" min="-10" max="25" step="0.5" class="narrow-input" />
+        </div>
+        <div class="form-tips">Fallback when no building config is linked. Outdoor temp above which no net heating is needed.</div>
+
+        <div class="form-divider"></div>
+        <b>Feedforward Limits</b>
+        <div class="form-row">
+            <label for="node-input-ffLeadHours"><i class="fa fa-forward"></i> Fallback lead (hours)</label>
+            <input type="number" id="node-input-ffLeadHours" step="0.5" class="narrow-input" />
+        </div>
+        <div class="form-tips">Used only if FFTxW unavailable. Typical: 4-8 hours for concrete floors.</div>
+        <div class="form-row">
+            <label for="node-input-ffMaxAdj"><i class="fa fa-arrows-v"></i> FF max adj (°C)</label>
+            <input type="number" id="node-input-ffMaxAdj" step="0.5" class="narrow-input" />
+        </div>
+        <div class="form-tips">Max individual FF term (solar, envelope, wind). Caps each term independently.</div>
+        <div class="form-row">
+            <label for="node-input-ffMaxTotal"><i class="fa fa-compress"></i> FF max total (°C)</label>
+            <input type="number" id="node-input-ffMaxTotal" step="0.1" class="narrow-input" />
+        </div>
+        <div class="form-tips">Max combined FF output (solar + envelope + wind + price charge). Controls total floor setpoint deviation from base curve.</div>
+
+        <div class="form-divider"></div>
+        <b>Persistence</b>
+        <div class="form-row">
+            <label for="node-input-persistencePath"><i class="fa fa-save"></i> Persistence path</label>
+            <input type="text" id="node-input-persistencePath" placeholder="/home/nodered/heating_state" title="Directory path only (without filename). Node saves FF params and adaptive bias here so they survive restarts without waiting for the nightly ff_learning cron." />
+        </div>
+        <div class="form-tips">Directory path only (without filename). Saves tau_solar, tau_thermal, gain_solar, gain_temp, gain_wind and Tf_bias. Restored on startup before first tick.</div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-mpc-room-advanced">
+    <p><b>MPC Room Advanced:</b> Per-room floor setpoint with solar gain feedforward and envelope heat loss compensation.</p>
+
+    <h3>Key Features</h3>
+    <ul>
+        <li><b>All mpc-room features:</b> Heating curve, adaptive bias, load estimation, tick-synchronized</li>
+        <li><b>Solar gain FF:</b> Predicts solar irradiance on room windows and reduces floor setpoint proactively</li>
+        <li><b>Envelope FF:</b> Compensates for per-room heat loss differences (window area, opaque exterior area)</li>
+        <li><b>Predictive:</b> Uses cloud cover forecast from calendar API with configurable lead time</li>
+    </ul>
+
+    <h3>Floor Setpoint Calculation</h3>
+    <ol>
+        <li><b>Base:</b> Tf_base = a + b × (Tref - Tout)</li>
+        <li><b>Trim:</b> Tf_trim = k_e × (Tset - Ti)</li>
+        <li><b>Bias:</b> Learned offset from persistent room error</li>
+        <li><b>Solar FF:</b> -ffSolarGain × Q_solar(t + lead_hours)</li>
+        <li><b>Temp FF:</b> ffTempGain × (Q_loss_room - Q_loss_avg)</li>
+        <li><b>Clamped:</b> Tf_min ≤ Tf_set ≤ Tf_max</li>
+    </ol>
+
+    <h3>Solar Gain Computation</h3>
+    <p>Computes sun position from latitude/longitude/time, then calculates direct irradiance on window facades. Supports up to 2 window orientations per room:</p>
+    <ul>
+        <li>DNI = clearSkyPeak × sin(solar_altitude)</li>
+        <li>Cloud attenuation: (1 - cloud%)^gamma</li>
+        <li>Facade incidence: cos(sun_azimuth - window_azimuth) × cos(altitude)</li>
+        <li>Q_solar = (window_area × facade_irr_1) + (window_area2 × facade_irr_2)</li>
+        <li>For rooms with windows in two directions (e.g., NE + SW), both contributions are summed</li>
+    </ul>
+
+    <h3>Envelope Compensation</h3>
+    <p>Rooms with more exterior surface (larger windows, corner rooms, top/bottom floor) lose more heat.
+    The FF raises their floor setpoint proportionally:</p>
+    <ul>
+        <li>Total window area = window_area + window_area2</li>
+        <li>Q_loss_room = (total_window_area × U_window + opaque_area × U_wall) × ΔT / 1000</li>
+        <li>Q_loss_avg = Uenv_base × ΔT / num_rooms</li>
+        <li>FF = ffTempGain × (Q_loss_room - Q_loss_avg)</li>
+        <li>For wintergarden-adjacent rooms, include single-glass partition area in opaque_area</li>
+    </ul>
+
+    <h3>Per-Room Config</h3>
+    <ul>
+        <li><b>Window area:</b> Primary facade window area (m²). Set 0 to disable solar FF.</li>
+        <li><b>Window azimuth:</b> Direction primary windows face (0=N, 90=E, 180=S, 270=W).</li>
+        <li><b>Window area 2:</b> Secondary facade window area (m²). Optional, for rooms with two orientations.</li>
+        <li><b>Window azimuth 2:</b> Direction secondary windows face. Only used if window_area2 > 0.</li>
+        <li><b>Solar coeff:</b> Glass transmittance × shading (0-1). Applies to both facades.</li>
+        <li><b>Opaque area:</b> Exterior walls + ceiling/floor exposed to outside (m²). Include wintergarden single-glass partitions.</li>
+    </ul>
+</script>

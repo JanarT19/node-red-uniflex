@@ -1,0 +1,60 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-cooling-config", {
+        category: "config",
+        color: "#B8E0F0",
+        defaults: {
+            name: { value: "Cooling config", required: true },
+            hysteresisC: { value: 0.3, validate: RED.validators.number() },
+            ecoActiveValue: { value: 1, validate: RED.validators.number() },
+            globalEnableTopic: { value: "CGOLS.1" }
+        },
+        label: function () {
+            const th = Number(this.hysteresisC);
+            const suffix = Number.isFinite(th) ? ` hyst+-${th.toFixed(1)}C` : "";
+            return (this.name || "cooling config") + suffix;
+        },
+        paletteLabel: "cooling config"
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-cooling-config">
+    <div class="form-row">
+        <label for="node-config-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-config-input-name" placeholder="perton cooling" />
+    </div>
+    <div class="form-row">
+        <label for="node-config-input-hysteresisC">Hysteresis (+-)</label>
+        <input type="number" id="node-config-input-hysteresisC" min="0" max="5" step="0.1" style="width:80px;" />
+        <span style="margin-left: 6px;">C</span>
+    </div>
+    <p style="font-size:0.85em;color:#666;margin:4px 0 10px 24%;">
+        Symmetric band for threshold mode only: cool ON above (therm SP + half GDBW.1 + hysteresis).
+        Deadband and IDU offset come from GDBW.1 / GDBW.2 (aico s!) via iolayer and io-read.
+    </p>
+    <div class="form-row">
+        <label for="node-config-input-ecoActiveValue">ECO inhibits at</label>
+        <input type="number" id="node-config-input-ecoActiveValue" min="0" step="1" style="width:80px;" />
+    </div>
+    <p style="font-size:0.85em;color:#666;margin:4px 0 10px 24%;">
+        ECO-signal value that inhibits cooling (exact match), for all linked IDU nodes.
+        ECO-active is value 1 (cooling inhibited when the ECO display signal equals 1).
+    </p>
+    <div class="form-row">
+        <label for="node-config-input-globalEnableTopic">Global disable topic</label>
+        <input type="text" id="node-config-input-globalEnableTopic" placeholder="CGOLS.1" />
+    </div>
+    <p style="font-size:0.85em;color:#666;margin:4px 0 10px 24%;">
+        CGOLS.1=1 forces all cooling off, 0=allow. Set via mypanel; persisted in dichannels on graceful shutdown.
+    </p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-cooling-config">
+    <h3>Cooling config</h3>
+    <p>Shared hysteresis and global gates for all <code>idu-cooling-control</code> nodes that link to this config.</p>
+    <p>Global deadband (GDBW.1) and IDU offset (GDBW.2) are not configured here; they come from aico global config
+        and are read on the io-read fan-out. Thermokon r283 deadband is fan-out via ai2ao (iolayer).</p>
+    <p>Add one config node per site/building, then select it on each IDU node under <b>Cooling config</b>.</p>
+    <p>Also sets the global <b>ECO inhibits at</b> value (default 1 = ECO active).</p>
+    <p><b>Global disable topic</b> (default <code>CGOLS.1</code>): 1=no cooling, 0=allow. Persisted in dichannels on graceful shutdown.</p>
+    <p>Per-room ECO inhibit comes from each IDU node's <code>E*</code> display topic (written by thermokon-flat).</p>
+</script>

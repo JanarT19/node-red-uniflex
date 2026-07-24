@@ -1,0 +1,258 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-idu-cooling-control", {
+        category: "uniflex cooling",
+        color: "#A8D8EA",
+        icon: "font-awesome/fa-snowflake-o",
+        defaults: {
+            name: { value: "" },
+            coolingConfig: { value: "", type: "uniflex-cooling-config" },
+            tempTopic: { value: "" },
+            setpointTopic: { value: "" },
+            iduSetpointTopic: { value: "" },
+            windowTopic: { value: "" },
+            ecoTopic: { value: "" },
+            coolCmdTopic: { value: "" },
+            coolValveTopic: { value: "" },
+            demandMode: { value: "threshold" },
+            hysteresisC: { value: 0.3, validate: RED.validators.number() },
+            windowOpenValue: { value: 1, validate: RED.validators.number() },
+            enableDebug: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () { return this.name || "idu cooling"; },
+        paletteLabel: "idu cooling",
+
+        oneditprepare: function () {
+            let _controllers = {};
+
+            function initAutocomplete(el) {
+                el.autocomplete({
+                    minLength: 0,
+                    source: function (req, res) {
+                        const term = (req.term || "").toLowerCase();
+                        const topics = (_controllers?.controllers || []).flatMap(c => c.formattedTopics || []);
+                        res(topics.filter(item => {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        }));
+                    },
+                    focus: function (e) { e.preventDefault(); },
+                    select: function (e, ui) {
+                        e.preventDefault();
+                        el.val(ui.item.topic || ui.item.value || ui.item.label || "");
+                    }
+                }).on("focus", function () {
+                    el.autocomplete("search", el.val() || "");
+                });
+            }
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                [
+                    "tempTopic",
+                    "setpointTopic",
+                    "iduSetpointTopic",
+                    "windowTopic",
+                    "ecoTopic",
+                    "coolCmdTopic",
+                    "coolValveTopic"
+                ].forEach(function (id) {
+                    initAutocomplete($("#node-input-" + id));
+                });
+            }).fail(function () {
+                _controllers = {};
+            });
+
+            function updateThresholdVisibility() {
+                const configId = $("#node-input-coolingConfig").val();
+                if (configId && configId !== "_ADD_") {
+                    $("#idc-local-thresholds").hide();
+                    $("#idc-using-shared").show();
+                } else {
+                    $("#idc-local-thresholds").show();
+                    $("#idc-using-shared").hide();
+                }
+            }
+            $("#node-input-coolingConfig").on("change", updateThresholdVisibility);
+            setTimeout(updateThresholdVisibility, 100);
+        }
+    });
+</script>
+
+<style type="text/css">
+    .idc-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .idc-div .form-row label {
+        width: 38% !important;
+        vertical-align: middle;
+    }
+
+    .idc-div .form-row input[type="text"] {
+        width: 42% !important;
+    }
+
+    .idc-div .form-row input[type="number"] {
+        width: 80px !important;
+        margin-left: 6px;
+    }
+
+    .idc-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .idc-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 8px 0;
+    }
+
+    .idc-div .form-tips {
+        font-size: 0.85em;
+        color: #555;
+        margin: 6px 0;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-idu-cooling-control">
+    <div class="idc-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="206 living cooling" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Temperature inputs (degrees C)</b>
+        <div class="form-row">
+            <label for="node-input-tempTopic">Actual temp</label>
+            <input type="text" id="node-input-tempTopic" placeholder="CTA206W.1" />
+            <div class="help-text">CTA/CTB member 1 (act). Single-IDU: CTA&lt;flat&gt;W. Dual living: CTB&lt;flat&gt;W.1, bed: .4</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-setpointTopic">Thermokon SP</label>
+            <input type="text" id="node-input-setpointTopic" placeholder="TAC208W.4" />
+            <div class="help-text">TAC/TBC/TCC comfort setpoint (r513): member 4 living, member 6 bed, member 2 single-room.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-iduSetpointTopic">IDU set1 write</label>
+            <input type="text" id="node-input-iduSetpointTopic" placeholder="CTA206W.3" />
+            <div class="help-text">CTA/CTB set1: r513 + GDBW.1 deadband + GDBW.2 offset. Written while cooling in valve mode.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Cool demand</b>
+        <div class="form-row">
+            <label for="node-input-demandMode">Demand mode</label>
+            <select id="node-input-demandMode" style="width:42%;">
+                <option value="threshold">threshold (temp vs SP)</option>
+                <option value="valve">valve (thermokon r5 via VAM)</option>
+            </select>
+            <div class="help-text">valve: CAC/CBC follows VAM cool member; set1 written while cooling only.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-coolValveTopic">Cool valve topic</label>
+            <input type="text" id="node-input-coolValveTopic" placeholder="VAM208W.3" />
+            <div class="help-text">VAM living cool .3 (1-room), VBM .3/.5 (2-room), VAM213W.1 kohvik. Used when demand mode=valve.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Window inhibit</b>
+        <div class="form-row">
+            <label for="node-input-windowTopic">Window sensor</label>
+            <input type="text" id="node-input-windowTopic" placeholder="A206S.1" />
+            <div class="help-text">AxxxS or BxxxW in same room. Cooling blocked while window open.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-windowOpenValue">Open value</label>
+            <input type="number" id="node-input-windowOpenValue" min="0" step="1" />
+            <div class="help-text">Payload meaning window open (default 1 = Aken avatud).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>ECO inhibit</b>
+        <div class="form-row">
+            <label for="node-input-ecoTopic">ECO signal</label>
+            <input type="text" id="node-input-ecoTopic" placeholder="E1C206W.2" />
+            <div class="help-text">E display topic (.2 living, .3 bed). Cooling blocked while ECO active (value set in cooling config, default 1).</div>
+        </div>
+        <div class="help-text" style="margin-left:0;">
+            Which payload value counts as ECO-active (inhibits cooling) is set globally in the linked cooling config, not per node.
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Control threshold</b>
+        <div class="form-row">
+            <label for="node-input-coolingConfig"><i class="fa fa-cog"></i> Cooling config</label>
+            <input type="text" id="node-input-coolingConfig" />
+            <div class="help-text">Shared enable threshold for all IDU nodes (recommended). One config per building.</div>
+        </div>
+        <p id="idc-using-shared" style="display:none;font-size:0.85em;color:#2a6;background:#eef8f0;padding:6px 8px;border-radius:4px;">
+            Using hysteresis from linked cooling config. Deadband/offset from GDBW.1 / GDBW.2 on io-read.
+        </p>
+        <div id="idc-local-thresholds">
+        <div class="form-row">
+            <label for="node-input-hysteresisC">Hysteresis (+-)</label>
+            <input type="number" id="node-input-hysteresisC" min="0" max="5" step="0.1" />
+            <span style="margin-left: 6px;">C</span>
+        </div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Cooling command output</b>
+        <div class="form-row">
+            <label for="node-input-coolCmdTopic">Cool cmd topic</label>
+            <input type="text" id="node-input-coolCmdTopic" placeholder="CAC206S.1" />
+            <div class="help-text">Single IDU: CAC&lt;flat&gt;S.1. Dual: CBC&lt;flat&gt;W.1 living, .2 bed. Value 1=on, 0=off.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-enableDebug">Debug log</label>
+            <input type="checkbox" id="node-input-enableDebug" style="width: auto;" />
+        </div>
+
+        <p class="form-tips">
+            Wire read-data-streams output to this node input, and this node output to write-data-streams.
+            Each node emits CAC/CBC cool command and CTA/CTB set1 (therm SP + GDBW deadband + offset).
+            Use one node per room zone (dual-IDU flats need separate nodes for living and bed).
+        </p>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-idu-cooling-control">
+    <h3>IDU cooling control</h3>
+    <p>Enables room IDU cooling when temperature approaches the cooling setpoint. The IDU handles fine control around the setpoint; this node only sends on/off to CAC/CBC.</p>
+
+    <h4>Datastreams (perton)</h4>
+    <ul>
+        <li><b>THT/TGT&lt;flat&gt;W</b> thermokon effective SP: .4 living, .6 bed (enable input)</li>
+        <li><b>CTA/CTB set1</b> written by this node (therm SP + GDBW.1 + GDBW.2) to iduSetpointTopic</li>
+        <li><b>CAC&lt;flat&gt;S.1</b> single-IDU cool command</li>
+        <li><b>CBC&lt;flat&gt;W.1</b> / <b>.2</b> dual-IDU living / bed cool command</li>
+        <li><b>AxxxS</b> / <b>BxxxW</b> window sensors (1 = open)</li>
+        <li><b>E1C/E2C/E2N&lt;flat&gt;W</b> E display: .2 living, .3 bed (ECO-active value set in cooling config, default 1)</li>
+        <li><b>CGOLS.1</b> global disable (1=no cooling, 0=allow), set via mypanel, persisted in dichannels</li>
+    </ul>
+
+    <h4>Shared config</h4>
+    <p>Link a <code>cooling config</code> node for shared hysteresis and CGOLS global disable.
+        Deadband (<code>GDBW.1</code>) and IDU offset (<code>GDBW.2</code>) arrive on the io-read fan-out (read-data-streams conv_coef 10 -> C).</p>
+
+    <h4>Logic</h4>
+    <ul>
+        <li>Cool ON when temp &gt; therm SP + half GDBW.1 + hysteresis; OFF below therm SP + half GDBW.1 - hysteresis</li>
+        <li>IDU setpoint (CTA/CTB set1) = therm SP + GDBW.1 + GDBW.2; synced on therm SP / GDBW change and every 60 s</li>
+        <li>Cool OFF when CGOLS disable active, window open, or E display ECO active</li>
+        <li>All temperatures in degrees C (dC conversion in read/write nodes)</li>
+    </ul>
+
+    <h4>Example flow</h4>
+    <pre>
+[read-data-streams] --&gt; [idu-cooling-control] --&gt; [write-data-streams]
+    CTA206W.1, THT206W.4, A206S.1, THE206W.2     CAC206S.1 + CTA206W.3
+    </pre>
+</script>

@@ -1,0 +1,154 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-clock-ticker", {
+        category: "uniflex utils",
+        color: "#FFF3CD",
+        icon: "font-awesome/fa-clock-o",
+        defaults: {
+            name: { value: "" },
+            periodSec: {
+                value: 1800,
+                validate: function (v) {
+                    return [60, 120, 240, 300, 600, 1200, 1800, 3600].indexOf(Number(v)) >= 0;
+                }
+            },
+            outputTopic: { value: "heating/tick" }
+        },
+        inputs: 0,
+        outputs: 1,
+        label: function () {
+            return this.name || `clock ticker`;
+        },
+        paletteLabel: "clock ticker",
+        oneditprepare: function () {
+            const node = this;
+
+            function updateTips() {
+                const p = Number($("#node-input-periodSec").val());
+                const tipText1 = `Emits a tick every ${p} seconds on wall-clock boundaries.`;
+                const tipText2 = `For example, at 00:00, 00:30, 01:00 for 1800s period.`;
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+            }
+
+            $("#node-input-periodSec").on("change input", updateTips);
+            updateTips();
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .clock-ticker-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .clock-ticker-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .clock-ticker-div .form-row div,
+    .clock-ticker-div .form-row input,
+    .clock-ticker-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .clock-ticker-div .form-row select {
+        width: 66% !important;
+    }
+
+    .clock-ticker-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .clock-ticker-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .clock-ticker-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    /* Autocomplete widget styling */
+    .clock-ticker-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .clock-ticker-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+        position: relative;
+    }
+
+    .clock-ticker-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+</style>
+
+<!-- Form fields for the node -->
+<script type="text/html" data-template-name="uniflex-clock-ticker">
+    <div class="clock-ticker-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-periodSec"><i class="fa fa-clock-o"></i> Period (s)</label>
+            <select id="node-input-periodSec">
+                <option value="60">60</option>
+                <option value="120">120</option>
+                <option value="240">240</option>
+                <option value="300">300</option>
+                <option value="600">600</option>
+                <option value="1200">1200</option>
+                <option value="1800">1800</option>
+                <option value="3600">3600</option>
+            </select>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-comment"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="heating/tick" />
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-clock-ticker">
+    <p>Automatic PWM tick source. Emits ticks aligned to local wall-clock boundaries from midnight (e.g. 00:00, 00:30, … for 1800 s).</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>None</dt>
+        <dd>No input wires. Scheduling starts when the node is deployed.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">object</span></dt>
+        <dd><code>{ ts, periodSec }</code> -- <code>ts</code> is the scheduled tick time in Unix seconds; <code>periodSec</code> is the configured period.</dd>
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>Configured output topic (default <code>heating/tick</code>).</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>Runtime accepts periods 60, 300, 600, 1200, 1800, or 3600 seconds; other values fall back to 1800. Status shows the next scheduled tick time. Wire to room-loop / global tick consumers.</p>
+</script>

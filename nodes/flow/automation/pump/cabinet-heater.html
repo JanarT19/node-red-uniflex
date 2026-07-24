@@ -1,0 +1,269 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-cabinet-heater", {
+        category: "uniflex water",
+        color: "#FFA500",
+        icon: "font-awesome/fa-fire",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9_-]+$/.test(v) && v.length <= 50;
+                }
+            },
+            tempActualTopic: { value: "T2W.1", required: true },
+            tempSetpointTopic: { value: "T2W.2", required: true },
+            heaterRelayTopic: { value: "HRS.1", required: true },
+            hysteresis: {
+                value: 0.5,
+                validate: function (v) {
+                    const num = Number(v);
+                    return !isNaN(num) && num >= 0.1 && num <= 10.0;
+                }
+            }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "cabinet heater";
+        },
+        paletteLabel: "cabinet heater",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            function updateTipText() {
+                const tempActual = $("#node-input-tempActualTopic").val() || "<not set>";
+                const tempSetpoint = $("#node-input-tempSetpointTopic").val() || "<not set>";
+                const heaterRelay = $("#node-input-heaterRelayTopic").val() || "<not set>";
+                const hysteresis = $("#node-input-hysteresis").val() || "0.5";
+
+                const tipText = `Heater (${heaterRelay}) ON when temp (${tempActual}) < setpoint (${tempSetpoint}) - ${hysteresis}°C`;
+                $("#node-input-tip-text").text(tipText);
+            }
+
+            $("#node-input-tempActualTopic, #node-input-tempSetpointTopic, #node-input-heaterRelayTopic, #node-input-hysteresis").on("input change", updateTipText);
+
+            queryControllerConfig();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-tempActualTopic"));
+                    initializeAutocomplete($("#node-input-tempSetpointTopic"));
+                    initializeAutocomplete($("#node-input-heaterRelayTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            // Ensure matches are sorted by topic
+                            matches.sort((a, b) => {
+                                const topicA = (a.topic || a.label || "").toLowerCase();
+                                const topicB = (b.topic || b.label || "").toLowerCase();
+                                return topicA.localeCompare(topicB);
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                // Sort by topic (key) alphabetically
+                return result.sort((a, b) => {
+                    const topicA = (a.topic || a.label || "").toLowerCase();
+                    const topicB = (b.topic || b.label || "").toLowerCase();
+                    return topicA.localeCompare(topicB);
+                });
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .uniflex-cabinet-heater-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .uniflex-cabinet-heater-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .uniflex-cabinet-heater-div .form-row div,
+    .uniflex-cabinet-heater-div .form-row input,
+    .uniflex-cabinet-heater-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .uniflex-cabinet-heater-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .uniflex-cabinet-heater-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .uniflex-cabinet-heater-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .uniflex-cabinet-heater-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .uniflex-cabinet-heater-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .uniflex-cabinet-heater-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    .uniflex-cabinet-heater-div input[type="text"] {
+        user-select: text !important;
+        cursor: text !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-cabinet-heater">
+    <div class="uniflex-cabinet-heater-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g., cabinet-heater" />
+            <div class="help-text">Unique identifier. Only letters, numbers, underscore, hyphen.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Temperature Inputs</b>
+
+        <div class="form-row">
+            <label for="node-input-tempActualTopic"><i class="fa fa-thermometer-half"></i> Actual temperature</label>
+            <input type="text" id="node-input-tempActualTopic" placeholder="e.g. T2W.1" />
+            <div class="help-text">Input topic for actual temperature (°C) from iolayer.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-tempSetpointTopic"><i class="fa fa-sliders"></i> Setpoint</label>
+            <input type="text" id="node-input-tempSetpointTopic" placeholder="e.g. T2W.2" />
+            <div class="help-text">Input topic for setpoint temperature (°C) from iolayer.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Heater Control</b>
+
+        <div class="form-row">
+            <label for="node-input-heaterRelayTopic"><i class="fa fa-power-off"></i> Heater relay</label>
+            <input type="text" id="node-input-heaterRelayTopic" placeholder="e.g. HRS.1" />
+            <div class="help-text">Output topic for heater relay command (0=OFF, 1=ON) to iolayer.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-hysteresis"><i class="fa fa-exchange"></i> Hysteresis (°C)</label>
+            <input type="number" id="node-input-hysteresis" step="0.1" min="0.1" max="10.0" />
+            <div class="help-text">Temperature difference for switching. Range: 0.1-10.0°C.</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-cabinet-heater">
+    <h3>Cabinet Heater</h3>
+    <p>Simple on/off heater control with hysteresis for cabinet heating.</p>
+
+    <h4>Inputs</h4>
+    <ul>
+        <li><b>Actual temperature</b> -- Current temperature (°C) from iolayer.</li>
+        <li><b>Setpoint</b> -- Target temperature (°C) from iolayer.</li>
+    </ul>
+
+    <h4>Outputs</h4>
+    <ul>
+        <li><b>Heater relay</b> -- Command to heater relay: 0=OFF, 1=ON.</li>
+    </ul>
+
+    <h4>Control Logic</h4>
+    <p><b>Heater ON</b> when: actual < setpoint - hysteresis</p>
+    <p><b>Heater OFF</b> when: actual > setpoint + hysteresis</p>
+    <p><b>No change</b> when: setpoint - hysteresis ≤ actual ≤ setpoint + hysteresis</p>
+
+    <h4>Hysteresis</h4>
+    <p>Prevents rapid cycling by creating a deadband around the setpoint.</p>
+    <p>Example with setpoint=20°C, hysteresis=0.5°C:</p>
+    <ul>
+        <li>Heater turns ON when temp < 19.5°C</li>
+        <li>Heater turns OFF when temp > 20.5°C</li>
+        <li>Between 19.5-20.5°C, heater state remains unchanged</li>
+    </ul>
+
+    <h4>Status Display</h4>
+    <p>Shows heater state, actual temperature, and setpoint.</p>
+    <ul>
+        <li><span style="color:orange">●</span> Orange: Heater ON (heating)</li>
+        <li><span style="color:green">●</span> Green: At or above setpoint</li>
+        <li><span style="color:blue">●</span> Blue: Below setpoint (waiting to heat)</li>
+        <li><span style="color:grey">●</span> Grey: No temperature data</li>
+    </ul>
+</script>

@@ -1,0 +1,642 @@
+<script type="text/html" data-template-name="uniflex-mpc-house">
+    <style>
+        .mpc-row-2col { display: flex; gap: 20px; flex-wrap: wrap; }
+        .mpc-row-2col > div { flex: 1; min-width: 200px; }
+        .mpc-row-3col { display: flex; gap: 15px; flex-wrap: wrap; }
+        .mpc-row-3col > div { flex: 1; min-width: 140px; }
+        .mpc-inline-fields { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .mpc-inline-fields label { margin-bottom: 0; white-space: nowrap; }
+        .mpc-inline-fields input { width: 70px !important; }
+        .mpc-section { margin-top: 15px; padding: 10px; background: #f8f8f8; border-radius: 4px; }
+        .mpc-tip { font-size: 11px; color: #666; margin-top: 3px; }
+        .mpc-members { font-size: 10px; color: #888; font-family: monospace; margin-left: 5px; }
+    </style>
+
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="mpc-house" />
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-thermalModel"><i class="fa fa-building"></i> Thermal Model</label>
+        <input type="text" id="node-input-thermalModel" style="width: 70%;" />
+    </div>
+    <div class="mpc-tip">
+        <strong>Required:</strong> Select or create a thermal-model-config node (click pencil icon after Node-RED restart).
+        Contains building physics (Cf, Ci, Uf), envelope (Uenv, k_wind), and heat sources (HP, Gas).
+    </div>
+
+    <hr />
+    <h4>Input Topics (from iolayer)</h4>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-tiTopic"><i class="fa fa-thermometer-half"></i> Indoor temp (Ti)</label>
+            <input type="text" id="node-input-tiTopic" placeholder="e.g. AVGW.2" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-tfTopic"><i class="fa fa-thermometer-half"></i> Floor temp (Tf)</label>
+            <input type="text" id="node-input-tfTopic" placeholder="e.g. AVGW.4 (optional)" />
+        </div>
+    </div>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-tsetAvgTopic"><i class="fa fa-bullseye"></i> Avg room setpoint</label>
+            <input type="text" id="node-input-tsetAvgTopic" placeholder="e.g. AVGW.3 (optional)" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-triggerTopic"><i class="fa fa-clock-o"></i> Hourly tick topic</label>
+            <input type="text" id="node-input-triggerTopic" placeholder="heating/tick" />
+        </div>
+    </div>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-fullRecalcTopic"><i class="fa fa-refresh"></i> Full recalc topic</label>
+            <input type="text" id="node-input-fullRecalcTopic" placeholder="heating/mpc/recalc" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-adjustmentThreshold"><i class="fa fa-sliders"></i> Adjust threshold</label>
+            <input type="number" id="node-input-adjustmentThreshold" step="0.1" style="width:70px;" /> °C
+        </div>
+    </div>
+    <div class="mpc-tip">All topics above are inputs; Ti, Tf, etc. are cached. Only <b>Hourly tick</b> and <b>Full recalc</b> trigger a run (tick throttled to 5 min). Full recalc: 2x daily to write schedule.</div>
+
+    <hr />
+    <h4>Power Input (optional, from iolayer)</h4>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-qFloorActualTopic"><i class="fa fa-flash"></i> Floor power (kW)</label>
+            <input type="text" id="node-input-qFloorActualTopic" placeholder="e.g. QFLW.1" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-qAirActualTopic"><i class="fa fa-flash"></i> Air power (kW)</label>
+            <input type="text" id="node-input-qAirActualTopic" placeholder="e.g. QAIRW.1" />
+        </div>
+    </div>
+    <div class="mpc-tip">Inputs: mpc-house reads actual floor/air power for model validation and efficiency monitoring.</div>
+
+    <hr />
+    <h4>Calendar Integration</h4>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-calendarHost"><i class="fa fa-server"></i> Calendar host</label>
+            <input type="text" id="node-input-calendarHost" placeholder="localhost" style="width: 120px;" />
+            <span style="margin-left: 5px;">:</span>
+            <input type="number" id="node-input-calendarPort" placeholder="80" style="width: 60px; margin-left: 5px;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-calendarTopic"><i class="fa fa-calendar"></i> Calendar topic</label>
+            <input type="text" id="node-input-calendarTopic" placeholder="calendar/mpc" />
+        </div>
+    </div>
+    <div class="mpc-tip">In (read): forecast and price series from calendar API. Out (write): hp_ena, gas_ena via calendar topic (wire to sql-calendar).</div>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-calendarLookbackDays" title="How far back to request calendar points (gas needs a point before horizon; dense elec grows with this). Default 10d.">Lookback (days)</label>
+            <input type="number" id="node-input-calendarLookbackDays" placeholder="10" min="1" max="62" style="width: 70px;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-calendarMaxResponseMB" title="Abort if HTTP body exceeds this size (prevents OOM / crash on huge JSON).">Max response (MB)</label>
+            <input type="number" id="node-input-calendarMaxResponseMB" placeholder="6" min="1" max="64" step="1" style="width: 70px;" />
+        </div>
+    </div>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-priceTitleElec"><i class="fa fa-bolt"></i> Elec heat price</label>
+            <input type="text" id="node-input-priceTitleElec" placeholder="heat_prc_ele" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-priceTitleGas"><i class="fa fa-fire"></i> Gas heat price</label>
+            <input type="text" id="node-input-priceTitleGas" placeholder="heat_prc_gas" />
+        </div>
+    </div>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-hpScheduleTitle"><i class="fa fa-calendar-check-o"></i> HP schedule out</label>
+            <input type="text" id="node-input-hpScheduleTitle" placeholder="hp_ena" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-gasScheduleTitle"><i class="fa fa-fire"></i> Gas schedule out</label>
+            <input type="text" id="node-input-gasScheduleTitle" placeholder="gas_ena" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-scheduleChangedOutTopic"><i class="fa fa-bell"></i> Schedule changed</label>
+            <input type="text" id="node-input-scheduleChangedOutTopic" placeholder="optional, e.g. heating/schedule/changed" title="Output topic published when the HP/gas schedule is recalculated with a genuinely different pattern (different on/off hours or timing). Wire this to diagram-creator nodes so the price and on/off charts (prices.json, onoff.json) are only regenerated when the schedule actually changes -- not on every MPC tick. payload=1 if any HP heating planned, 0 if no heating; also carries hp_hours and gas_hours fields." />
+        </div>
+        <div class="form-row">
+            <label for="node-input-persistencePath"><i class="fa fa-floppy-o"></i> Persistence path</label>
+            <input type="text" id="node-input-persistencePath" placeholder="e.g. /data/nodered" title="Directory path only (no filename). mpc-house automatically creates the file mpc-house-{name}.json inside this directory. Saves adaptive state (band adjustments, autotune, charge signal) so it survives Node-RED restarts. Leave blank to disable persistence." />
+        </div>
+        <div class="form-tips" style="margin-bottom:6px;">
+            <b>Restart recovery (optional):</b> If the calendar has no future schedule after a restart,
+            mpc-house can trigger specific fetcher nodes before running a delayed recalculation.
+            Wire the <i>output</i> of this node through a switch node that routes each topic to the relevant fetcher.
+        </div>
+        <div class="mpc-row-3col">
+            <div class="form-row">
+                <label for="node-input-priceFetcherTopic"><i class="fa fa-bolt"></i> Elec price fetcher</label>
+                <input type="text" id="node-input-priceFetcherTopic" placeholder="optional" title="Output topic that triggers the electricity price fetcher node. Only sent when future elec prices are missing from the calendar at startup." />
+            </div>
+            <div class="form-row">
+                <label for="node-input-gasPriceFetcherTopic"><i class="fa fa-fire"></i> Gas price fetcher</label>
+                <input type="text" id="node-input-gasPriceFetcherTopic" placeholder="optional" title="Output topic that triggers the gas price fetcher node. Only sent when future gas prices are missing from the calendar at startup." />
+            </div>
+            <div class="form-row">
+                <label for="node-input-weatherFetcherTopic"><i class="fa fa-cloud"></i> Weather fetcher</label>
+                <input type="text" id="node-input-weatherFetcherTopic" placeholder="optional" title="Output topic that triggers the weather forecast fetcher node. Only sent when future outdoor temperature data is missing from the calendar at startup." />
+            </div>
+        </div>
+    </div>
+    <div class="mpc-row-3col">
+        <div class="form-row">
+            <label for="node-input-tempTitle"><i class="fa fa-thermometer-half"></i> Outdoor temp</label>
+            <input type="text" id="node-input-tempTitle" placeholder="main_temp" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-windTitle"><i class="fa fa-flag"></i> Wind speed</label>
+            <input type="text" id="node-input-windTitle" placeholder="wind_speed" />
+        </div>
+    </div>
+    <div class="form-row">
+        <input type="checkbox" id="node-input-useForecastCache" style="width:auto; margin-right: 5px;" />
+        <label for="node-input-useForecastCache" style="width: auto;">Use <code>flow.forecastCache</code> for outdoor temp &amp; wind</label>
+    </div>
+    <div class="mpc-tip">When checked (default), mpc-house reuses data from the <b>forecast-cache</b> node instead of heavy calendar HTTP for <code>main_temp</code> / <code>wind_speed</code>. Falls back to calendar if cache is missing or older than ~2&nbsp;h. Prices still come from the calendar.</div>
+    <div class="mpc-tip">Reads heat prices + solar gain from calendar, writes HP and gas on/off schedules. HP used when elec ≤ gas or cooling. Gas as top-up if HP capacity limited.</div>
+
+    <hr />
+    <h4>HP Power Control</h4>
+    <div class="mpc-tip" style="background: #fff8e0; padding: 8px; margin-bottom: 10px;">
+        mpc-house publishes a supply target temperature (from heating curve + room error) for hp-control, which owns HP setpoint and low-mode writing. Hilim/Lolim are used internally for supply curve computation.
+    </div>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-supplyTargetTopic"><i class="fa fa-thermometer-half"></i> Supply target (out)</label>
+            <input type="text" id="node-input-supplyTargetTopic" placeholder="e.g. heating/mpc/supplyTarget" title="Output topic carrying the HP supply water temperature target (T_supply_curve adjusted by room error and price charge). Wire this to hp-control's 'Tank setpoint in' field. This is the primary control signal routing from mpc-house to hp-control -- NOT an iolayer datastream." />
+        </div>
+        <div class="form-row">
+            <label for="node-input-totalRoomLoadTopic"><i class="fa fa-fire"></i> Total room load (in)</label>
+            <input type="text" id="node-input-totalRoomLoadTopic" placeholder="e.g. heating/total_load" />
+        </div>
+    </div>
+    <div class="mpc-row-2col">
+        <div class="form-row">
+            <label for="node-input-hpSetpointHilim"><i class="fa fa-angle-up"></i> Hilim (°C)</label>
+            <input type="number" id="node-input-hpSetpointHilim" step="0.5" placeholder="e.g. 55" style="width:80px;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-hpSetpointLolim"><i class="fa fa-angle-down"></i> Lolim (°C)</label>
+            <input type="number" id="node-input-hpSetpointLolim" step="0.5" placeholder="e.g. 14" style="width:80px;" />
+        </div>
+    </div>
+    <div class="mpc-tip">
+        Supply target = T_supply_curve − 0.2 × room error. hp-control applies its own bias and writes final setpoints to HP controller. Total room load: sum of mpc-room "Room load est" → this node (in).
+    </div>
+
+    <hr />
+    <h4>Comfort & Optimization</h4>
+    <div class="mpc-inline-fields">
+        <label for="node-input-Tset">Tset:</label>
+        <input type="number" id="node-input-Tset" step="0.1" /> °C
+        <label for="node-input-band_low" style="margin-left: 15px;">Band -:</label>
+        <input type="number" id="node-input-band_low" step="0.1" /> °C
+        <label for="node-input-band_high" style="margin-left: 15px;">Band +:</label>
+        <input type="number" id="node-input-band_high" step="0.1" /> °C
+    </div>
+    <div class="mpc-tip">Tset = target temp (fallback if no avg setpoint topic). Bands = allowed deviation below/above Tset.</div>
+
+    <div class="mpc-inline-fields" style="margin-top: 10px;">
+        <label for="node-input-horizon">Horizon:</label>
+        <input type="number" id="node-input-horizon" /> h
+        <label for="node-input-minBlock" style="margin-left: 15px;">Min HP block:</label>
+        <input type="number" id="node-input-minBlock" title="Minimum consecutive slots the HP may run (avoids short cycling). 1 slot = one Control interval." /> slots
+    </div>
+    <div class="form-row" style="margin-top: 10px;">
+        <label for="node-input-controlInterval"><i class="fa fa-clock-o"></i> Control interval</label>
+        <select id="node-input-controlInterval" style="width: 150px;" title="Length of one slot when Price step is 0. When Price step &gt; 0, schedule runs at price step resolution.">
+            <option value="60">1 hour</option>
+            <option value="15">15 minutes</option>
+        </select>
+        <label for="node-input-priceStepMinutes" style="margin-left: 15px;">Price step (min):</label>
+        <input type="number" id="node-input-priceStepMinutes" min="0" max="60" step="15" placeholder="0" style="width: 60px;" title="0 = use Control interval. 15 = two-run: compare prices at 15 min, build HP events (min 1 h), bridge one bad slot; force low in real time when slot price &gt; gas." />
+    </div>
+    <div class="mpc-inline-fields" style="margin-top: 10px;">
+        <label for="node-input-chargeMaxDeg">Charge max:</label>
+        <input type="number" id="node-input-chargeMaxDeg" step="0.1" style="width:70px;" title="Max floor setpoint adjustment (°C) sent to rooms based on energy price. Positive during cheap hours (pre-charge), negative during expensive hours (coast). Also applied to the HP supply target when Supply charge is enabled. Recommend 3 °C." /> °C
+        &nbsp;&nbsp;
+        <label for="node-input-supplyChargeEnabled" style="width:auto;">Supply charge:</label>
+        <input type="checkbox" id="node-input-supplyChargeEnabled" style="width:auto; margin-left:4px;" title="Apply the price charge also to the HP supply target (not just room floor setpoints). Enables the HP to push more heat during cheap hours and coast during expensive hours. Recommended: ON." />
+    </div><div class="mpc-tip">
+        <b>Slot</b> = one time period. When <b>Price step</b> = 0, slot length = <b>Control interval</b>. When Price step &gt; 0 (e.g. 15), schedule uses that step: price comparison at 15 min, HP events min 1 h, one “bad” 15‑min slot can be bridged if 3‑slot average is OK (HP runs low there; no calendar low--real-time force low from current slot price).<br>
+        <b>Horizon</b> = how far ahead to plan. <b>Min HP block</b> = minimum consecutive HP run (prevents short cycling).<br>
+        <b>Charge max</b> = max floor setpoint ±adjustment (°C). With <b>Supply charge</b> ON, also shifts the HP supply target by the same amount -- making HP power inversely proportional to electricity price.<br>
+        <b>Energy-budget scheduling</b> = HP allocated to cheapest slots until demand satisfied. Gas fills longest gaps from middle outward for comfort. Always active.
+    </div>
+
+    <div class="mpc-section" id="thermal-model-summary" style="background: #f0f8ff;">
+        <strong>Thermal Model:</strong> <span id="thermal-model-name">(select above)</span><br>
+        <span id="thermal-model-details" style="font-size: 11px; color: #666;"></span>
+    </div>
+
+    <hr />
+    <h4>Adaptive Feedback</h4>
+    <div class="form-row">
+        <input type="checkbox" id="node-input-enableAdaptiveFeedback" style="width:auto; margin-right: 5px;" />
+        <label for="node-input-enableAdaptiveFeedback" style="width: auto;">Enable adaptive comfort bands</label>
+    </div>
+    <div class="mpc-inline-fields" style="margin-top: 10px;">
+        <label for="node-input-modelErrorThreshold">Threshold:</label>
+        <input type="number" id="node-input-modelErrorThreshold" step="0.1" /> °C
+        <label for="node-input-adaptiveBandRate" style="margin-left: 15px;">Rate:</label>
+        <input type="number" id="node-input-adaptiveBandRate" step="0.01" /> °C
+        <label for="node-input-maxBandAdjustment" style="margin-left: 15px;">Max adj:</label>
+        <input type="number" id="node-input-maxBandAdjustment" step="0.1" /> °C
+    </div>
+    <div class="mpc-tip">Threshold = log if error exceeds. Rate = band tightening per 6h of persistent error. Max adj = limit on adjustment.</div>
+
+    <hr />
+    <h4>Autotune Mode</h4>
+    <div class="form-row">
+        <label for="node-input-autotuneMode"><i class="fa fa-magic"></i> Learning mode</label>
+        <select id="node-input-autotuneMode" style="width: 180px;">
+            <option value="off">Off</option>
+            <option value="shadow">Shadow (monitor only)</option>
+            <option value="active">Active (apply learning)</option>
+        </select>
+    </div>
+    <div class="mpc-tip">Shadow mode computes learning telemetry only and does not change control outputs. Heat/cool autotune banks switch automatically by planned demand sign.</div>
+
+    <hr />
+    <h4>Output Datastreams (to iolayer)</h4>
+    <div class="mpc-tip" style="background: #e8f4e8; padding: 8px; margin-bottom: 10px;">
+        Out: mpc-house writes to these topics. Leave empty to disable. Create datastream in iolayer with specified member count. All values published on each MPC run.
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-outTempTopic"><i class="fa fa-thermometer-half"></i> Temperature (°C)</label>
+        <input type="text" id="node-input-outTempTopic" placeholder="e.g. MPCT" style="width: 120px;" />
+        <span class="mpc-members">5 members: .1=Ti .2=Ti_pred .3=Tset .4=Tmin .5=Tmax</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-outPowerTopic"><i class="fa fa-flash"></i> Power (kW)</label>
+        <input type="text" id="node-input-outPowerTopic" placeholder="e.g. MPCQ" style="width: 120px;" />
+        <span class="mpc-members">2 members: .1=Q_plan_total .2=Q_actual_total</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-outControlTopic"><i class="fa fa-toggle-on"></i> Control (%)</label>
+        <input type="text" id="node-input-outControlTopic" placeholder="e.g. MPCC" style="width: 120px;" />
+        <span class="mpc-members">2 members: .1=heat_allowed (0/100%) .2=efficiency (%)</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-outErrorTopic"><i class="fa fa-exclamation-triangle"></i> Error (°C)</label>
+        <input type="text" id="node-input-outErrorTopic" placeholder="e.g. MPCE" style="width: 120px;" />
+        <span class="mpc-members">3 members: .1=model_err .2=band_low_adj .3=band_high_adj</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-outUnitlessTopic"><i class="fa fa-sliders"></i> Unitless (MPCUW)</label>
+        <input type="text" id="node-input-outUnitlessTopic" placeholder="e.g. MPCUW" style="width: 120px;" />
+        <span class="mpc-members">8 members: .1=mode .2=eff_ratio .3=w_under_eff .4=w_trend_eff .5=under_ratio .6=over_ratio .7=forecast_trust .8=reserved</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-outFlagsTopic"><i class="fa fa-flag"></i> Flags (MPCGW)</label>
+        <input type="text" id="node-input-outFlagsTopic" placeholder="e.g. MPCGW" style="width: 120px;" />
+        <span class="mpc-members">8 members: .1=missing_input .2=calendar_bad .3=forecast_bad .4=forecast_trust_low .5=forced_mode .6=stale_data .7=safety_clamp .8=reserved</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-outLearningAgeTopic"><i class="fa fa-clock-o"></i> Learning Age (MPCLV)</label>
+        <input type="text" id="node-input-outLearningAgeTopic" placeholder="e.g. MPCLV" style="width: 120px;" />
+        <span class="mpc-members">single value: seconds since last learning apply</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-outQualityTopic"><i class="fa fa-line-chart"></i> Learning Quality (MPCZV)</label>
+        <input type="text" id="node-input-outQualityTopic" placeholder="e.g. MPCZV" style="width: 120px;" />
+        <span class="mpc-members">single value: data quality 0..100%</span>
+    </div>
+
+    <hr />
+    <h4>Logging & Validation</h4>
+    <div class="form-row">
+        <input type="checkbox" id="node-input-enableLogging" style="width:auto; margin-right: 5px;" />
+        <label for="node-input-enableLogging" style="width: auto;">Enable logging to Node-RED log</label>
+    </div>
+    <div class="form-row">
+        <input type="checkbox" id="node-input-verifyOutputs" style="width:auto; margin-right: 5px;" />
+        <label for="node-input-verifyOutputs" style="width: auto;">Verify output datastreams on startup</label>
+    </div>
+    <div class="mpc-tip">Output datastreams (MPC*) may not exist until first value is sent. Disable verification to avoid startup warnings.</div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-mpc-house">
+    <p><b>Model Predictive Control scheduler</b> for whole-house heating optimization.</p>
+    <p>Uses a second-order thermal model (floor mass + air) to predict indoor temperature and schedule heating during cheapest hours.</p>
+
+    <h3>How It Works</h3>
+    <ol>
+        <li>Reads current Ti/Tf, weather forecast, and energy prices from calendar</li>
+        <li>Simulates 24h ahead with different heating schedules</li>
+        <li>Picks cheapest schedule that keeps Ti within comfort bands</li>
+        <li>Publishes results to iolayer datastreams</li>
+    </ol>
+
+    <h3>Output Datastreams</h3>
+    <p>Create these datastreams in iolayer with the specified member counts:</p>
+    <table>
+        <tr><th>Topic</th><th>Members</th><th>Description</th></tr>
+        <tr><td>MPCT</td><td>5</td><td>.1=Ti_actual .2=Ti_pred .3=Tset .4=Tmin .5=Tmax (all °C)</td></tr>
+        <tr><td>MPCQ</td><td>2</td><td>.1=Q_plan_total .2=Q_actual_total (both kW)</td></tr>
+        <tr><td>MPCC</td><td>2</td><td>.1=heat_allowed (0/100%) .2=delivery_efficiency (%)</td></tr>
+        <tr><td>MPCE</td><td>3</td><td>.1=model_error .2=band_low_adj .3=band_high_adj (all °C)</td></tr>
+        <tr><td>MPCUW</td><td>8</td><td>.1=mode .2=eff_ratio .3=w_under_eff .4=w_trend_eff .5=under_ratio .6=over_ratio .7=forecast_trust .8=reserved (all unitless)</td></tr>
+        <tr><td>MPCGW</td><td>8</td><td>.1=missing_input .2=calendar_bad .3=forecast_bad .4=forecast_trust_low .5=forced_mode .6=stale_data .7=safety_clamp .8=reserved (all 0/1)</td></tr>
+        <tr><td>MPCLV</td><td>1</td><td>seconds since last learning apply</td></tr>
+        <tr><td>MPCZV</td><td>1</td><td>learning data quality (%)</td></tr>
+    </table>
+
+    <h3>Key Parameters</h3>
+    <ul>
+        <li><b>Cf</b> - Floor thermal capacity (kWh/°C). Higher = slower response. Typical: 60-100.</li>
+        <li><b>Ci</b> - Air/furniture capacity (kWh/°C). Much smaller than Cf. Typical: 30-50.</li>
+        <li><b>Uf</b> - Floor-to-air coupling (kW/°C). How fast heat moves from floor to air. Typical: 0.5-2.0.</li>
+        <li><b>Uenv</b> - Envelope loss (kW/°C). Heat loss per degree ΔT. Typical: 0.2-0.5.</li>
+        <li><b>k_wind</b> - Additional loss per m/s wind. Typical: 0.02 (adds ~70% loss at 10 m/s).</li>
+        <li><b>Q_solar</b> - Max solar gain on clear day (kW). Typical: 5-10.</li>
+    </ul>
+
+    <h3>Comfort Bands</h3>
+    <p>Tset ± bands defines the acceptable temperature range. Wider bands = more savings, less comfort.</p>
+    <ul>
+        <li>Conservative: ±0.5°C</li>
+        <li>Balanced: ±0.7°C (recommended)</li>
+        <li>Aggressive: ±1.0°C</li>
+    </ul>
+
+    <h3>Adaptive Feedback</h3>
+    <p>Compares predicted Ti with actual Ti. If predictions are consistently wrong, comfort bands tighten automatically.</p>
+
+    <h3>Dual Heat Source Scheduling</h3>
+    <p>The node schedules both heat pump (HP) and gas heating based on cost:</p>
+    <ul>
+        <li><b>Heat price comparison</b> - Uses heat_price.electricity vs heat_price.gas from calendar</li>
+        <li><b>HP capacity derating</b> - HP capacity decreases at low outdoor temperatures</li>
+        <li><b>Hybrid operation</b> - Can run both HP and gas simultaneously when needed</li>
+        <li><b>Minimum HP block</b> - Configurable minimum HP run time to prevent short cycling</li>
+    </ul>
+
+    <h3>Calendar Integration</h3>
+    <p>Reads from calendar (via sql-calendar):</p>
+    <ul>
+        <li><b>Outdoor temperature &amp; wind</b> - By default also loaded from <code>flow.forecastCache</code> (see <b>forecast-cache</b> node) when fresh (&lt;~2&nbsp;h); otherwise same series are fetched via calendar HTTP.</li>
+        <li><b>Heat prices</b> - Always from calendar HTTP today (electricity, gas). Optional future: cache in <code>flow</code> context (like <code>forecastCache</code>) after Nordpool publish to reduce load -- not implemented yet.</li>
+        <li><b>HTTP safety</b> - Configurable lookback days and max response size; oversized bodies are aborted before <code>JSON.parse</code>. Optimization is wrapped in <code>try/catch</code> so synchronous throws do not take down Node-RED (async errors and true OOM are still process-level).</li>
+        <li><b>HP enable schedule</b> - Previous hp_ena events (for avoiding rewrites)</li>
+    </ul>
+    <p>Writes to calendar:</p>
+    <ul>
+        <li><b>hp_ena</b> - Heat pump enable events with kWh value</li>
+        <li><b>gas_ena</b> - Gas heater enable events with kWh value</li>
+    </ul>
+
+    <h3>Trigger Modes</h3>
+    <ul>
+        <li><b>Hourly tick</b> - Minor adjustments to current hour only</li>
+        <li><b>Full recalc</b> - Complete re-optimization (triggered by msg.mode="full" or full recalc topic)</li>
+    </ul>
+    <p>Recommended triggers: Full recalc at 16:30 (after day-ahead prices) and 04:30 (weather update).</p>
+
+    <h3>Control Interval</h3>
+    <p>Configurable scheduling granularity:</p>
+    <ul>
+        <li><b>1 hour</b> - Traditional hourly scheduling</li>
+        <li><b>15 minutes</b> - Finer control, matches 15-min electricity prices</li>
+    </ul>
+
+    <h3>Thermal Model Config</h3>
+    <p>Select a <code>thermal-model-config</code> node to use centralized building physics parameters. If not selected, configure parameters directly in this node.</p>
+
+    <h3>Verify Outputs Option</h3>
+    <p>Disable "Verify output datastreams" if MPC* datastreams don't exist in iolayer yet. They will be created automatically when first values are sent.</p>
+</script>
+
+<script type="text/javascript">
+    console.log("*** uniflex-mpc-house UI loaded: VERSION 4.0.0-demand-forecast ***");
+
+    RED.nodes.registerType("uniflex-mpc-house", {
+        category: "uniflex home",
+        color: "#FFD580",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    if (!v || typeof v !== "string") return true;
+                    if (/[\s#+\x00-\x1F\x7F]/.test(v)) return false;
+                    return true;
+                }
+            },
+            // Input topics
+            tiTopic: { value: "", required: true },
+            tfTopic: { value: "" },
+            tsetAvgTopic: { value: "" },
+            triggerTopic: { value: "heating/tick", required: true },
+            fullRecalcTopic: { value: "heating/mpc/recalc" },
+            adjustmentThreshold: { value: 1.0 },
+            qFloorActualTopic: { value: "" },
+            qAirActualTopic: { value: "" },
+            // Calendar
+            calendarHost: { value: "localhost" },
+            calendarPort: { value: 80 },
+            calendarTopic: { value: "calendar/mpc" },
+            calendarLookbackDays: { value: 10 },
+            calendarMaxResponseMB: { value: 6 },
+            priceTitleElec: { value: "heat_prc_ele", required: true },
+            priceTitleGas: { value: "heat_prc_gas", required: true },
+            hpScheduleTitle: { value: "hp_ena" },
+            gasScheduleTitle: { value: "gas_ena" },
+            scheduleChangedOutTopic: { value: "" },
+            // Persistence & restart recovery
+            persistencePath: { value: "" },
+            priceFetcherTopic: { value: "" },
+            gasPriceFetcherTopic: { value: "" },
+            weatherFetcherTopic: { value: "" },
+            // HP Power Control
+            supplyTargetTopic: { value: "" },
+            totalRoomLoadTopic: { value: "" },
+            hpSetpointHilim: { value: null },
+            hpSetpointLolim: { value: null },
+            tempTitle: { value: "main_temp", required: true },
+            windTitle: { value: "wind_speed" },
+            useForecastCache: { value: true },
+            // Thermal model (from config node)
+            thermalModel: { value: "", type: "uniflex-thermal-model-config" },
+            // Comfort (per-node settings)
+            Tset: { value: 21.0, required: true },
+            band_low: { value: 0.5, required: true },
+            band_high: { value: 0.7, required: true },
+            horizon: { value: 24, required: true },
+            controlInterval: { value: 60 },
+            priceStepMinutes: { value: 0 },
+            minBlock: { value: 2, required: true },
+            chargeMaxDeg: { value: 3 },
+            supplyChargeEnabled: { value: true },
+            // Adaptive
+            enableAdaptiveFeedback: { value: true },
+            modelErrorThreshold: { value: 1.0, required: true },
+            adaptiveBandRate: { value: 0.05, required: true },
+            maxBandAdjustment: { value: 0.3, required: true },
+            autotuneMode: { value: "shadow" },
+            // Output datastreams (to iolayer)
+            outTempTopic: { value: "" },
+            outPowerTopic: { value: "" },
+            outControlTopic: { value: "" },
+            outErrorTopic: { value: "" },
+            outUnitlessTopic: { value: "" },
+            outFlagsTopic: { value: "" },
+            outLearningAgeTopic: { value: "" },
+            outQualityTopic: { value: "" },
+            // Logging & validation
+            enableLogging: { value: true },
+            verifyOutputs: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-building-o",
+        label: function () {
+            return this.name || "mpc house";
+        },
+        paletteLabel: "mpc house",
+
+        oneditprepare: function () {
+            let _controllers = {};
+            const node = this;
+
+            // Update thermal model summary when config changes
+            function updateThermalModelSummary() {
+                const configId = $("#node-input-thermalModel").val();
+                if (configId) {
+                    const configNode = RED.nodes.node(configId);
+                    if (configNode) {
+                        $("#thermal-model-name").text(configNode.name || "Thermal Model");
+                        $("#thermal-model-details").html(
+                            `Cf=${configNode.Cf} Ci=${configNode.Ci} Uf=${configNode.Uf} | ` +
+                            `Uenv=${configNode.Uenv_base} k_wind=${configNode.k_wind} | ` +
+                            `HP=${configNode.hp_Qmax}kW Gas=${configNode.gas_Qmax}kW | ` +
+                            `Distribution=${(configNode.Q_floor_max + configNode.Q_vent_max).toFixed(1)}kW`
+                        );
+                    } else {
+                        $("#thermal-model-name").text("(config not found)");
+                        $("#thermal-model-details").text("");
+                    }
+                } else {
+                    $("#thermal-model-name").text("(none selected - using defaults)");
+                    $("#thermal-model-details").text("Cf=80 Ci=43.3 Uf=1 | Uenv=0.311 | HP=15kW Gas=28kW");
+                }
+            }
+
+            // Update on load and when changed
+            setTimeout(updateThermalModelSummary, 100);
+            $("#node-input-thermalModel").on("change", updateThermalModelSummary);
+
+            // Query controller config for autocomplete
+            $.getJSON("uniflex/controller-config", function (data) {
+                console.log("mpc-house: Got controller config", data);
+                _controllers = data;
+
+                // Initialize autocomplete for all topic fields
+                initializeAutocomplete($("#node-input-tiTopic"));
+                initializeAutocomplete($("#node-input-tfTopic"));
+                initializeAutocomplete($("#node-input-tsetAvgTopic"));
+                initializeAutocomplete($("#node-input-qFloorActualTopic"));
+                initializeAutocomplete($("#node-input-qAirActualTopic"));
+                initializeAutocomplete($("#node-input-supplyTargetTopic"));
+                initializeAutocomplete($("#node-input-totalRoomLoadTopic"));
+
+                // For output topics, we want base names (without .N suffix)
+                initializeBaseTopicAutocomplete($("#node-input-outTempTopic"));
+                initializeBaseTopicAutocomplete($("#node-input-outPowerTopic"));
+                initializeBaseTopicAutocomplete($("#node-input-outControlTopic"));
+                initializeBaseTopicAutocomplete($("#node-input-outErrorTopic"));
+                initializeBaseTopicAutocomplete($("#node-input-outUnitlessTopic"));
+                initializeBaseTopicAutocomplete($("#node-input-outFlagsTopic"));
+                initializeBaseTopicAutocomplete($("#node-input-outLearningAgeTopic"));
+                initializeBaseTopicAutocomplete($("#node-input-outQualityTopic"));
+            }).fail(function (err) {
+                console.log("mpc-house: Failed to load controller config for autocomplete", err);
+            });
+
+            // Get all topics from controller config (same structure as floor-loop)
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (const controller of controllers) {
+                    if (controller.formattedTopics) {
+                        result.push(...controller.formattedTopics);
+                    }
+                }
+                return result;
+            }
+
+            // Get unique base topic names (for write outputs)
+            function getBaseTopics() {
+                const topics = getTopics();
+                const bases = {};
+                topics.forEach(function (t) {
+                    if (t.key) {
+                        bases[t.key] = { label: t.key, value: t.key };
+                    }
+                });
+                return Object.values(bases);
+            }
+
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const topics = getTopics();
+                        const matches = topics.filter(function (t) {
+                            return t.label && t.label.toLowerCase().indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function (event, ui) {
+                        event.preventDefault();
+                    },
+                    select: function (event, ui) {
+                        event.preventDefault();
+                        element.val(ui.item.topic);
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", element.val() || "");
+                });
+            }
+
+            function initializeBaseTopicAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const bases = getBaseTopics();
+                        const matches = bases.filter(function (t) {
+                            return t.label.toLowerCase().indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function (event, ui) {
+                        event.preventDefault();
+                    },
+                    select: function (event, ui) {
+                        event.preventDefault();
+                        element.val(ui.item.value);
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", element.val() || "");
+                });
+            }
+        }
+    });
+</script>

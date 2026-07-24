@@ -1,0 +1,2524 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-write-data-streams", {
+        category: "uniflex",
+        color: "#f5706c",
+        defaults: {
+            name: { value: "" },
+            controller: { value: "", type: "uniflex-controller", required: true },
+            outputMode: {
+                value: "",
+                validate: function (v) {
+                    return ["all", "change"].includes(v);
+                }
+            },
+            payloadType: {
+                value: "dynamic",
+                validate: function (v) {
+                    return ["static", "dynamic"].includes(v);
+                }
+            },
+            transport: {
+                value: "http",
+                validate: function (v) {
+                    return ["http", "raw_tcp"].includes(v);
+                }
+            },
+            tcpPort: {
+                value: 19080,
+                validate: function (v) {
+                    const n = parseInt(v);
+                    return Number.isInteger(n) && n > 0 && n < 65536;
+                }
+            },
+            gatingMs: {
+                value: 1500,
+                validate: function (v) {
+                    const n = parseInt(v);
+                    return Number.isInteger(n) && n >= 0;
+                }
+            }, // Gate duration in milliseconds
+            debugTopics: { value: "" }, // Comma-separated topic prefixes to debug (empty = all topics)
+            mappings: { value: [] } // Store multiple mappings
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-send",
+        label: function () {
+            const mappings = this.mappings;
+
+            let defaultName = `send data streams`;
+            if (mappings) defaultName = `send data streams: ${mappings.length}`;
+
+            return this.name || defaultName;
+        },
+        paletteLabel: function () {
+            return "send data streams";
+        },
+        oneditprepare: function () {
+            const node = this;
+            // Drop legacy transient editor fields that can bloat/slow save processing.
+            delete node._loopConflictKeys;
+            delete node._controllerCache;
+            delete node._unbindHandlers;
+            delete node._lastEditorCloseTime;
+
+            // Reopen detection removed: normal reopen after save/deploy was being falsely flagged.
+
+            // VERSION MARKER: 2026-02-08 v5 - render rows ONLY after AJAX completes
+
+
+            let _controller = {};
+            let _lastControllerId = null;
+            let _controllerReq = null; // Track AJAX request so we can abort it
+            let _keySuggestionsCache = [];
+            let _plusRefreshTimer = null;
+
+            // Load existing mappings or initialize an empty array
+            const mappings = node.mappings || [];
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-controller").val(node.controller);
+            $("#node-input-outputMode").val(node.outputMode);
+            $("#node-input-payloadType").val(node.payloadType);
+            $("#node-input-transport").val(node.transport || "http");
+            $("#node-input-tcpPort").val(node.tcpPort || 19080);
+            $("#node-input-gatingMs").val(node.gatingMs);
+            $('#node-input-debugTopics').val(node.debugTopics || "");
+
+            // Namespaced selectors for binding/unbinding
+            const controllerSelector = "#node-input-controller";
+            const changeSelectors = "#mappings-container, #node-input-payloadType, #node-input-outputMode";
+            const payloadTypeSelector = "#node-input-payloadType";
+            const loadingSelector = "#write-ds-loading";
+            const mappingsSelector = "#mappings-container";
+            const mappingsOverlaySelector = "#write-ds-mappings-overlay";
+            let loadingStartedAt = 0;
+            let loadingHideTimer = null;
+            const MIN_LOADING_VISIBLE_MS = 450;
+
+            function setLoadingState(isLoading, text) {
+                const $loading = $(loadingSelector);
+                const $mappings = $(mappingsSelector);
+                const $overlay = $(mappingsOverlaySelector);
+                if (!$loading.length || !$mappings.length || !$overlay.length) return;
+                if (isLoading) {
+                    if (loadingHideTimer) {
+                        clearTimeout(loadingHideTimer);
+                        loadingHideTimer = null;
+                    }
+                    loadingStartedAt = Date.now();
+                    $loading.find(".write-ds-loading-text").text(text || "Loading...");
+                    $loading.show();
+                    $mappings.addClass("write-ds-loading-dim");
+                    $overlay.show();
+                } else {
+                    const elapsed = Date.now() - loadingStartedAt;
+                    const delay = Math.max(0, MIN_LOADING_VISIBLE_MS - elapsed);
+                    const hideNow = () => {
+                        $loading.hide();
+                        $mappings.removeClass("write-ds-loading-dim");
+                        $overlay.hide();
+                    };
+                    if (delay > 0) {
+                        loadingHideTimer = setTimeout(() => {
+                            loadingHideTimer = null;
+                            hideNow();
+                        }, delay);
+                    } else {
+                        hideNow();
+                    }
+                }
+            }
+
+            function bindEditorHandlers() {
+                $(controllerSelector).off(".writeDsCtrl").on("change.writeDsCtrl", queryControllerConfig);
+
+                $(changeSelectors).off(".writeDsChange").on("change.writeDsChange", function () {
+                    updateTipText();
+                });
+
+                $(payloadTypeSelector).off(".writeDsPayload").on("change.writeDsPayload", function () {
+                    const rows = getListElements();
+                    for (const elements of rows) {
+                        populatePayload(elements);
+                        validatePayload(elements);
+                    }
+                });
+            }
+
+            function unbindEditorHandlers() {
+                $(controllerSelector).off(".writeDsCtrl");
+                $(changeSelectors).off(".writeDsChange");
+                $(payloadTypeSelector).off(".writeDsPayload");
+            }
+
+            // Bind once per editor open
+            bindEditorHandlers();
+
+            // Initialize the form fields
+            let currentSortColumn = "topic"; // Declare at function scope level
+            initializeEditableList();
+
+            // Query variables related to controller configuration
+            function queryControllerConfig() {
+                const controllerId = $("#node-input-controller").val();
+
+                if (_lastControllerId === controllerId) {
+                    return;
+                }
+                _lastControllerId = controllerId;
+
+                // If controller is not selected yet, just render existing mappings (no dropdown options available)
+                if (!controllerId) {
+                    $("#mappings-container").editableList("empty");
+                    $("#mappings-container").editableList("addItems", mappings);
+                    updateTipText();
+                    try {
+                        triggerSort();
+                        scheduleRefreshAllPlusButtons();
+                    } finally {
+                        requestAnimationFrame(() => setLoadingState(false));
+                    }
+                    return;
+                }
+
+                // Abort any in-flight request
+                if (_controllerReq && typeof _controllerReq.abort === "function") {
+                    _controllerReq.abort();
+                }
+
+                setLoadingState(true, "Loading controller config...");
+
+                _controllerReq = $.ajax({
+                    url: `uniflex/controller-config?id=${controllerId}`,
+                    dataType: 'json',
+                    timeout: 10000 // 10 second timeout to prevent long hangs
+                })
+                    .done(function (data) {
+                        _controller = data;
+                        rebuildKeySuggestionsCache();
+                    })
+                    .fail(function (jqXHR, textStatus, errorThrown) {
+                        RED.notify("Failed to query controller configuration!", { type: "error", timeout: 3000 });
+                        _controller = {};
+                        _keySuggestionsCache = [];
+                    })
+                    .always(function () {
+                        const channelCount = Object.keys(_controller?.channels || {}).length;
+
+                        // Check if request was aborted
+                        if (_controllerReq && (_controllerReq.statusText === "abort" || _controllerReq.readyState === 0)) {
+                            setLoadingState(false);
+                            return;
+                        }
+
+                        // Check if dialog is still visible
+                        try {
+                            const $dlgCheck = $("#dialog-form");
+                            const isVisible = $dlgCheck.is(":visible");
+                            if (!isVisible) {
+                                setLoadingState(false);
+                                return;
+                            }
+                        } catch (e) {
+                            setLoadingState(false);
+                            return;
+                        }
+
+                        try {
+                            $("#mappings-container").editableList("empty");
+                            $("#mappings-container").editableList("addItems", mappings);
+                            updateTipText();
+                            triggerSort();
+                            scheduleRefreshAllPlusButtons();
+                        } catch (e) {
+                            // no-op
+                        } finally {
+                            requestAnimationFrame(() => setLoadingState(false));
+                        }
+                    });
+            }
+
+            function rebuildKeySuggestionsCache() {
+                const channels = _controller?.channels || {};
+                const filteredServices = _controller?.filteredServices || {};
+                const sortSource = {};
+                Object.keys(channels).forEach((key) => {
+                    sortSource[key] = filteredServices[key] || { servicename: key };
+                });
+                const keys = sortKeysByServiceNames(sortSource);
+                _keySuggestionsCache = keys.map((key) => {
+                    const serviceName = filteredServices[key]?.servicename || key;
+                    return {
+                        key,
+                        label: `${serviceName} (${key})`,
+                        value: key
+                    };
+                });
+            }
+
+            // IMPORTANT: Fetch controller data FIRST, then render rows
+            // This ensures dropdowns have data when rows are created
+            const initialControllerId = $("#node-input-controller").val();
+
+            if (initialControllerId) {
+                // Show loading state - don't render rows yet
+                setLoadingState(true, "Loading controller config...");
+                $("#mappings-container").editableList("empty");
+                queryControllerConfig(); // This will render rows in .always() callback
+            } else {
+                // No controller selected - render rows immediately (will have empty dropdowns)
+                $("#mappings-container").editableList("empty");
+                $("#mappings-container").editableList("addItems", mappings);
+                updateTipText();
+                try {
+                    triggerSort();
+                    scheduleRefreshAllPlusButtons();
+                } finally {
+                    requestAnimationFrame(() => setLoadingState(false));
+                }
+            }
+
+            // --- Helpers for 'Add next' & 'Add all' ---
+            function readAllRows() {
+                const rows = [];
+                $("#mappings-container")
+                    .editableList("items")
+                    .each(function () {
+                        const c = $(this);
+                        rows.push({
+                            keyNameSelect: c.find(".node-input-keyNameSelect").val() || "",
+                            keyNameManual: c.find(".node-input-keyNameManual").val() || "",
+                            index: parseInt(c.find(".node-input-index").val() || "0", 10) || 0
+                        });
+                    });
+                return rows;
+            }
+            function getUsedIndicesForKey(key) {
+                const rows = readAllRows();
+                return new Set(
+                    rows
+                        .filter((r) => (r.keyNameSelect || r.keyNameManual) === key)
+                        .map((r) => r.index)
+                        .filter((n) => Number.isInteger(n) && n > 0)
+                );
+            }
+            function computeMissingForKey(key) {
+                const used = Array.from(getUsedIndicesForKey(key)).sort((a, b) => a - b);
+                const missing = [];
+                let expect = 1;
+                for (const n of used) {
+                    while (expect < n) {
+                        missing.push(expect);
+                        expect++;
+                    }
+                    expect = n + 1;
+                }
+                // also offer the immediate next
+                missing.push(expect);
+                return missing;
+            }
+            // Loop detection in editor - find conflicting keys across ALL flows
+            // Store on node object so it's accessible in oneditsave
+            // TEMPORARILY DISABLED FOR DIAGNOSTIC: test if this causes the reopen
+            /*
+            if (!node._loopConflictKeys) {
+                node._loopConflictKeys = new Set();
+            }
+
+            let loopConflictKeys = node._loopConflictKeys;
+
+            function detectLoopsInEditor() {
+                loopConflictKeys.clear();
+                const writeKeys = new Set();
+
+                // Get keys from current node's mappings
+                const currentMappings = node.mappings || [];
+                currentMappings.forEach((m) => {
+                    const key = m.keyNameSelect || m.keyNameManual;
+                    if (key) writeKeys.add(key);
+                });
+
+                // Find read nodes in ANY flow (cross-tab via link nodes)
+                RED.nodes.eachNode(function (otherNode) {
+                    if (otherNode.type === "uniflex-read-data-streams") {
+                        const readMappings = otherNode.mappings || [];
+                        readMappings.forEach((m) => {
+                            const key = m.keyNameSelect || m.keyNameManual;
+                            if (key && writeKeys.has(key)) {
+                                loopConflictKeys.add(key);
+                            }
+                        });
+                    }
+                });
+
+
+            }
+
+            // Run loop detection
+            detectLoopsInEditor();
+
+            // Show warning banner if loops detected
+            if (loopConflictKeys.size > 0) {
+                const banner = $(`<div class="loop-warning-banner" style="margin:0 0 15px 0;width:100%;max-width:none;">
+                    <div style="background-color:#fff3cd;border:2px solid #ff9800;border-radius:4px;padding:10px;box-sizing:border-box;">
+                        <div style="display:flex;align-items:flex-start;gap:12px;">
+                            <i class="fa fa-exclamation-triangle" style="color:#ff9800;font-size:18px;flex-shrink:0;margin-top:2px;"></i>
+                            <div style="flex:1;min-width:0;overflow:hidden;">
+                                <strong style="color:#856404;font-size:13px;display:block;margin-bottom:8px;">Potential Feedback Loop Detected!</strong>
+                                <div style="color:#856404;margin-bottom:10px;word-break:break-word;white-space:normal;">
+                                    Found potential loops for: <strong>${Array.from(loopConflictKeys).join(", ")}</strong>
+                                </div>
+                                <div style="color:#856404;font-size:85%;line-height:1.5;white-space:normal;">
+                                    <strong>Note:</strong> This detection compares topics only, not actual wiring. If these nodes are not connected, no loop exists.
+                                </div>
+                                <div style="color:#856404;margin-top:8px;font-size:85%;line-height:1.5;white-space:normal;">
+                                    <strong>If there IS a loop, options to prevent rapid updates:</strong>
+                                    <ul style="margin:4px 0 0 0;padding-left:20px;">
+                                        <li>Enable "Gate loop" checkbox for these topics (recommended), or</li>
+                                        <li>Remove looping datastream members from read or write node</li>
+                                    </ul>
+                                </div>
+                                <div style="margin-top:12px;padding-top:12px;border-top:1px solid #e0b95f;">
+                                    <button type="button" id="analyze-flow-btn" class="red-ui-button" style="background:#ff9800;color:white;font-weight:bold;">
+                                        <i class="fa fa-search"></i> Analyze Actual Flow Wiring
+                                    </button>
+                                    <span id="analyze-flow-msg" style="margin-left:10px;font-size:85%;color:#856404;"></span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>`);
+
+                $("#node-input-gatingMs").closest(".form-row").after(banner);
+
+                // Add handler for Analyze Flow button
+                $("#analyze-flow-btn").off(".writeDsAnalyze").on("click.writeDsAnalyze", function () {
+                    const analyzerNodes = [];
+                    RED.nodes.eachNode(function (n) {
+                        if (n.type === "uniflex-flow-analyzer") {
+                            analyzerNodes.push(n);
+                        }
+                    });
+
+                    if (analyzerNodes.length === 0) {
+                        $("#analyze-flow-msg")
+                            .html('<i class="fa fa-info-circle"></i> No Flow Analyzer node found. Add a "uniflex-flow-analyzer" node to your workspace for deep analysis.')
+                            .css("color", "#d9534f");
+                        setTimeout(() => $("#analyze-flow-msg").fadeOut(), 5000);
+                    } else {
+                        const analyzer = analyzerNodes[0];
+                        $("#analyze-flow-msg").html('<i class="fa fa-spinner fa-spin"></i> Running deep flow analysis...').css("color", "#5cb85c").show();
+
+                        // Trigger the analyzer node
+                        $.ajax({
+                            url: "inject/" + analyzer.id,
+                            type: "POST",
+                            success: function (resp) {
+                                $("#analyze-flow-msg").html('<i class="fa fa-check"></i> Analysis complete! Check the Flow Analyzer node output.').css("color", "#5cb85c");
+                                setTimeout(() => $("#analyze-flow-msg").fadeOut(), 3000);
+                            },
+                            error: function (jqXHR, textStatus, errorThrown) {
+                                let errMsg = "Analysis failed";
+                                if (jqXHR.status == 404) {
+                                    errMsg = "Flow Analyzer node not deployed yet. Deploy first, then try again.";
+                                } else if (jqXHR.status == 500) {
+                                    errMsg = "Analysis error: " + textStatus;
+                                }
+                                $("#analyze-flow-msg")
+                                    .html('<i class="fa fa-exclamation-triangle"></i> ' + errMsg)
+                                    .css("color", "#d9534f");
+                                setTimeout(() => $("#analyze-flow-msg").fadeOut(), 5000);
+                            }
+                        });
+                    }
+                });
+            }
+            */
+            // Temporary: empty set so rest of code doesn't break
+            let loopConflictKeys = new Set();
+
+            // Initialize the EditableList widget
+            function initializeEditableList() {
+                $("#mappings-container").editableList({
+                    removable: true,
+                    sortable: true,
+                    header: $("<div>").append(
+                        $.parseHTML(`
+                        <div style="width:22px"></div>
+                        <div class="write-data-streams-list" style="text-align:center;white-space:normal;flex:1">
+                            <div class="node-input-topic" id="sort-header-topic" style="cursor:pointer;user-select:none;">
+                                Topic <span class="sort-triangle" id="sort-triangle-topic">&#9650;</span>
+                            </div>
+                            <span class="node-input-arrow">&nbsp;&nbsp;</span>
+                            <div class="checkbox-container">Manual</div>
+                            <div class="checkbox-container">Gate loop</div>
+                            <div class="node-input-keyNameManual" id="sort-header-datastream" style="cursor:pointer;user-select:none;">
+                                Data stream name <span class="sort-triangle" id="sort-triangle-datastream">&#9650;</span>
+                            </div>
+                            <div class="node-input-index">Member index</div>
+                            <div class="node-input-channelType">Channel type</div>
+                            <div class="node-input-coefficient">Coefficient</div>
+                            <div class="node-input-payload">Payload</div>
+                            <div class="row-actions"></div>
+                         </div>
+                         <div style="width:28px"></div>
+                    `)
+                    ),
+                    buttons: [
+                        {
+                            label: "delete all",
+                            icon: "fa fa-trash",
+                            title: "delete all data stream mappings",
+                            click: function (e) {
+                                $("#mappings-container").editableList("empty");
+                                updateTipText();
+                            }
+                        },
+                        {
+                            label: "auto-generate entries",
+                            icon: "fa fa-refresh",
+                            title: "automatically generate rows for all available controller data streams",
+                            click: function (e) {
+                                const hasServices = (_controller.channels && Object.keys(_controller.channels).length > 0) ||
+                                    (_controller.filteredServices && Object.keys(_controller.filteredServices).length > 0);
+
+                                if (!hasServices) {
+                                    RED.notify("No available data streams to auto-generate mappings!", { type: "warning", timeout: 3000 });
+                                    return;
+                                }
+
+                                autoGenerateMappings();
+                            }
+                        }
+                    ],
+                    addItem: function (container, index, row) {
+                        addRowElements(container, row);
+
+                        const el = getRowElements(container);
+                        formatRow(el, row);
+                        attachRowEvents(el, container);
+
+                        // Initialize autocomplete for the topic input in this row
+                        initializeAutocomplete(el.topicElement, onAutocompleteSelect);
+
+                        // Add refresh for plus button
+                        refreshPlusButtonFor(container);
+                        scheduleRefreshAllPlusButtons();
+
+                        updateTipText();
+                    },
+                    removeItem: function (data) {
+                        // Called after successful removal
+                        updateTipText();
+                        scheduleRefreshAllPlusButtons();
+                    }
+                });
+
+                // Initialize sorting functionality
+                setTimeout(function () {
+                    $("#sort-header-datastream").on("click", function () {
+                        currentSortColumn = "datastream";
+                        updateSortIndicators();
+                        triggerSort();
+                    });
+
+                    $("#sort-header-topic").on("click", function () {
+                        currentSortColumn = "topic";
+                        updateSortIndicators();
+                        triggerSort();
+                    });
+
+                    updateSortIndicators();
+                }, 100);
+            }
+
+            function updateSortIndicators() {
+                $(".sort-triangle").removeClass("active");
+                $(`#sort-triangle-${currentSortColumn}`).addClass("active");
+            }
+
+            function refreshAllPlusButtons() {
+                const $items = $("#mappings-container").editableList("items");
+
+                // Pre-compute used indices per key once so refreshPlusButtonFor
+                // doesn't have to walk all rows again for each row (avoids O(N2)).
+                const usedByKey = {};
+                $items.each(function () {
+                    const c = $(this);
+                    const el = getRowElements(c);
+                    const manual = el.manualElement?.is(":checked");
+                    const key = manual ? el.keyManualElement.val() : el.keySelectElement.val();
+                    const idx = parseInt(el.indexElement.val(), 10);
+                    if (key && Number.isInteger(idx) && idx > 0) {
+                        if (!usedByKey[key]) usedByKey[key] = [];
+                        usedByKey[key].push(idx);
+                    }
+                });
+                Object.keys(usedByKey).forEach(k => {
+                    usedByKey[k] = [...new Set(usedByKey[k])].sort((a, b) => a - b);
+                });
+
+                $items.each(function () {
+                    refreshPlusButtonFor($(this), usedByKey);
+                });
+            }
+
+            function scheduleRefreshAllPlusButtons() {
+                if (_plusRefreshTimer) clearTimeout(_plusRefreshTimer);
+                _plusRefreshTimer = setTimeout(() => {
+                    _plusRefreshTimer = null;
+                    refreshAllPlusButtons();
+                }, 0);
+            }
+
+            function refreshPlusButtonFor(container, usedByKey) {
+                // remove any existing old-style helpers and new dropdowns
+                container.find(".add-member-dropdown").remove();
+                container.find(".add-member-btn").remove();
+                container.find(".add-member-menu").remove();
+                container.find(".index-helpers").remove(); // Remove old style buttons
+
+                const el = getRowElements(container);
+                const manual = el.manualElement?.is(":checked");
+                if (manual) {
+                    return;
+                }
+
+                const key = el.keySelectElement.val();
+                const idx = parseInt(el.indexElement.val(), 10);
+
+                if (!key || !Number.isInteger(idx)) {
+                    return;
+                }
+
+                // Get all members for this datastream
+                const allUsedForThisKey = usedByKey?.[key] ?? getUsedIndicesForDataStream(key);
+
+                // Use channels directly (like read node) so member count comes from
+                // multiperf length, not formattedTopics which only lists already-mapped members.
+                const allAvailableForThisKey = getWritableMemberIndicesForKey(key);
+
+                const missingForThisKey = allAvailableForThisKey.filter((i) => !allUsedForThisKey.includes(i));
+
+                // Find max used index to know if this is the last member
+                const maxUsedIndex = allUsedForThisKey.length > 0 ? Math.max(...allUsedForThisKey) : 0;
+                const isLastMember = idx === maxUsedIndex;
+
+                // Only show button if this is the last member AND there are missing members
+                if (!isLastMember || missingForThisKey.length === 0) {
+                    return;
+                }
+
+                // Find the next missing member AFTER the current index (like read node)
+                const nextMissingIndex = missingForThisKey.find((i) => i > idx);
+
+                if (!nextMissingIndex) {
+                    return; // No next member available
+                }
+
+                // Custom chooser (no native select popup): "+" opens a mini menu below the button
+                const actionsDiv = container.find(".row-actions");
+                const plusBtn = $('<button type="button" class="add-member-btn" title="Add members">+</button>');
+                plusBtn.on("click", function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+
+                    // Toggle existing menu
+                    if ($(".write-ds-add-menu").length) {
+                        $(".write-ds-add-menu").remove();
+                        $(document).off("mousedown.writeDsAddMenu");
+                        return;
+                    }
+
+                    const menu = $('<div class="write-ds-add-menu"></div>');
+                    const nextItem = $(`<button type="button" class="write-ds-add-item">Add next member (${nextMissingIndex})</button>`);
+                    nextItem.on("click", function (ev) {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        menu.remove();
+                        addNextMember(key, nextMissingIndex);
+                    });
+                    menu.append(nextItem);
+
+                    if (missingForThisKey.length > 1) {
+                        const allItem = $(`<button type="button" class="write-ds-add-item">Add all missing (${missingForThisKey.length})</button>`);
+                        allItem.on("click", function (ev) {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            menu.remove();
+                            const currentlyUsed = getUsedIndicesForDataStream(key);
+                            const allAvailableForThisKey = getWritableMemberIndicesForKey(key);
+                            const actuallyMissingNow = allAvailableForThisKey.filter((i) => !currentlyUsed.includes(i));
+                            addAllMissingMembers(key, actuallyMissingNow);
+                        });
+                        menu.append(allItem);
+                    }
+
+                    const rect = plusBtn[0].getBoundingClientRect();
+                    const top = rect.bottom + window.scrollY + 2;
+                    const left = Math.max(8, rect.left + window.scrollX - 6);
+                    menu.css({ top: `${top}px`, left: `${left}px` });
+                    $("body").append(menu);
+
+                    setTimeout(() => {
+                        $(document).on("mousedown.writeDsAddMenu", function (ev) {
+                            if (!$(ev.target).closest(".write-ds-add-menu, .add-member-btn").length) {
+                                $(".write-ds-add-menu").remove();
+                                $(document).off("mousedown.writeDsAddMenu");
+                            }
+                        });
+                    }, 80);
+                });
+                actionsDiv.append(plusBtn);
+            }
+
+            // Helper function to determine channel type for a given key and index
+            function determineChannelType(key, idx) {
+                const channels = _controller?.channels || {};
+
+                if (!channels[key]) {
+                    return "ao"; // Default fallback
+                }
+
+                const channel = channels[key];
+                const memberObjects = Object.values(channel);
+                const member = memberObjects.find((m) => parseInt(m.member, 10) === idx);
+
+                if (!member) {
+                    return "ao"; // Default fallback
+                }
+
+                // Determine channel type based on regtype and _type
+                const regtype = member.regtype;
+                const type = member._type;
+
+                // Input/read-only registers (s, s!, r, i, d) -> AI or DI
+                if (["s", "s!", "r", "i", "d"].includes(regtype)) {
+                    if (type === "analogue") {
+                        return "ai";
+                    } else if (type === "discrete") {
+                        return "di";
+                    } else {
+                        return "ai"; // Default for input if type unclear
+                    }
+                }
+                // Writable output registers (h, c, h!, c!) -> AO or DO
+                else if (["h", "c", "h!", "c!"].includes(regtype)) {
+                    if (type === "analogue") {
+                        return "ao";
+                    } else if (type === "discrete") {
+                        return "do";
+                    } else {
+                        // Fallback based on regtype if _type not set
+                        if (["h", "h!"].includes(regtype)) {
+                            return "ao"; // Holding registers are usually analogue
+                        } else if (["c", "c!"].includes(regtype)) {
+                            return "do"; // Coil registers are usually discrete
+                        }
+                        return "ao"; // Final fallback
+                    }
+                } else {
+                    return "ao"; // Default fallback for unknown regtype
+                }
+            }
+
+            function addNextMember(key, idx) {
+                const channelType = determineChannelType(key, idx);
+                const row = {
+                    manual: false,
+                    gateLoop: false,
+                    forceWrite: false,
+                    keyNameSelect: key,
+                    index: idx.toString(),
+                    topic: `${key}.${idx}`,
+                    channelType: channelType,
+                    coefficient: "1",
+                    payload: ""
+                };
+                $("#mappings-container").editableList("addItems", [row]);
+                RED.notify(`Added member ${idx} for ${key}`, { type: "success", timeout: 1500 });
+                triggerSort();
+                scheduleRefreshAllPlusButtons();
+            }
+
+            function addAllMissingMembers(key, indices) {
+                // Recompute what's missing NOW (not from when the button was clicked)
+                const currentlyUsed = getUsedIndicesForDataStream(key);
+
+                // Get writable members for this key directly from channels (not formattedTopics)
+                const allAvailableForThisKey = getWritableMemberIndicesForKey(key);
+
+                // Filter to only actually missing ones
+                const actuallyMissing = indices.filter((idx) => allAvailableForThisKey.includes(idx) && !currentlyUsed.includes(idx));
+
+                if (actuallyMissing.length === 0) {
+                    return;
+                }
+
+                // Build all rows first, determining channel type for each member dynamically
+                const newRows = actuallyMissing.map((idx) => {
+                    const channelType = determineChannelType(key, idx);
+                    return {
+                        manual: false,
+                        gateLoop: false,
+                        forceWrite: false,
+                        keyNameSelect: key,
+                        index: idx.toString(),
+                        topic: `${key}.${idx}`,
+                        channelType: channelType,
+                        coefficient: "1",
+                        payload: ""
+                    };
+                });
+
+                $("#mappings-container").editableList("addItems", newRows);
+                RED.notify(`Added ${newRows.length} members for ${key}`, { type: "success", timeout: 2000 });
+                triggerSort();
+                scheduleRefreshAllPlusButtons();
+            }
+
+            function getUsedIndicesForDataStream(key) {
+                const used = [];
+                const items = $("#mappings-container").editableList("items");
+
+                items.each(function () {
+                    const c = $(this);
+                    const el = getRowElements(c);
+                    const manual = el.manualElement?.is(":checked");
+                    const rowKey = manual ? el.keyManualElement.val() : el.keySelectElement.val();
+                    const idxVal = el.indexElement.val();
+                    const idx = parseInt(idxVal, 10);
+
+                    if (rowKey === key && Number.isInteger(idx) && idx >= 0) {
+                        used.push(idx);
+                    }
+                });
+
+                const result = [...new Set(used)].sort((a, b) => a - b);
+                return result;
+            }
+
+            function triggerSort() {
+                const $items = $("#mappings-container").editableList("items");
+                if ($items.length === 0) return;
+
+                const sortedItems = [];
+                const incompleteItems = [];
+
+                $items.each(function () {
+                    const container = $(this);
+                    const $li = container.closest("li");
+
+                    const el = getRowElements(container);
+                    const manual = el.manualElement?.is(":checked");
+                    const key = manual ? el.keyManualElement.val() : el.keySelectElement.val();
+                    const idx = parseInt(el.indexElement.val(), 10);
+                    const topic = el.topicElement.val();
+
+                    // Build stable fallbacks so freshly-added rows sort correctly
+                    const normKey = key || (topic && topic.includes(".") ? topic.split(".")[0] : "");
+                    const normIdx = (Number.isInteger(idx) && idx > 0)
+                        ? idx
+                        : (topic && topic.includes(".") ? parseInt(topic.split(".")[1], 10) : 0);
+                    const normTopic = topic || (normKey && normIdx ? `${normKey}.${normIdx}` : "");
+
+                    const entry = { $li, key: normKey, index: normIdx || 0, topic: normTopic };
+
+                    if (!normTopic || !normKey) {
+                        incompleteItems.push(entry);
+                    } else {
+                        sortedItems.push(entry);
+                    }
+                });
+
+                sortedItems.sort((a, b) => {
+                    const primary = currentSortColumn === "datastream"
+                        ? a.key.localeCompare(b.key)
+                        : a.topic.localeCompare(b.topic);
+                    return primary !== 0 ? primary : a.index - b.index;
+                });
+
+                // Reorder DOM in-place: move <li> elements without destroying rows.
+                // This preserves autocomplete instances and event handlers on each row,
+                // avoiding the O(N) addItem+autocomplete-init overhead of empty+rebuild.
+                const allItems = sortedItems.concat(incompleteItems);
+                if (allItems.length === 0) return;
+                const $listContainer = allItems[0].$li.parent();
+                allItems.forEach(entry => $listContainer.append(entry.$li));
+                try { $listContainer.sortable("refreshPositions"); } catch (e) { }
+            }
+
+            // Initialize autocomplete for topic inputs in the editable list
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches =
+                                selection?.filter((obj) => {
+                                    return obj && obj.label && obj.label.toLowerCase().indexOf(term) > -1;
+                                }) || [];
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            // Don't change the input value on hover/focus
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            // Call the onSelect callback if provided
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item?.label || item?.topic || "";
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            function initializeKeyAutocomplete(element) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = (request.term || "").toLowerCase();
+                            const suggestions = _keySuggestionsCache;
+                            const matches = suggestions.filter((item) => {
+                                const label = (item.label || "").toLowerCase();
+                                const key = (item.key || "").toLowerCase();
+                                return label.includes(term) || key.includes(term);
+                            });
+                            response(matches);
+                        },
+                        focus: function (event) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.key).trigger("change");
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${item.label}</div>`).appendTo(ul);
+                    };
+            }
+
+            function initializeIndexAutocomplete(element, keyNameSelect) {
+                if (!keyNameSelect) return;
+                const membersObj = _controller?.channels?.[keyNameSelect] || {};
+                const memberItems = Object.values(membersObj)
+                    .map((m) => {
+                        const idx = parseInt(m.member, 10);
+                        const desc = findValueBySvcNameAndMember(_controller.channels, keyNameSelect, idx, "desc");
+                        return {
+                            value: String(idx),
+                            label: `${idx}${desc ? ` (${desc})` : ""}`
+                        };
+                    })
+                    .filter((m) => Number.isInteger(parseInt(m.value, 10)))
+                    .sort((a, b) => parseInt(a.value, 10) - parseInt(b.value, 10));
+
+                if (!memberItems.length) return;
+
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = (request.term || "").toLowerCase();
+                            const matches = memberItems.filter((item) => item.label.toLowerCase().includes(term));
+                            response(matches);
+                        },
+                        focus: function (event) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.value).trigger("change");
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${item.label}</div>`).appendTo(ul);
+                    };
+            }
+
+            // Return sorted writable member indices for a given datastream key.
+            // Uses channels directly (same source as read node) so the count reflects
+            // multiperf length, not the smaller multivalue/formattedTopics count.
+            function getWritableMemberIndicesForKey(key) {
+                const channels = _controller?.channels || {};
+                if (!channels[key]) return [];
+                return [...new Set(
+                    Object.values(channels[key])
+                        .filter((m) => {
+                            const regtype = m.regtype;
+                            return ["s", "s!", "r", "h", "c", "h!", "c!"].includes(regtype);
+                        })
+                        .map((m) => parseInt(m.member, 10))
+                        .filter((n) => Number.isInteger(n) && n > 0)
+                )].sort((a, b) => a - b);
+            }
+
+            // Return a list of topics from the controller configuration
+            // Structure: [ { key: "ABC", member: 1, topic: test/1, label: ... } ]
+            // TODO: revert back to prev version? Unnecessary complexity here, already implemented elsewhere: writableServices
+            function getTopics() {
+                const allTopics = _controller?.formattedTopics || [];
+                const channels = _controller?.channels || {};
+
+                // Filter out any null/undefined topics first
+                const validTopics = allTopics.filter((topic) => topic && topic.key && topic.member !== undefined);
+
+                const filteredTopics = validTopics.filter((topic) => {
+                    const key = topic.key;
+                    const member = topic.member;
+
+                    // Check if datastream exists in channels (unfiltered list)
+                    if (!channels[key]) return false;
+
+                    // Apply writability rules:
+                    //   - s/s!/r always writable
+                    //   - h/c/h!/c! always writable (either normal write if _output=true, or forced write if _output=false)
+                    // Find the member in channels to check its regtype
+                    const channelMembers = channels[key] || {};
+                    const memberObj = Object.values(channelMembers).find((m) => parseInt(m.member, 10) === member);
+
+                    if (!memberObj) return false; // Member not found in channels
+
+                    const regtype = memberObj.regtype;
+
+                    if (["s", "s!", "r"].includes(regtype)) {
+                        return true; // Input/read registers are always writable
+                    }
+                    if (["h", "c", "h!", "c!"].includes(regtype)) {
+                        return true; // Holding/coil registers always writable (forced write available)
+                    }
+                    return false; // Unknown regtype
+                });
+
+                // Sort by topic (key.member format) alphabetically
+                filteredTopics.sort((a, b) => {
+                    const topicA = a.topic || `${a.key}.${a.member}`;
+                    const topicB = b.topic || `${b.key}.${b.member}`;
+                    return topicA.localeCompare(topicB);
+                });
+
+                return filteredTopics;
+            }
+
+            // Further processing of a row after a topic is selected from the autocomplete
+            function onAutocompleteSelect(element, obj = {}) {
+                const container = element.closest(".red-ui-editableList-item-content");
+                let elements = getRowElements(container);
+
+                validateTopic(elements);
+
+                // Try to set the key and index fields according to the selected topic
+                const key = obj.key;
+                const member = obj.member;
+                const manual = elements.manualElement.is(":checked");
+
+                if (manual || !key || !member) return;
+
+                if (topicRelatedToService(`${key}.${member}`)) {
+                    elements.keySelectElement.val(key).trigger("change");
+
+                    // NB! Because populateIndex() changes the element, find the latest
+                    elements = getRowElements(container);
+                    elements.indexElement.val(String(member)).trigger("input").trigger("change");
+                }
+            }
+
+            // Return true if the topic is related to a service
+            function topicRelatedToService(topic) {
+                const fs = _controller?.filteredServices;
+                if (!fs || !topic || !topic.includes(".")) return false;
+
+                const key = topic.split(".")[0];
+                const member = topic.split(".")[1];
+
+                return fs?.[key] && Number.isInteger(parseInt(member)) && parseInt(member) >= 1 && parseInt(member) <= 16;
+            }
+
+            // Append the row to the container
+            function addRowElements(container, row) {
+                // Check if this key has loop conflicts
+                const key = row.keyNameSelect || row.keyNameManual;
+                const loopDetected = loopConflictKeys.has(key);
+
+                // TODO: fix layout
+                const rowHtml = `
+                <div class="write-data-streams-list">
+                    <input type="text" class="node-input-topic" placeholder="Topic" value="${row.topic || ""}">
+                    <span class="node-input-arrow">&#8594;</span>
+                    <div class="checkbox-container">
+                        <input type="checkbox" class="node-input-manual" ${row.manual === true ? "checked" : ""}>
+                        <div class="helper-text">Manual</div>
+                    </div>
+                    <div class="checkbox-container">
+                        <input type="checkbox" class="node-input-gateLoop" ${row.gateLoop === true ? "checked" : ""} title="${loopDetected ? "Loop detected with read node - enable to prevent rapid updates" : "Enable to prevent rapid updates if this topic loops with a read node"}">
+                        <div class="helper-text">Gate loop</div>
+                    </div>
+                    <div class="checkbox-container">
+                        <input type="checkbox" class="node-input-forceWrite" ${row.forceWrite === true ? "checked" : ""} title="Add 'forced:true' to /setup POST so backend writes even if value is unchanged. Usually NOT needed for regtype h!/c! (they already write directly). Note: forced applies to the whole POST batch.">
+                        <div class="helper-text">Force write</div>
+                    </div>
+                    <select class="node-input-keyNameSelect"></select>
+                    <input type="text" class="node-input-keyNameManual" placeholder="Manual entry, e.g. ABCW" value="${row.keyNameManual || ""}">
+                    <input type="number" class="node-input-index" placeholder="Member" value="${row.index || ""}" min="1" max="16">
+                    <select class="node-input-channelType">
+                        <option value="">Channel type...</option>
+                        <option value="ai" ${row.channelType === "ai" ? "selected" : ""}>Analogue input (AI)</option>
+                        <option value="ao" ${row.channelType === "ao" ? "selected" : ""}>Analogue output (AO)</option>
+                        <option value="di" ${row.channelType === "di" ? "selected" : ""}>Discrete input (DI)</option>
+                        <option value="do" ${row.channelType === "do" ? "selected" : ""}>Discrete output (DO)</option>
+                    </select>
+                    <input type="number" class="node-input-coefficient" placeholder="Coef." value="${row.coefficient || ""}" step="0.01">
+                    <input type="number" class="node-input-payload" placeholder="Payload" value="${row.payload || ""}" step="0.01">
+                    <div class="row-actions"></div>
+                </div>`;
+                container.append(rowHtml);
+            }
+
+            // Get references to the created elements
+            function getRowElements(container) {
+                return {
+                    topicElement: container.find(".node-input-topic"),
+                    manualElement: container.find(".node-input-manual"),
+                    gateLoopElement: container.find(".node-input-gateLoop"),
+                    forceWriteElement: container.find(".node-input-forceWrite"),
+                    keyManualElement: container.find(".node-input-keyNameManual"),
+                    keySelectElement: container.find(".node-input-keyNameSelect"),
+                    indexElement: container.find(".node-input-index"),
+                    channelTypeElement: container.find(".node-input-channelType"),
+                    coefficientElement: container.find(".node-input-coefficient"),
+                    payloadElement: container.find(".node-input-payload")
+                };
+            }
+
+            // Format the newly created / intialized row's elements
+            // TODO: revert back to prev version? Unnecessary complexity here, already implemented elsewhere: writableServices
+            function formatRow(elements, row) {
+                const channels = _controller.channels || {};
+                const filteredServices = _controller.filteredServices || {};
+
+                const keySelectElement = elements.keySelectElement;
+                const selectedKey = row.keyNameSelect;
+                const manual = row.manual === true;
+                const gateLoop = row.gateLoop === true;
+                const forceWrite = row.forceWrite === true;
+
+                // Debug logging removed - was causing 500+ HTTP requests per dialog open
+                // serverLog(`formatRow: topic=${row.topic}, manual=${manual}, channelsAvail=${Object.keys(writableDatastreams).length}`);
+
+                if (elements.manualElement.length) {
+                    elements.manualElement.prop("checked", manual);
+                }
+
+                if (elements.gateLoopElement.length) {
+                    elements.gateLoopElement.prop("checked", gateLoop);
+                }
+
+                if (elements.forceWriteElement.length) {
+                    elements.forceWriteElement.prop("checked", forceWrite);
+                }
+
+                // Populate SELECT with available data streams sorted by service name
+                const keyNames = sortKeysByServiceNames(filteredServices);
+                keySelectElement.empty().append($('<option value="">Select data stream...</option>'));
+                keyNames.forEach(key => {
+                    const name = filteredServices[key]?.servicename || key;
+                    keySelectElement.append($(`<option value="${key}">${name} (${key})</option>`));
+                });
+                keySelectElement.removeClass("write-ds-missing-key").removeAttr("title");
+                if (selectedKey) {
+                    if (!filteredServices[selectedKey]) {
+                        keySelectElement.append($(`<option value="${selectedKey}">${selectedKey} (unavailable)</option>`));
+                        keySelectElement.addClass("write-ds-missing-key");
+                        keySelectElement.attr("title", `Saved key '${selectedKey}' is not present in controller-config. It may be filtered out or temporarily unavailable.`);
+                    }
+                    keySelectElement.val(selectedKey);
+                }
+
+                updateKeyName(elements);
+                validateKeyName(elements);
+
+                // Pass row to populateIndex so it can use row.index as fallback
+                populateIndex(elements, row);
+
+                // Also explicitly set the value after populateIndex (matching read node pattern)
+                updateIndex(elements, row);
+                validateIndex(elements);
+
+                populateChannelType(elements, row); // Auto-determines and sets channel type (read-only)
+                updateChannelType(elements, row);
+                // Debug logging removed - was causing 500+ HTTP requests per dialog open
+                // serverLog(`formatRow: topic=${row.topic}, channelType.disabled=${elements.channelTypeElement.prop("disabled")}, manual=${manual}`);
+                validateChannelType(elements);
+
+                populatePayload(elements);
+                validatePayload(elements);
+
+                updateCoefficient(elements);
+                validateCoefficient(elements);
+
+                // Auto-generate topic from key and index after both are set
+                // Use a small delay to ensure index dropdown value is set in DOM
+                setTimeout(() => {
+                    updateTopic(elements);
+                    validateTopic(elements);
+                }, 10);
+            }
+
+            // Attach events to the row elements
+            function attachRowEvents(elements = {}, container) {
+                elements.manualElement.on("change", function () {
+                    const isManual = elements.manualElement.is(":checked");
+
+                    // Warn when enabling manual mode
+                    if (isManual) {
+                        RED.notify("Manual entry: coefficient and other settings will override controller configuration", { type: "warning", timeout: 4000 });
+                    }
+
+                    updateKeyName(elements);
+                    validateKeyName(elements);
+
+                    populateIndex(elements, {});
+                    validateIndex(elements);
+
+                    populateChannelType(elements, {});
+                    validateChannelType(elements);
+
+                    populatePayload(elements);
+                    validatePayload(elements);
+
+                    updateCoefficient(elements);
+                    validateCoefficient(elements);
+
+                    updateTopic(elements);
+                    validateTopic(elements);
+
+                    refreshPlusButtonFor(container);
+                });
+
+                elements.keySelectElement.on("change input", function () {
+                    validateKeyName(elements);
+
+                    populateIndex(elements, {});
+                    validateIndex(elements);
+
+                    populateChannelType(elements, {}); // Auto-determine channel type
+                    validateChannelType(elements);
+
+                    populatePayload(elements);
+                    validatePayload(elements);
+
+                    updateCoefficient(elements);
+                    validateCoefficient(elements);
+
+                    updateTopic(elements);
+                    validateTopic(elements);
+
+                    refreshPlusButtonFor(container);
+                });
+
+                elements.keyManualElement.on("change input", function () {
+                    validateKeyName(elements);
+
+                    populateChannelType(elements, {});
+                    validateChannelType(elements);
+
+                    populatePayload(elements);
+                    validatePayload(elements);
+
+                    updateCoefficient(elements);
+                    validateCoefficient(elements);
+
+                    updateTopic(elements);
+                    validateTopic(elements);
+
+                    refreshPlusButtonFor(container);
+                });
+
+                elements.indexElement.on("change", function () {
+                    populateChannelType(elements, {}); // Auto-determine channel type when index changes
+                    validateChannelType(elements);
+                    populatePayload(elements);
+                    validatePayload(elements);
+                    updateCoefficient(elements);
+                    validateCoefficient(elements);
+                    updateTopic(elements);
+                    validateTopic(elements);
+                    refreshPlusButtonFor(container);
+                });
+
+                elements.indexElement.on("input", function () {
+                    validateIndex(elements);
+                    refreshPlusButtonFor(container);
+                });
+
+                elements.channelTypeElement.on("change", function () {
+                    populatePayload(elements);
+                    validatePayload(elements);
+                    updateCoefficient(elements);
+                    validateCoefficient(elements);
+                    refreshPlusButtonFor(container);
+                });
+
+                elements.coefficientElement.on("input", function () {
+                    validateCoefficient(elements);
+                });
+
+                elements.payloadElement.on("input change", function () {
+                    validatePayload(elements);
+                });
+
+                elements.topicElement.on("input", function () {
+                    validateTopic(elements);
+                });
+            }
+
+            // Toggle UI between controller selection and manual entry
+            function updateKeyName(elements) {
+                const manual = elements.manualElement.is(":checked");
+                const helperText = elements.manualElement.closest(".checkbox-container").find(".helper-text");
+
+                if (manual) {
+                    elements.keySelectElement.val("");
+                    elements.keySelectElement.hide();
+                    elements.keyManualElement.show();
+                    elements.channelTypeElement.prop("disabled", false);
+                    elements.coefficientElement.prop("disabled", false);
+                    helperText.text("manual");
+                } else {
+                    elements.keyManualElement.val("");
+                    elements.keyManualElement.hide();
+                    elements.keySelectElement.show();
+                    helperText.text("from controller");
+                }
+            }
+
+            // Update index element with row data (like read node)
+            function updateIndex(elements, row = {}) {
+                const prev = row.index || "";
+
+                // Re-find the element to ensure we have the latest reference
+                let existingId = elements.indexElement.attr("data-id");
+
+                if (existingId) {
+                    const foundElement = $(`.node-input-index[data-id="${existingId}"]`);
+                    if (foundElement.length > 0) {
+                        elements.indexElement = foundElement;
+                    }
+                } else {
+                    // If no data-id, try to find it by class within the same container (fallback)
+                    const container = elements.indexElement.closest(".write-data-streams-list, .red-ui-editableList-item-content");
+                    if (container.length > 0) {
+                        const foundElement = container.find(".node-input-index");
+                        if (foundElement.length > 0) {
+                            elements.indexElement = foundElement.first();
+                            existingId = elements.indexElement.attr("data-id");
+                        }
+                    }
+                }
+
+                if (elements.indexElement.length > 0 && prev) {
+                    elements.indexElement.prop("disabled", false).val(prev);
+                }
+            }
+
+            // Update coefficient field based on the selected key
+            function updateCoefficient(elements) {
+                const manual = elements.manualElement?.is(":checked");
+                const channelType = elements.channelTypeElement.val() ?? "";
+                const keyNameSelect = elements.keySelectElement.val();
+
+                const filteredServices = _controller.filteredServices || {};
+                const keyName = keyNameSelect;
+
+                if (manual) {
+                    if (!elements.coefficientElement.val()) {
+                        elements.coefficientElement.val("1");
+                    }
+                    elements.coefficientElement.prop("disabled", false);
+                } else if (keyName && filteredServices[keyName]) {
+                    const convCoef = filteredServices[keyName]?.conv_coef || 1;
+
+                    elements.coefficientElement.val(convCoef);
+                    elements.coefficientElement.prop("disabled", true);
+                } else {
+                    elements.coefficientElement.val("1");
+                    elements.coefficientElement.prop("disabled", false);
+                }
+
+                if (channelType.startsWith("d")) {
+                    elements.coefficientElement.val("");
+                    elements.coefficientElement.prop("disabled", true);
+                }
+            }
+
+            // Update the index element based on the selected key
+            function populateIndex(elements, row = {}) {
+                const keyNameSelect = elements.keySelectElement.val();
+
+                let el = elements.indexElement;
+                // Get index from element first, then from row data as fallback (like read node pattern)
+                let prevIndex = el.val();
+                if (!prevIndex && row.index) {
+                    prevIndex = row.index;
+                }
+
+                // Check if element already has a data-id
+                const existingId = el.attr("data-id");
+
+                // Use existing ID if available, otherwise generate a new one
+                const id = existingId || Math.random().toString(36).substr(2, 9);
+
+                // Use text input + autocomplete to avoid native select popup rendering issues.
+                const inputValue = prevIndex || "";
+                el.replaceWith(`<input data-id="${id}" type="text" class="node-input-index" placeholder="Member" value="${inputValue}">`);
+                el = elements.indexElement = $(`.node-input-index[data-id="${id}"]`);
+                if (keyNameSelect) {
+                    initializeIndexAutocomplete(el, keyNameSelect);
+                }
+
+                // Reattach the event listener to the new element
+                el.on("change", function () {
+                    populateChannelType(elements, {});
+                    validateChannelType(elements);
+                    populatePayload(elements);
+                    validatePayload(elements);
+                    updateCoefficient(elements);
+                    validateCoefficient(elements);
+                    updateTopic(elements);
+                    validateTopic(elements);
+                    const container = el.closest(".red-ui-editableList-item-content");
+                    if (container.length) {
+                        refreshPlusButtonFor(container);
+                    }
+                });
+
+                el.on("input", function () {
+                    validateIndex(elements);
+                    const container = el.closest(".red-ui-editableList-item-content");
+                    if (container.length) {
+                        refreshPlusButtonFor(container);
+                    }
+                });
+            }
+
+            // Auto-determine channel type based on the selected key and index (read-only)
+            function populateChannelType(elements, row = {}) {
+                // Use strict boolean check to avoid undefined issues with optional chaining
+                const manual = elements.manualElement?.length > 0 && elements.manualElement.is(":checked") === true;
+                const el = elements.channelTypeElement;
+
+                const allOptions = [
+                    { value: "", text: "Channel type..." },
+                    { value: "ai", text: "Analogue input (AI)" },
+                    { value: "ao", text: "Analogue output (AO)" },
+                    { value: "di", text: "Discrete input (DI)" },
+                    { value: "do", text: "Discrete output (DO)" }
+                ];
+
+                if (manual) {
+                    const current = el.val() || row.channelType || "";
+                    el.empty();
+                    allOptions.forEach((option) => {
+                        const selected = current === option.value ? "selected" : "";
+                        el.append(`<option value="${option.value}" ${selected}>${option.text}</option>`);
+                    });
+                    el.prop("disabled", false);
+                    // Debug logging removed - was causing many HTTP requests
+                    // serverLog(`populateChannelType: MANUAL mode, enabled channelType`);
+                    return;
+                }
+
+                const channels = _controller.channels || {};
+                const keyNameSelect = elements.keySelectElement.val();
+
+                // Get index from element first, then from row data as fallback (like populateIndex pattern)
+                let index = parseInt(elements.indexElement.val());
+                if (isNaN(index) && row.index) {
+                    index = parseInt(row.index);
+                }
+
+                // Auto-determine channel type using helper function
+                let determinedType = "";
+                if (!isNaN(index) && keyNameSelect) {
+                    determinedType = determineChannelType(keyNameSelect, index);
+                }
+
+                clearDropdown(el, { text: "Auto-determined...", disabled: true, selected: false });
+
+                // Add all options, but select the determined type
+                allOptions.slice(1).forEach((option) => {
+                    const selected = determinedType === option.value ? "selected" : "";
+                    el.append(`<option value="${option.value}" ${selected}>${option.text}</option>`);
+                });
+
+                // Set the value and keep it disabled (read-only)
+                if (determinedType) {
+                    el.val(determinedType);
+                }
+                el.prop("disabled", true);
+
+            }
+
+            // Update channel type element with row data (like updateIndex)
+            function updateChannelType(elements, row = {}) {
+                const prev = row.channelType || "";
+                // Use strict boolean check to avoid undefined issues
+                const manual = elements.manualElement?.length > 0 && elements.manualElement.is(":checked") === true;
+
+                if (elements.channelTypeElement.length > 0 && prev) {
+                    // Ensure the element is adjustable before setting value
+                    elements.channelTypeElement.prop("disabled", !manual);
+                    elements.channelTypeElement.val(prev);
+                }
+            }
+
+            // Toggle the payload input based on channel type
+            // Discrete data streams only accept 0 or 1 as payload
+            // Analogue data streams accept any float value
+            function populatePayload(elements) {
+                const payloadType = $("#node-input-payloadType").val();
+                const channelType = elements.channelTypeElement.val() ?? "";
+
+                let el = elements.payloadElement;
+                const prevPayload = el.val();
+
+                const id = Math.random().toString(36).substr(2, 9);
+
+                if (channelType.startsWith("d") && payloadType !== "dynamic") {
+                    el.replaceWith(
+                        `<select data-id="${id}" class="node-input-payload">
+                            <option value="0" ${prevPayload == 0 ? "selected" : ""}>0</option>
+                            <option value="1" ${prevPayload == 1 ? "selected" : ""}>1</option>
+                        </select>`
+                    );
+                } else {
+                    el.replaceWith(`<input data-id="${id}" type="number" class="node-input-payload" placeholder="Payload" value="${prevPayload}" step="0.01">`);
+                }
+
+                el = elements.payloadElement = $(`.node-input-payload[data-id="${id}"]`); // Update the reference using the custom attribute
+
+                // Reattach the event listener to the new element
+                el.on("input", function () {
+                    validatePayload(elements);
+                });
+
+                if (payloadType === "dynamic") {
+                    el.val("");
+                    el.prop("disabled", true);
+                }
+            }
+
+            // Clear the data stream selection
+            function clearDropdown(element, options = {}) {
+                const { text = "none", disabled = false, selected = false } = options;
+
+                element.empty();
+                element.append($(`<option value="" ${disabled ? "disabled" : ""} ${selected ? "selected" : ""}>${text}</option>`));
+            }
+
+            // Update the topic element based on the selected key and member
+            function updateTopic(elements) {
+                const manual = elements.manualElement.is(":checked");
+                const keyNameManual = elements.keyManualElement.val();
+                const keyNameSelect = elements.keySelectElement.val();
+                const keyName = manual ? keyNameManual : keyNameSelect;
+                const index = elements.indexElement.val();
+                const topic = elements.topicElement.val();
+
+                if (!keyName || !index) return;
+
+                // Default topic format: "key.member"
+                if (topic === "" || (!manual && topicRelatedToService(topic))) {
+                    elements.topicElement.val(`${keyName}.${index}`);
+                }
+            }
+
+            // Update tip text based on current settings
+            function updateTipText() {
+                const rows = getListElements();
+
+                const payloadType = $("#node-input-payloadType").val();
+                const topics = rows.map((row) => row.topicElement.val());
+
+                const topic1 = topics && topics.length > 0 ? topics[0] : "topic1";
+                const topic2 = topics && topics.length > 1 ? topics[1] : "topic2";
+
+                const tipText1 = `Routing ${rows.length} values from controller (${_controller.uniqueId || "???"})'s data streams.`;
+                const tipText2 = `The payload will be multiplied by the coefficient (if applicable).`;
+                const tipText3 =
+                    payloadType === "dynamic"
+                        ? `The required payload(s) will be searched from the incoming 'msg' object.`
+                        : `The payload(s) defined in the incoming messages will be used when writing data.`;
+                const tipText4 = `Only writable data streams and members are shown in the dropdown lists.`;
+                const tipText5 =
+                    payloadType === "dynamic"
+                        ? `Incoming message formats:
+                1. {"topic": topic, "payload": value} to write a single stream
+                2. {"${topic1}": value, "${topic2}": value, ...} to write multiple streams`
+                        : `Incoming message formats:
+                1. {"topic": topic} to write a single stream
+                2. {"${topic1}": true, "${topic2}": false, ...} to write multiple streams
+                3. none, in which case every stream will be written.`;
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+                $("#node-input-tip-text-4").text(tipText4);
+                $("#node-input-tip-text-5").text(tipText5);
+            }
+
+            // Custom validation functions below
+            function validateKeyName(elements) {
+                console.debug("Validating key name...");
+
+                const manual = elements.manualElement.is(":checked");
+                const keyNameSelect = elements.keySelectElement.val();
+                const keyNameManual = elements.keyManualElement.val();
+                const invalidValues = ["", undefined, null];
+
+                let valid;
+                if (manual) {
+                    valid = !invalidValues.includes(keyNameManual);
+                    elements.keyManualElement.css("border-color", valid ? "" : "red");
+                    elements.keySelectElement.css("border-color", "");
+                } else {
+                    valid = !invalidValues.includes(keyNameSelect);
+                    // If the key is present but missing from controller metadata, show warning (orange) not error (red)
+                    if (valid && elements.keySelectElement.hasClass("write-ds-missing-key")) {
+                        elements.keySelectElement.css("border-color", "#ff9800");
+                    } else {
+                        elements.keySelectElement.css("border-color", valid ? "" : "red");
+                    }
+                    elements.keyManualElement.css("border-color", "");
+                }
+            }
+
+            function validateIndex(elements) {
+                const index = elements.indexElement.val();
+
+                let valid;
+                valid = isValidIndex(index);
+
+                elements.indexElement.css("border-color", valid ? "" : "red");
+            }
+
+            function validateCoefficient(elements) {
+                const coefficient = elements.coefficientElement.val();
+                const channelType = elements.channelTypeElement.val() ?? "";
+
+                let valid;
+                valid = channelType.startsWith("d") || isValidFloat(coefficient);
+
+                elements.coefficientElement.css("border-color", valid ? "" : "red");
+            }
+
+            function validateChannelType(elements) {
+                const channelType = elements.channelTypeElement.val();
+
+                let valid;
+                valid = isValidChannelType(channelType);
+
+                elements.channelTypeElement.css("border-color", valid ? "" : "red");
+            }
+
+            function validatePayload(elements) {
+                const payloadType = $("#node-input-payloadType").val();
+                const channelType = elements.channelTypeElement.val() ?? "";
+                const payload = elements.payloadElement.val();
+
+                let valid;
+
+                if (channelType.startsWith("d")) {
+                    valid = ["0", "1"].includes(payload);
+                } else {
+                    valid = isValidFloat(payload);
+                }
+
+                if (payloadType === "dynamic") {
+                    valid = true;
+                }
+
+                elements.payloadElement.css("border-color", valid ? "" : "red");
+            }
+
+            function validateTopic(elements) {
+                const topic = elements.topicElement.val();
+
+                const invalidValues = ["", undefined, null];
+                let duplicateTopics = [];
+
+                const rows = getListElements();
+
+                for (const elements of rows) {
+                    const t = elements.topicElement.val();
+                    if (t === topic) duplicateTopics.push(t);
+                }
+
+                let valid;
+                valid = !invalidValues.includes(topic) && duplicateTopics.length <= 1;
+
+                elements.topicElement.css("border-color", valid ? "" : "red");
+            }
+
+            function isValidIndex(index) {
+                const indexInt = parseInt(index);
+                return Number.isInteger(indexInt) && indexInt >= 1 && indexInt <= 16;
+            }
+
+            function isValidFloat(value) {
+                return !isNaN(parseFloat(value));
+            }
+
+            function isValidChannelType(type) {
+                return ["ai", "ao", "di", "do"].includes(type);
+            }
+
+            // Data stream helper functions below
+
+            // Sort alphabetically, all keys starting with "_" are to be in the end
+            function sortKeysByServiceNames(obj) {
+                const keyNames = Object.keys(obj);
+                const normalKeys = keyNames.filter((key) => {
+                    const servicename = obj[key]?.servicename || key;
+                    return !servicename.startsWith("_");
+                });
+                const underscoreKeys = keyNames.filter((key) => {
+                    const servicename = obj[key]?.servicename || key;
+                    return servicename.startsWith("_");
+                });
+
+                // Sort both arrays in ascending alphabetical order based on servicename (fallback to key)
+                normalKeys.sort((a, b) => {
+                    const nameA = obj[a]?.servicename || a;
+                    const nameB = obj[b]?.servicename || b;
+                    return nameA.localeCompare(nameB);
+                });
+                underscoreKeys.sort((a, b) => {
+                    const nameA = obj[a]?.servicename || a;
+                    const nameB = obj[b]?.servicename || b;
+                    return nameA.localeCompare(nameB);
+                });
+
+                return normalKeys.concat(underscoreKeys);
+            }
+
+            function findValueBySvcNameAndMember(channels = {}, name, member, key) {
+                return channels?.[name]?.[member]?.[key] ?? null;
+            }
+
+            // Auto-generate mappings for all available services
+            // TODO: revert back to prev version? Unnecessary complexity here, already implemented elsewhere: writableServices
+            function autoGenerateMappings() {
+                const channels = _controller.channels || {};
+                const filteredServices = _controller.filteredServices || {};
+                const newMappings = [];
+                const sortSource = {};
+                Object.keys(channels).forEach((key) => {
+                    sortSource[key] = filteredServices[key] || { servicename: key };
+                });
+                const keyNames = sortKeysByServiceNames(sortSource);
+                const keySource = keyNames.length > 0 ? keyNames : Object.keys(channels).sort((a, b) => a.localeCompare(b));
+
+                // Clear existing mappings first
+                $("#mappings-container").editableList("empty");
+
+                // Create a mapping for each key and its members
+                keySource.forEach((keyName) => {
+                    const service = filteredServices[keyName];
+                    if (!channels[keyName]) return;
+
+                    // Get all members for this service key
+                    const members = _controller?.channels?.[keyName] || {};
+
+                    // Add an entry for each known member in controller metadata
+                    Object.values(members).forEach((member) => {
+                        const idx = member.member;
+                        const memberIdx = parseInt(idx, 10);
+
+                        // Auto-determine channel type
+                        const channelType = determineChannelType(keyName, memberIdx);
+
+                        newMappings.push({
+                            manual: false,
+                            gateLoop: false,
+                            forceWrite: false,
+                            keyNameSelect: keyName,
+                            channelType: channelType,
+                            index: idx,
+                            coefficient: service?.conv_coef || filteredServices[keyName]?.conv_coef || 1,
+                            payload: "",
+                            topic: `${keyName}.${idx}`
+                        });
+                    });
+                });
+
+                // Add all mappings to the list
+                $("#mappings-container").editableList("addItems", newMappings);
+
+                // Update ports and tip text
+                updateTipText();
+
+                RED.notify("Generated " + newMappings.length + " data stream mappings", { type: "success", timeout: 3000 });
+            }
+
+            // Iterate over each mapping row and store the elements
+            function getListElements() {
+                const result = [];
+
+                $("#mappings-container")
+                    .editableList("items")
+                    .each(function () {
+                        const container = $(this);
+                        const elements = getRowElements(container);
+
+                        result.push(elements);
+                    });
+
+                return result;
+            }
+
+            // Initial render DISABLED FOR TEST: read node doesn't render on open, only on controller change
+            // This might be causing the "reopen" issue if rendering 90 rows keeps Node-RED "busy"
+            // $("#mappings-container").editableList("empty");
+            // $("#mappings-container").editableList("addItems", mappings);
+            // updateTipText();
+            // setTimeout(() => {
+            //     triggerSort();
+            //     refreshAllPlusButtons();
+            // }, 200);
+        },
+        oneditsave: function () {
+            const node = this;
+            const saveStartMs = Date.now();
+            function forceCloseStuckEditorShade(reason) {
+                try {
+                    const shadeVisible = $(".red-ui-editor-shade:visible, #red-ui-editor-shade:visible").length > 0;
+                    const trayVisible = $(".red-ui-tray:visible").length > 0;
+                    const formVisible = $("#dialog-form").is(":visible");
+                    if (!shadeVisible && !trayVisible && !formVisible) return;
+
+                    // Preferred: ask Node-RED tray manager to close immediately.
+                    if (RED && RED.tray && typeof RED.tray.close === "function") {
+                        RED.tray.close();
+                    }
+
+                    // Immediate fallback cleanup.
+                    $(".red-ui-tray:visible").hide();
+                    $(".red-ui-editor-shade, #red-ui-editor-shade").hide();
+                } catch (e) {
+                    // no-op
+                }
+            }
+            function logDeployUiProbe(tag) {
+                try {
+                    const elapsed = Date.now() - saveStartMs;
+                    const shadeVisible = $(".red-ui-editor-shade:visible, #red-ui-editor-shade:visible").length;
+                    const trayVisible = $(".red-ui-tray:visible").length;
+                    const formVisible = $("#dialog-form").is(":visible");
+                    const deployDisabled =
+                        $("#red-ui-header-button-deploy").is(":disabled") ||
+                        $("#red-ui-header-button-deploy").hasClass("disabled");
+                    console.log(
+                        `[write-ds] save-probe ${tag} elapsed=${elapsed}ms shade=${shadeVisible} tray=${trayVisible} formVisible=${formVisible} deployDisabled=${deployDisabled}`
+                    );
+                } catch (e) {
+                    // no-op
+                }
+            }
+            function cleanupTransientUi(options) {
+                const opts = options || {};
+                const destroyAutocomplete = opts.destroyAutocomplete === true;
+                // Kill custom "+" menu and delegated document handler.
+                $(".write-ds-add-menu").remove();
+                $(document).off("mousedown.writeDsAddMenu");
+
+                // Heavy cleanup is optional; avoid on save path to keep UI responsive.
+                if (destroyAutocomplete) {
+                    $("#mappings-container .node-input-topic, #mappings-container .node-input-keyNameSelect, #mappings-container .node-input-index").each(function () {
+                        try {
+                            $(this).autocomplete("destroy");
+                        } catch (e) {
+                            // Ignore non-autocomplete elements.
+                        }
+                    });
+                }
+            }
+            // Unbind editor handlers directly (avoid storing function refs on node object)
+            $("#node-input-controller").off(".writeDsCtrl");
+            $("#mappings-container, #node-input-payloadType, #node-input-outputMode").off(".writeDsChange");
+            $("#node-input-payloadType").off(".writeDsPayload");
+            cleanupTransientUi({ destroyAutocomplete: false });
+            // Abort any in-flight AJAX requests (access via closure from oneditprepare)
+            // Note: We can't directly access _controllerReq here, but the dialog close handlers will catch it
+
+            const parseOptionalInt = (v) => {
+                if (v === "" || v === null || v === undefined) return null;
+                const n = parseInt(v, 10);
+                return Number.isInteger(n) ? n : null;
+            };
+            const parseOptionalFloat = (v) => {
+                if (v === "" || v === null || v === undefined) return null;
+                const n = parseFloat(v);
+                return Number.isFinite(n) ? n : null;
+            };
+            const normalizeMappings = (list) => {
+                const out = [];
+                const seen = new Set();
+                (Array.isArray(list) ? list : []).forEach((m) => {
+                    const row = {};
+                    const keyNameSelect = (m.keyNameSelect || "").trim();
+                    const keyNameManual = (m.keyNameManual || "").trim();
+                    const channelType = (m.channelType || "").trim();
+                    const index = parseOptionalInt(m.index);
+                    const coefficient = parseOptionalFloat(m.coefficient);
+                    const payload = parseOptionalFloat(m.payload);
+                    const topic = (m.topic || "").trim();
+                    if (m.manual === true) row.manual = true;
+                    if (m.gateLoop === true) row.gateLoop = true;
+                    if (m.forceWrite === true) row.forceWrite = true;
+                    if (keyNameSelect) row.keyNameSelect = keyNameSelect;
+                    if (keyNameManual) row.keyNameManual = keyNameManual;
+                    if (channelType) row.channelType = channelType;
+                    if (Number.isInteger(index)) row.index = index;
+                    if (Number.isFinite(coefficient)) row.coefficient = coefficient;
+                    if (Number.isFinite(payload)) row.payload = payload;
+                    if (topic) row.topic = topic;
+                    const svcKey = row.keyNameSelect || row.keyNameManual || "";
+                    const sig = `${svcKey}|${row.channelType || ""}|${Number.isInteger(row.index) ? row.index : ""}|${row.topic || ""}`;
+                    if (seen.has(sig)) return;
+                    seen.add(sig);
+                    out.push(row);
+                });
+                return out;
+            };
+
+            const newName = ($("#node-input-name").val() || "").trim();
+            const newController = $("#node-input-controller").val() || "";
+            const newOutputMode = $("#node-input-outputMode").val() || "";
+            const newPayloadType = $("#node-input-payloadType").val() || "";
+            const newTransport = $("#node-input-transport").val() || "http";
+            const tcpPortParsed = parseInt($("#node-input-tcpPort").val(), 10);
+            const newTcpPort = Number.isInteger(tcpPortParsed) && tcpPortParsed > 0 && tcpPortParsed < 65536 ? tcpPortParsed : 19080;
+            const gatingRaw = $("#node-input-gatingMs").val();
+            const gatingParsed = parseInt(gatingRaw, 10);
+            let newGatingMs = Number.isInteger(parseInt(node.gatingMs, 10)) ? parseInt(node.gatingMs, 10) : 1500;
+            if (Number.isInteger(gatingParsed) && gatingParsed >= 0) {
+                newGatingMs = gatingParsed;
+            }
+
+            const newDebugTopics = ($("#node-input-debugTopics").val() || "").trim();
+            const newMappings = getMappings();
+
+            const oldCanonical = JSON.stringify({
+                name: (node.name || "").trim(),
+                controller: node.controller || "",
+                outputMode: node.outputMode || "",
+                payloadType: node.payloadType || "",
+                transport: node.transport || "http",
+                tcpPort: Number.isInteger(parseInt(node.tcpPort, 10)) ? parseInt(node.tcpPort, 10) : 19080,
+                gatingMs: Number.isInteger(parseInt(node.gatingMs, 10)) ? parseInt(node.gatingMs, 10) : 1500,
+                debugTopics: (node.debugTopics || "").trim(),
+                mappings: normalizeMappings(node.mappings || [])
+            });
+            const newCanonical = JSON.stringify({
+                name: newName,
+                controller: newController,
+                outputMode: newOutputMode,
+                payloadType: newPayloadType,
+                transport: newTransport,
+                tcpPort: newTcpPort,
+                gatingMs: newGatingMs,
+                debugTopics: newDebugTopics,
+                mappings: normalizeMappings(newMappings)
+            });
+
+            if (oldCanonical === newCanonical) {
+                console.log("[write-ds] oneditsave NO-OP");
+                forceCloseStuckEditorShade("no-op");
+                logDeployUiProbe("no-op+0ms");
+                setTimeout(() => logDeployUiProbe("no-op+100ms"), 100);
+                setTimeout(() => logDeployUiProbe("no-op+500ms"), 500);
+                setTimeout(() => logDeployUiProbe("no-op+2000ms"), 2000);
+                return;
+            }
+
+            node.name = newName;
+            node.controller = newController;
+            node.outputMode = newOutputMode;
+            node.payloadType = newPayloadType;
+            node.transport = newTransport;
+            node.tcpPort = newTcpPort;
+            node.gatingMs = newGatingMs;
+            node.debugTopics = newDebugTopics;
+            node.mappings = normalizeMappings(newMappings);
+            // Ensure stale editor shade does not keep blocking Deploy clicks after changed save.
+            forceCloseStuckEditorShade("save");
+            console.log("[write-ds] oneditsave CHANGED");
+            logDeployUiProbe("changed+0ms");
+            setTimeout(() => logDeployUiProbe("changed+100ms"), 100);
+            setTimeout(() => logDeployUiProbe("changed+500ms"), 500);
+            setTimeout(() => logDeployUiProbe("changed+2000ms"), 2000);
+
+            // Iterate over each mapping row and store the values
+            function getMappings() {
+                const mappings = [];
+
+                $("#mappings-container")
+                    .editableList("items")
+                    .each(function () {
+                        const container = $(this);
+
+                        const manual = container.find(".node-input-manual").is(":checked");
+                        const gateLoop = container.find(".node-input-gateLoop").is(":checked");
+                        const forceWrite = container.find(".node-input-forceWrite").is(":checked");
+                        const keyNameSelect = (container.find(".node-input-keyNameSelect").val() || "").trim();
+                        const keyNameManual = (container.find(".node-input-keyNameManual").val() || "").trim();
+                        const channelType = (container.find(".node-input-channelType").val() || "").trim();
+                        const index = parseOptionalInt(container.find(".node-input-index").val());
+                        const coefficient = parseOptionalFloat(container.find(".node-input-coefficient").val());
+                        const payload = parseOptionalFloat(container.find(".node-input-payload").val());
+                        const topic = (container.find(".node-input-topic").val() || "").trim();
+
+                        mappings.push({ manual, gateLoop, forceWrite, keyNameSelect, keyNameManual, channelType, index, coefficient, payload, topic });
+                    });
+
+                return mappings;
+            }
+            // Save path keeps cleanup minimal; only shade/tray unblock is enforced above.
+        },
+        oneditcancel: function () {
+            const node = this;
+            delete node._loopConflictKeys;
+            delete node._controllerCache;
+            delete node._unbindHandlers;
+            delete node._lastEditorCloseTime;
+            // Unbind editor handlers directly (avoid storing function refs on node object)
+            $("#node-input-controller").off(".writeDsCtrl");
+            $("#mappings-container, #node-input-payloadType, #node-input-outputMode").off(".writeDsChange");
+            $("#node-input-payloadType").off(".writeDsPayload");
+            // Kill custom "+" menu + its document handler
+            $(".write-ds-add-menu").remove();
+            $(document).off("mousedown.writeDsAddMenu");
+            // Destroy autocomplete instances to avoid leaked handlers after closing dialog
+            $("#mappings-container .node-input-topic, #mappings-container .node-input-keyNameSelect, #mappings-container .node-input-index").each(function () {
+                try {
+                    $(this).autocomplete("destroy");
+                } catch (e) {
+                    // ignore
+                }
+            });
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .write-data-streams-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .write-data-streams-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .write-data-streams-div .form-row div,
+    .write-data-streams-div .form-row input,
+    .write-data-streams-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .write-data-streams-div .form-row select {
+        width: 66% !important;
+    }
+
+    /* Hide force write checkbox/label; regtype h!/c! already direct-write */
+    .write-data-streams-div .node-input-forceWrite,
+    .write-data-streams-div .node-input-forceWrite+.helper-text {
+        display: none !important;
+    }
+
+    .write-data-streams-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    /* Override width constraints for loop warning banner */
+    .write-data-streams-div .loop-warning-banner {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    .write-data-streams-div .loop-warning-banner>div {
+        max-width: 100% !important;
+        width: 100% !important;
+    }
+
+    .write-data-streams-list {
+        overflow: hidden;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+    }
+
+    .write-data-streams-list .checkbox-container {
+        text-align: center;
+        min-width: 35px;
+        width: 7%;
+    }
+
+    /* Highlight gate loop checkbox when enabled (loop detected) */
+    .write-data-streams-list .node-input-gateLoop:not(:disabled) {
+        accent-color: #ff9800;
+        transform: scale(1.2);
+    }
+
+    .write-data-streams-list .node-input-gateLoop:not(:disabled)+.helper-text {
+        color: #ff9800;
+        font-weight: bold;
+    }
+
+    .write-data-streams-list .helper-text {
+        font-size: 10px;
+        line-height: 12px;
+        text-wrap: wrap;
+        color: #666;
+    }
+
+    .write-data-streams-list .node-input-manual {
+        min-width: 16px;
+        min-height: 16px;
+    }
+
+    .write-data-streams-list .node-input-keyNameManual {
+        font-size: 12px !important;
+        min-width: 150px;
+        width: 32%;
+    }
+
+    .write-data-streams-list .node-input-keyNameSelect {
+        font-size: 12px;
+        min-width: 170px;
+        width: 32%;
+        color: #222 !important;
+        background-color: #fff !important;
+        -webkit-text-fill-color: #222 !important;
+    }
+
+    .write-data-streams-list .node-input-keyNameSelect option {
+        color: #222 !important;
+        background-color: #fff !important;
+    }
+
+    .write-data-streams-list .node-input-channelType {
+        font-size: 12px;
+        min-width: 100px;
+        width: 12%;
+    }
+
+    .write-data-streams-list .node-input-index {
+        font-size: 12px !important;
+        min-width: 150px;
+        width: 20%;
+        color: #222 !important;
+        background-color: #fff !important;
+        -webkit-text-fill-color: #222 !important;
+    }
+
+    .write-data-streams-list .node-input-index option {
+        color: #222 !important;
+        background-color: #fff !important;
+    }
+
+    .write-data-streams-list .node-input-coefficient {
+        font-size: 12px !important;
+        min-width: 65px;
+        width: 7%;
+    }
+
+    .write-data-streams-list .node-input-arrow {
+        font-size: 18px;
+        margin-left: 5px;
+        margin-right: 5px;
+    }
+
+    .write-data-streams-list .node-input-topic {
+        font-size: 12px !important;
+        min-width: 100px;
+        width: 15%;
+    }
+
+    .write-data-streams-list .node-input-payload {
+        font-size: 12px !important;
+        min-width: 75px;
+        width: 10%;
+    }
+
+    .write-data-streams-div .row-actions {
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 4px !important;
+        margin-left: 4px !important;
+        width: 40px !important;
+        justify-content: flex-start !important;
+    }
+
+    /* Style for header sort triangles */
+    .write-data-streams-div .sort-triangle {
+        font-size: 10px;
+        color: #999;
+        transition: color 0.2s ease;
+    }
+
+    .write-data-streams-div .sort-triangle.active {
+        color: #ff0000;
+        font-weight: bold;
+    }
+
+    .write-data-streams-list .sort-triangle:hover {
+        color: #666;
+    }
+
+    /* Saved key exists but controller-config didn't provide it (show warning state, not error) */
+    .write-data-streams-div select.write-ds-missing-key {
+        border-color: #ff9800 !important;
+        box-shadow: 0 0 0 1px rgba(255, 152, 0, 0.25);
+    }
+
+    /* Autocomplete widget styling */
+    .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+        position: relative;
+    }
+
+    .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    /* Style the add member dropdown (same UX as read node) */
+    .write-data-streams-div .add-member-dropdown {
+        background: #4caf50 !important;
+        border: none !important;
+        color: white !important;
+        padding: 0px 1px !important;
+        border-radius: 2px !important;
+        cursor: pointer !important;
+        font-size: 12px !important;
+        font-weight: bold !important;
+        margin-right: 4px !important;
+        width: 24px !important;
+        min-width: 4px !important;
+        text-align: center !important;
+        height: 20px !important;
+        line-height: 20px !important;
+        -webkit-appearance: none !important;
+        -moz-appearance: none !important;
+        appearance: none !important;
+    }
+
+    .write-data-streams-div .add-member-dropdown option {
+        background-color: white !important;
+        color: black !important;
+    }
+
+    .write-data-streams-div .add-member-dropdown:hover {
+        background: #45a049 !important;
+    }
+
+    /* Green + button (custom menu trigger) */
+    .write-data-streams-div .add-member-btn {
+        background: #4caf50 !important;
+        border: none !important;
+        color: white !important;
+        padding: 0 6px !important;
+        border-radius: 2px !important;
+        cursor: pointer !important;
+        font-size: 12px !important;
+        font-weight: bold !important;
+        margin-right: 4px !important;
+        width: 24px !important;
+        min-width: 24px !important;
+        height: 20px !important;
+        line-height: 20px !important;
+        text-align: center !important;
+    }
+
+    .write-data-streams-div .add-member-btn:hover {
+        background: #45a049 !important;
+    }
+
+    .write-ds-add-menu {
+        position: absolute;
+        z-index: 4000;
+        min-width: 210px;
+        background: #fff;
+        border: 1px solid #cfcfcf;
+        border-radius: 3px;
+        box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+        padding: 2px 0;
+    }
+
+    .write-ds-add-item {
+        display: block;
+        width: 100%;
+        border: none;
+        background: #fff;
+        color: #333;
+        text-align: left;
+        padding: 6px 10px;
+        font-size: 12px;
+        line-height: 16px;
+        cursor: pointer;
+    }
+
+    .write-ds-add-item:hover {
+        background: #f4f4f4;
+    }
+
+    /* Editable list style */
+    .write-data-streams-div .red-ui-editableList-header {
+        background-color: #80808014;
+        font-weight: bold;
+        display: flex;
+    }
+
+    .write-data-streams-div .red-ui-editableList-container {
+        min-height: 50px;
+    }
+
+    .write-data-streams-div .red-ui-editableList>.red-ui-editableList-container+.red-ui-editableList-footer {
+        display: block;
+    }
+
+    .write-data-streams-div .red-ui-editableList {
+        margin-bottom: 10px;
+        min-width: 700px;
+    }
+
+    /* Style row remove button: red with white X */
+    .write-data-streams-div .red-ui-editableList-item-remove {
+        background: #d32f2f !important;
+        color: white !important;
+    }
+
+    .write-data-streams-div .red-ui-editableList-item-remove:hover {
+        background: #b71c1c !important;
+    }
+
+    .write-data-streams-div .red-ui-editableList-item-remove i {
+        color: white !important;
+    }
+
+    /* Style buttons below the table */
+    .write-data-streams-div .red-ui-editableList-addButton {
+        height: 30px !important;
+        line-height: 20px !important;
+        font-size: 12px !important;
+        border-radius: 5px !important;
+        padding: 0 10px !important;
+    }
+
+    .write-ds-loading {
+        display: none;
+        margin: 6px 0 10px 0;
+        padding: 8px 10px;
+        border: 1px solid #f3b2b2;
+        border-radius: 4px;
+        background: #ffe9e9;
+        color: #7a1f1f;
+        font-size: 13px;
+        font-weight: 700;
+    }
+
+    .write-ds-loading i {
+        margin-right: 6px;
+    }
+
+    .write-ds-loading-dim {
+        opacity: 0.55;
+        pointer-events: none;
+    }
+
+    .write-ds-mappings-wrap {
+        position: relative;
+    }
+
+    .write-ds-mappings-overlay {
+        display: none;
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(255, 170, 170, 0.22);
+        z-index: 5;
+        pointer-events: all;
+    }
+</style>
+
+<!-- Form fields for the node -->
+<script type="text/html" data-template-name="uniflex-write-data-streams">
+    <div class="write-data-streams-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-controller"><i class="fa fa-search"></i> Controller</label>
+            <select id="node-input-controller">
+                <option value="" disabled selected>Select controller...</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputMode"><i class="fa fa-sign-out"></i> Write mode</label>
+            <select id="node-input-outputMode">
+                <option value="" disabled selected>Select write mode...</option>
+                <option value="all">Write data every time</option>
+                <option value="change">Write data on change</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-payloadType"><i class="fa fa-sign-out"></i> Payload type</label>
+            <select id="node-input-payloadType">
+                <option value="" disabled>Select payload type...</option>
+                <option value="static">Use form values</option>
+                <option value="dynamic" selected>Use incoming 'msg' payload</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-transport"><i class="fa fa-exchange"></i> Transport</label>
+            <select id="node-input-transport" style="width: 220px">
+                <option value="http">HTTP /setup (default)</option>
+                <option value="raw_tcp">Raw TCP (persistent, latest-state queue)</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-tcpPort"><i class="fa fa-plug"></i> TCP port</label>
+            <input type="number" id="node-input-tcpPort" placeholder="19080" min="1" max="65535" step="1" style="width:120px" />
+            <span style="margin-left:10px;color:#666;font-size:90%">Used only when Transport = Raw TCP</span>
+        </div>
+        <div class="form-row">
+            <label for="node-input-gatingMs"><i class="fa fa-clock-o"></i> Loop gate duration (ms)</label>
+            <input type="number" id="node-input-gatingMs" placeholder="1500" min="100" max="5000" step="100" style="width:100px" />
+            <span style="margin-left:10px;color:#666;font-size:90%">Prevents feedback loops by ignoring reads for this duration after write</span>
+        </div>
+    <div class="form-row">
+      <label for="node-input-debugTopics"><i class="fa fa-bug"></i> Debug topics (comma-separated prefixes)</label>
+      <input type="text" id="node-input-debugTopics" placeholder="AVGW,TDW (empty = no logging)" style="width:300px">
+      <span style="margin-left:10px;color:#666;font-size:90%">Only log debug messages for topics starting with these prefixes. Leave empty to disable logging.</span>
+    </div>
+
+        <div id="write-ds-loading" class="write-ds-loading">
+            <i class="fa fa-spinner fa-spin"></i><span class="write-ds-loading-text">Loading...</span>
+        </div>
+
+        <div class="write-ds-mappings-wrap">
+            <ol id="mappings-container"></ol>
+            <div id="write-ds-mappings-overlay" class="write-ds-mappings-overlay"></div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+        <div class="form-tips" id="node-input-tip-text-4"></div>
+        <div class="form-tips" id="node-input-tip-text-5" style="white-space: pre-line;"></div>
+
+        <br />
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-write-data-streams">
+    <p>Write (save) the formatted values of one or more data streams back to the devices. Widely customizable node that can format data in various formats.</p>
+    <p>Often used at the end of some flow to route a value back to the data stream.</p>
+
+    <h3>Parameters</h3>
+    <dl class="message-properties">
+        <dt class="optional">name <span class="property-type">string</span></dt>
+        <dd>User-friendly name for the node</dd>
+
+        <dt>controller <span class="property-type">controller</span></dt>
+        <dd>The source of the data streams on the local network. Localhost (127.0.0.1) for most cases.</dd>
+
+        <dt>write mode <span class="property-type">string</span></dt>
+        <dd>Specifies the conditions when data will be saved. Selecting <code>change</code> will write data only when the data stream differs from the previous value.</dd>
+
+        <dt>payload type <span class="property-type">string</span></dt>
+        <dd>Specifies the source of payload values, either from the mapping fields or from the incoming <code>msg</code> object.</dd>
+
+        <dt>mappings <span class="property-type">object</span></dt>
+        <dd>
+            Each row specifies a data stream member, channel type (analogue or discrete), and a topic to use when writing the message. Manual data stream entries are also allowed.
+        </dd>
+    </dl>
+
+    <h3>Output</h3>
+    <dl class="message-properties">
+        <dt>controller <span class="property-type">object</span></dt>
+        <dd>Each output <code>msg</code> includes info about the source of the data, e.g. <code>uniqueId</code>, <code>host</code>, <code>protocol</code>.</dd>
+
+        <dt>result <span class="property-type">boolean</span></dt>
+        <dd><code>true</code> if the data was successfully written to the device, <code>false</code> otherwise.</dd>
+
+        <dt>parameters <span class="property-type">object</span></dt>
+        <dd>Contains info about the data stream which was written to the device, e.g. <code>data stream name</code>, <code>channel type</code>, <code>final payload</code>.</dd>
+    </dl>
+
+    <h3>Additional details</h3>
+    <p>This node gets its data from the controller configuration and the global context.</p>
+    <p>In order to preserve the unit of the defined data stream, the payload is multiplied by the coefficient (if applicable).</p>
+    <p><strong>Force write</strong>: when enabled on any row, this node adds <code>forced:true</code> to the <code>/setup</code> POST. The backend will then write to Modbus even if the value has not changed (useful for some devices).</p>
+    <p><strong>Note</strong>: for regtype <code>h!</code>/<code>c!</code the backend already performs direct Modbus writes, so Force write is usually unnecessary. Also, <code>forced:true</code> applies to the whole POST batch (all values sent together).</p>
+
+    <p>The exact payload format depends on the message type. Example incoming messages:</p>
+    <p>
+        In case of <code>separate</code> message types: <code style="white-space: normal;">{"topic": string, "payload": float}</code>.
+        <br />
+        In case of <code>comprehensive</code> message type: <code style="white-space: normal;">{"topic1": float, "topic2": float, ...}</code>.
+    </p>
+
+    <p>Any other incoming <code>msg</code> properties will be preserved.</p>
+</script>

@@ -1,0 +1,301 @@
+<script type="text/javascript">
+    const CIRC_PUMP_CONTROL_VERSION = "2.0.0";
+    console.log("uniflex-circ-pump-control node version:", CIRC_PUMP_CONTROL_VERSION);
+
+    RED.nodes.registerType("uniflex-circ-pump-control", {
+        category: "uniflex home",
+        color: "#FFE4B5",
+        icon: "font-awesome/fa-tachometer",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9_-]+$/.test(v) && v.length <= 50;
+                }
+            },
+            // Topics
+            openFracTopic: { value: "" },
+            tAvgTopic: { value: "" },
+            spAvgTopic: { value: "" },
+            coolsTopic: { value: "" },
+            cpsvTopic: { value: "", required: true },
+            testTopic: { value: "" },
+            testSpeedPercent: { value: 80, validate: RED.validators.number() },
+            // Curve
+            speedMin: { value: 20, validate: RED.validators.number() },
+            speedMax: { value: 100, validate: RED.validators.number() },
+            curveExp: { value: 1.0, validate: RED.validators.number() },
+            // Optional P-trim
+            trimGain: { value: 0, validate: RED.validators.number() },
+            trimLimit: { value: 10, validate: RED.validators.number() },
+            // Cooling
+            coolShift: { value: 0.5, validate: RED.validators.number() },
+            // Global clamp
+            lolim: { value: 0, validate: RED.validators.number() },
+            hilim: { value: 100, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () { return this.name || "circ pump control"; },
+        paletteLabel: "circ pump control",
+
+        oneditprepare: function () {
+            let _controllers = {};
+
+            function updateTip() {
+                const oFrac = $("#node-input-openFracTopic").val() || "<not set>";
+                const cpsv = $("#node-input-cpsvTopic").val() || "<not set>";
+                const min = Number($("#node-input-speedMin").val() || 20);
+                const max = Number($("#node-input-speedMax").val() || 100);
+                const exp = Number($("#node-input-curveExp").val() || 1.0);
+                const lo = Number($("#node-input-lolim").val() || 0);
+                const hi = Number($("#node-input-hilim").val() || 100);
+                const kp = Number($("#node-input-trimGain").val() || 0);
+                const testT = $("#node-input-testTopic").val() || "";
+                const testPct = Number($("#node-input-testSpeedPercent").val() || 80);
+
+                const t1 = `Speed = ${min}% + (${max} − ${min})% × openFrac^${exp}. Output clamped to [${lo}, ${hi}]%.`;
+                const t2 = kp !== 0
+                    ? `P-trim: ±${$("#node-input-trimLimit").val() || 10}% correction from temperature error (Kp=${kp}).`
+                    : `P-trim disabled (trimGain=0). Set trimGain > 0 to enable a small temp-error correction.`;
+                const t3 = testT
+                    ? `Test override (${testT}): when 1, forces pump to ${testPct}% (clamped to limits).`
+                    : "";
+                $("#node-input-tip-1").text(t1);
+                $("#node-input-tip-2").text(t2);
+                $("#node-input-tip-3").text(t3);
+            }
+
+            $("#node-input-openFracTopic, #node-input-cpsvTopic, #node-input-testTopic, " +
+                "#node-input-speedMin, #node-input-speedMax, #node-input-curveExp, " +
+                "#node-input-trimGain, #node-input-trimLimit, " +
+                "#node-input-lolim, #node-input-hilim, #node-input-testSpeedPercent")
+                .on("input change", updateTip);
+
+            function queryControllerConfig() {
+                $.getJSON("uniflex/controller-config", function (data) {
+                    _controllers = data;
+                    ["openFracTopic", "tAvgTopic", "spAvgTopic", "coolsTopic", "cpsvTopic", "testTopic"]
+                        .forEach(id => initAutocomplete($("#node-input-" + id)));
+                }).fail(() => { _controllers = {}; });
+            }
+
+            function initAutocomplete(el) {
+                el.autocomplete({
+                    minLength: 0,
+                    source: function (req, res) {
+                        const term = req.term.toLowerCase();
+                        const topics = (_controllers?.controllers || []).flatMap(c => c.formattedTopics);
+                        res(topics.filter(t => t.label.toLowerCase().includes(term)));
+                    },
+                    focus: function (e) { e.preventDefault(); },
+                    select: function (e, ui) { e.preventDefault(); el.val(ui.item.topic); updateTip(); }
+                }).on("focus", function () { el.autocomplete("search", el.val() || ""); })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        let label = item.label;
+                        if (term) {
+                            const re = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            label = label.replace(re, '<strong style="color:#e65;font-weight:bold">$1</strong>');
+                        }
+                        return $("<li>").data("ui-autocomplete-item", item).append(`<div>${label}</div>`).appendTo(ul);
+                    };
+            }
+
+            queryControllerConfig();
+            updateTip();
+        }
+    });
+</script>
+
+<style type="text/css">
+    .cpc-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .cpc-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .cpc-div .form-row input,
+    .cpc-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .cpc-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .cpc-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .cpc-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .cpc-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, .1);
+    }
+
+    .cpc-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .cpc-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    .cpc-div input[type="text"] {
+        user-select: text !important;
+        cursor: text !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-circ-pump-control">
+    <div class="cpc-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g., circ-pump-main" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Topics</b>
+
+        <div class="form-row">
+            <label for="node-input-openFracTopic"><i class="fa fa-sliders"></i> Avg valve openness (0–1)</label>
+            <input type="text" id="node-input-openFracTopic" />
+            <div class="help-text">Average valve opening across all rooms in % (0 = all closed, 100 = all fully open). HVAVV. Primary pump speed driver.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-tAvgTopic"><i class="fa fa-thermometer-half"></i> Avg room temps (°C)</label>
+            <input type="text" id="node-input-tAvgTopic" />
+            <div class="help-text">Optional. Used only when P-trim is enabled (trimGain ≠ 0).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-spAvgTopic"><i class="fa fa-bullseye"></i> Avg room setpoints (°C)</label>
+            <input type="text" id="node-input-spAvgTopic" />
+            <div class="help-text">Optional. Used only when P-trim is enabled (trimGain ≠ 0).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-coolsTopic"><i class="fa fa-snowflake-o"></i> Cooling mode (0/1)</label>
+            <input type="text" id="node-input-coolsTopic" placeholder="e.g. COOLS.1" />
+            <div class="help-text">Optional. When 1, P-trim error is shifted by coolShift and inverted.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-cpsvTopic"><i class="fa fa-tachometer"></i> Pump speed output</label>
+            <input type="text" id="node-input-cpsvTopic" />
+            <div class="help-text">Output topic. Payload: pump speed % (0–100, 2 decimal places).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-testTopic"><i class="fa fa-flask"></i> Test active (0/1)</label>
+            <input type="text" id="node-input-testTopic" placeholder="e.g. TSTW" />
+            <div class="help-text">Optional. When 1, pump is forced to test speed instead of curve output.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-testSpeedPercent"><i class="fa fa-percent"></i> Test speed (%)</label>
+            <input type="number" id="node-input-testSpeedPercent" min="0" max="100" step="1" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Speed curve</b>
+        <div class="help-text" style="margin-bottom:6px">speed = speedMin + (speedMax − speedMin) × openFrac<sup>curveExp</sup></div>
+
+        <div class="form-row">
+            <label for="node-input-speedMin"><i class="fa fa-angle-down"></i> Speed at openFrac=0 (%)</label>
+            <input type="number" id="node-input-speedMin" min="0" max="100" step="1" />
+            <div class="help-text">Pump speed when all valves are closed. Keep > 0 to ensure some circulation. Typical: 15–25%.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-speedMax"><i class="fa fa-angle-up"></i> Speed at openFrac=1 (%)</label>
+            <input type="number" id="node-input-speedMax" min="0" max="100" step="1" />
+            <div class="help-text">Pump speed when all valves are fully open. Typical: 80–100%.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-curveExp"><i class="fa fa-line-chart"></i> Curve exponent</label>
+            <input type="number" id="node-input-curveExp" min="0.1" max="5" step="0.1" />
+            <div class="help-text">Shape of the curve. 1.0 = linear. &lt;1 = concave (more speed at low openings). &gt;1 = convex (less speed at low openings). Start with 1.0.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>P-trim (optional temperature correction)</b>
+
+        <div class="form-row">
+            <label for="node-input-trimGain"><i class="fa fa-bolt"></i> Trim gain (Kp, %/°C)</label>
+            <input type="number" id="node-input-trimGain" step="0.5" />
+            <div class="help-text">Proportional gain for temperature-error correction. 0 = disabled (pure openFrac curve). Set to e.g. 5–15 to add a small correction when rooms drift.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-trimLimit"><i class="fa fa-arrows-h"></i> Trim limit (%)</label>
+            <input type="number" id="node-input-trimLimit" min="0" max="50" step="1" />
+            <div class="help-text">Maximum ±% that the P-trim can add or subtract. Keeps it a small correction. Typical: 10–15%.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-coolShift"><i class="fa fa-snowflake-o"></i> Cooling shift (°C)</label>
+            <input type="number" id="node-input-coolShift" step="0.1" />
+            <div class="help-text">Error shift added before inversion in cooling mode. Only relevant if P-trim and coolsTopic are both active.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Output limits</b>
+
+        <div class="form-row">
+            <label for="node-input-lolim"><i class="fa fa-angle-down"></i> Lower limit (%)</label>
+            <input type="number" id="node-input-lolim" min="0" max="100" step="0.1" />
+            <div class="help-text">Hard minimum pump speed regardless of curve output.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-hilim"><i class="fa fa-angle-up"></i> Upper limit (%)</label>
+            <input type="number" id="node-input-hilim" min="0" max="100" step="0.1" />
+            <div class="help-text">Hard maximum pump speed regardless of curve output.</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-1"></div>
+        <div class="form-tips" id="node-input-tip-2"></div>
+        <div class="form-tips" id="node-input-tip-3"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-circ-pump-control">
+    <h3>Circ-pump-control</h3>
+    <p>Controls circulation pump speed based on <b>average valve openness</b> via a configurable power-law curve.
+       Replaces the old PI/temperature-error approach with a faster, physically motivated response.</p>
+
+    <h4>Primary control</h4>
+    <p><code>speed = speedMin + (speedMax − speedMin) × openFrac<sup>curveExp</sup></code></p>
+    <ul>
+        <li><b>openFrac = 0</b>: all valves closed → pump at speedMin (keeps circuit warm)</li>
+        <li><b>openFrac = 1</b>: all valves fully open → pump at speedMax</li>
+        <li><b>curveExp = 1.0</b>: linear; &lt;1 = concave (more flow at low openings); &gt;1 = convex</li>
+    </ul>
+
+    <h4>Optional P-trim</h4>
+    <p>When <code>trimGain ≠ 0</code> and temp topics are wired: adds <code>±trimLimit%</code> proportional correction
+       from <code>spAvg − tAvg</code>. Keeps rooms from drifting if openFrac alone isn't perfectly calibrated.</p>
+
+    <h4>Inputs</h4>
+    <ul>
+        <li><b>openFracTopic</b>: average valve opening in % (0–100, HVAVV). Required for output.</li>
+        <li><b>tAvgTopic / spAvgTopic</b>: optional; only used when trimGain ≠ 0.</li>
+        <li><b>coolsTopic</b>: 1 = cooling mode (P-trim error shifted and inverted).</li>
+        <li><b>testTopic</b>: 1 = force pump to testSpeedPercent.</li>
+    </ul>
+
+    <h4>Output</h4>
+    <p>Pump speed % on <code>cpsvTopic</code> (2 decimal places, clamped to [lolim, hilim]).</p>
+</script>

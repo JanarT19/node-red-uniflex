@@ -1,0 +1,252 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-immergas-control", {
+        category: "uniflex home",
+        color: "#FF9800",
+        defaults: {
+            name: { value: "" },
+            controller: { value: "", type: "uniflex-controller" },
+            setpointReadTopic: { value: "THFW.1", required: true },
+            setpointActualTopic: { value: "THFW.2", required: true },
+            setpointWriteTopic: { value: "HSETV.1", required: true },
+            heatingRequestWriteTopic: { value: "HREQV.1", required: true },
+            heatingRequestValue: { value: 85, required: true, validate: RED.validators.number() },
+            dhwEnableTopic: { value: "ISETW.1" },
+            heatingEnableTopic: { value: "ISETW.2" },
+            heatingRequestTopic: { value: "ISETW.4", required: true },
+            pumpHeatingTopic: { value: "IMODW.2", required: true },
+            pumpDhwTopic: { value: "IMODW.3", required: true },
+            flameTopic: { value: "IMODW.4", required: true },
+            forcedWritePeriod: { value: 20, required: true, validate: RED.validators.number() },
+            stuckTimeout: { value: 60, required: true, validate: RED.validators.number() },
+            recoveryRetryInterval: { value: 300, required: true, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-fire",
+        label: function () {
+            return this.name || "immergas control";
+        },
+        paletteLabel: "immergas control",
+        oneditprepare: function () {
+            const node = this;
+
+            // Fetch datastream keys from controller (like sauna-control)
+            function fetchDatastreamKeys() {
+                const controllerId = $("#node-input-controller").val();
+                if (!controllerId) return Promise.resolve([]);
+
+                const controllerNode = RED.nodes.node(controllerId);
+                if (!controllerNode) return Promise.resolve([]);
+
+                const url = `http://${controllerNode.host || "localhost"}/fusebox_setup`;
+
+                return $.getJSON(url)
+                    .then(function (data) {
+                        const keys = new Set();
+                        if (data && typeof data === "object") {
+                            Object.keys(data).forEach(key => keys.add(key));
+                        }
+                        return Array.from(keys).sort();
+                    })
+                    .catch(function (err) {
+                        console.warn("Failed to fetch datastream keys:", err);
+                        return [];
+                    });
+            }
+
+            // Setup autocomplete for topic inputs
+            function setupAutocomplete(inputSelector, keys) {
+                $(inputSelector).autocomplete({
+                    source: keys,
+                    minLength: 0
+                }).on("focus", function () {
+                    $(this).autocomplete("search", "");
+                });
+            }
+
+            // Fetch keys and setup autocomplete
+            fetchDatastreamKeys().then(function (keys) {
+                if (keys.length > 0) {
+                    setupAutocomplete("#node-input-setpointReadTopic", keys);
+                    setupAutocomplete("#node-input-setpointActualTopic", keys);
+                    setupAutocomplete("#node-input-setpointWriteTopic", keys);
+                    setupAutocomplete("#node-input-heatingRequestWriteTopic", keys);
+                    setupAutocomplete("#node-input-dhwEnableTopic", keys);
+                    setupAutocomplete("#node-input-heatingEnableTopic", keys);
+                    setupAutocomplete("#node-input-heatingRequestTopic", keys);
+                    setupAutocomplete("#node-input-pumpHeatingTopic", keys);
+                    setupAutocomplete("#node-input-pumpDhwTopic", keys);
+                    setupAutocomplete("#node-input-flameTopic", keys);
+                }
+            });
+
+            // Add tooltips
+            $("#node-input-forcedWritePeriod").attr("title", "Period in seconds for forced setpoint writes (default: 20s, max: 30s)");
+            $("#node-input-stuckTimeout").attr("title", "Duration in seconds before attempting recovery when all activity off (default: 60s)");
+            $("#node-input-recoveryRetryInterval").attr("title", "Minimum interval between recovery attempts (default: 300s = 5min)");
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-immergas-control">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Immergas Control">
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-controller"><i class="fa fa-microchip"></i> Controller</label>
+        <input type="text" id="node-input-controller">
+    </div>
+
+    <div class="form-row">
+        <hr>
+        <h4>Control Datastreams</h4>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-setpointReadTopic"><i class="fa fa-thermometer-half"></i> Setpoint (read)</label>
+        <input type="text" id="node-input-setpointReadTopic" placeholder="THFW.1">
+        <div class="form-tips">Heating setpoint temperature to read (typically THFW.1)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-setpointActualTopic"><i class="fa fa-thermometer-half"></i> Setpoint (actual read)</label>
+        <input type="text" id="node-input-setpointActualTopic" placeholder="THFW.2">
+        <div class="form-tips">Heating setpoint readback from boiler (typically THFW.2). Used to decide if HSETV.1 write is needed.</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-setpointWriteTopic"><i class="fa fa-thermometer-half"></i> Setpoint (write)</label>
+        <input type="text" id="node-input-setpointWriteTopic" placeholder="HSETV.1">
+        <div class="form-tips">Heating setpoint temperature to write (typically HSETV.1, h! regtype)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-heatingRequestWriteTopic"><i class="fa fa-fire"></i> Heating request (write)</label>
+        <input type="text" id="node-input-heatingRequestWriteTopic" placeholder="HREQV.1">
+        <div class="form-tips">Heating request value datastream (typically HREQV.1, h! regtype)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-heatingRequestValue"><i class="fa fa-hashtag"></i> Heating request value</label>
+        <input type="number" id="node-input-heatingRequestValue" placeholder="85" min="0" max="100">
+        <div class="form-tips">Heating request value to send (default: 85, must match boiler requirements)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-dhwEnableTopic"><i class="fa fa-tint"></i> DHW enable</label>
+        <input type="text" id="node-input-dhwEnableTopic" placeholder="ISETW.1">
+        <div class="form-tips">DHW enable status (typically ISETW.1)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-heatingEnableTopic"><i class="fa fa-fire"></i> Heating enable</label>
+        <input type="text" id="node-input-heatingEnableTopic" placeholder="ISETW.2">
+        <div class="form-tips">Heating enable status (typically ISETW.2)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-heatingRequestTopic"><i class="fa fa-fire"></i> Heating request</label>
+        <input type="text" id="node-input-heatingRequestTopic" placeholder="ISETW.4">
+        <div class="form-tips">Heating request flag (typically ISETW.4) - controls forced writes</div>
+    </div>
+
+    <div class="form-row">
+        <hr>
+        <h4>Status Monitoring Datastreams</h4>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-pumpHeatingTopic"><i class="fa fa-cog"></i> Heating activity</label>
+        <input type="text" id="node-input-pumpHeatingTopic" placeholder="IMODW.2">
+        <div class="form-tips">Heating activity status (typically IMODW.2)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-pumpDhwTopic"><i class="fa fa-cog"></i> DHW activity</label>
+        <input type="text" id="node-input-pumpDhwTopic" placeholder="IMODW.3">
+        <div class="form-tips">DHW activity status (typically IMODW.3)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-flameTopic"><i class="fa fa-fire"></i> Flame</label>
+        <input type="text" id="node-input-flameTopic" placeholder="IMODW.4">
+        <div class="form-tips">Flame active status (typically IMODW.4)</div>
+    </div>
+
+    <div class="form-row">
+        <hr>
+        <h4>Timing Configuration</h4>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-forcedWritePeriod"><i class="fa fa-clock-o"></i> Write period (s)</label>
+        <input type="number" id="node-input-forcedWritePeriod" placeholder="20" min="10" max="30">
+        <div class="form-tips">Forced setpoint write period in seconds (default: 20s, must be ≤30s)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-stuckTimeout"><i class="fa fa-exclamation-triangle"></i> Stuck timeout (s)</label>
+        <input type="number" id="node-input-stuckTimeout" placeholder="60" min="30" max="300">
+        <div class="form-tips">Time before recovery attempt when all activity off (default: 60s)</div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-recoveryRetryInterval"><i class="fa fa-repeat"></i> Recovery retry (s)</label>
+        <input type="number" id="node-input-recoveryRetryInterval" placeholder="300" min="60" max="600">
+        <div class="form-tips">Minimum time between recovery attempts (default: 300s = 5min)</div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-immergas-control">
+    <p>Controls Immergas Vitrix gas boiler with forced periodic setpoint writes and stuck heating recovery.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>msg.topic <span class="property-type">string</span></dt>
+        <dd>Datastream topic matching configured topics</dd>
+        <dt>msg.payload <span class="property-type">number | boolean</span></dt>
+        <dd>Value from datastream</dd>
+    </dl>
+
+    <h3>Output</h3>
+    <p>Outputs messages to write node (same output). HREQV.1 is sent periodically as keepalive; HSETV.1 is sent only when needed (THFW.1 != THFW.2) and during recovery.</p>
+    <dl class="message-properties">
+        <dt>msg[0].topic <span class="property-type">string</span></dt>
+        <dd>Heating request write topic (e.g., HREQV.1)</dd>
+        <dt>msg[0].payload <span class="property-type">number</span></dt>
+        <dd>Heating request value (default: 85)</dd>
+        <dt>msg[1].topic <span class="property-type">string</span></dt>
+        <dd>Setpoint write topic (e.g., HSETV.1)</dd>
+        <dt>msg[1].payload <span class="property-type">number</span></dt>
+        <dd>Setpoint value in °C (from THFW.1, +1°C during recovery)</dd>
+    </dl>
+    <p>Connect to <code>uniflex-write-data-streams</code>. Both HREQV.1 and HSETV.1 use <code>h!</code> regtype which writes directly to Modbus (no forced write needed).</p>
+
+    <h3>Details</h3>
+    <p>This node implements Immergas Vitrix boiler control with:</p>
+    <ul>
+        <li><b>Periodic writes:</b> When both heating enable and heating request are active, reads setpoint from THFW.1 and writes both HREQV.1 (heating request value, default 85) and HSETV.1 (setpoint) every configured period (default 20s, max 30s). Both use <code>h!</code> regtype which writes directly to Modbus, bypassing duplicate detection.</li>
+        <li><b>Stuck heating recovery:</b> If heating is requested but all activity and flame are off for more than the stuck timeout (default 60s), temporarily bumps setpoint by +1°C, waits 60s, then restores. Retries every 5 minutes if still stuck.</li>
+        <li><b>Status monitoring:</b> Displays boiler state (idle/DHW on/heating ON) below the node.</li>
+    </ul>
+
+    <h3>Required Connections</h3>
+    <p><b>Input:</b> Connect from <code>uniflex-read-data-streams</code> with all configured topics (THFW.1, ISETW.1-4, IMODW.2-4)</p>
+    <p><b>Output:</b> Connect to <code>uniflex-write-data-streams</code> configured for both HREQV.1 and HSETV.1 (no forced write needed for <code>h!</code> regtype)</p>
+
+    <h3>Status Display</h3>
+    <ul>
+        <li><b>idle</b> (grey) - No heating or DHW activity</li>
+        <li><b>DHW on</b> (blue) - Pump in DHW mode (IMODW.3 = 1)</li>
+        <li><b>heating ON</b> (green) - Pump in heating mode (IMODW.2 = 1)</li>
+        <li><b>(recovery)</b> (orange) - Recovery from stuck heating in progress</li>
+        <li>Yellow color when flame active (IMODW.4 = 1)</li>
+    </ul>
+
+    <h3>References</h3>
+    <ul>
+        <li><a href="https://github.com/janart19/node-red-uniflex">GitHub</a> - node-red-uniflex documentation</li>
+    </ul>
+</script>

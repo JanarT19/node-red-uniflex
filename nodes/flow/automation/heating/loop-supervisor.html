@@ -1,0 +1,65 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-loop-supervisor", {
+        category: "uniflex home",
+        color: "#E8F7CF",
+        icon: "font-awesome/fa-eye",
+        defaults: {
+            name: { value: "" },
+            recoveryBandAbsC: { value: 1.5, validate: RED.validators.number() },
+            maxForceSec: { value: 3600, validate: RED.validators.number() },
+            presenceTopic: { value: "heating/+/+/presence" },
+            roomErrorTopic: { value: "heating/+/room/error" },
+            roomTickTopic: { value: "heating/+/tick" }
+        },
+        inputs: 1,
+        outputs: 1,
+        outputLabels: ["force msgs"],
+        label: function () {
+            return this.name || "loop supervisor";
+        },
+        paletteLabel: "loop supervisor",
+        oneditprepare: function () {
+            function updateTips() {
+                const tips = $("#loop-supervisor-form-tips");
+                tips.text(`band=${$("#node-input-recoveryBandAbsC").val()}°C; maxForce=${$("#node-input-maxForceSec").val()}s`);
+            }
+            $("#node-input-recoveryBandAbsC, #node-input-maxForceSec").on("input change", updateTips);
+            updateTips();
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-loop-supervisor">
+    <div class="form-row"><label>Name</label><input type="text" id="node-input-name" /></div>
+    <div class="form-row"><label>Band |err| (°C)</label><input type="number" id="node-input-recoveryBandAbsC" step="0.1" /></div>
+    <div class="form-row"><label>Max force (s)</label><input type="number" id="node-input-maxForceSec" min="0" /></div>
+    <hr />
+    <b>Topics (wildcards accepted)</b>
+    <div class="form-row"><label>Presence</label><input type="text" id="node-input-presenceTopic" placeholder="heating/+/+/presence" /></div>
+    <div class="form-row"><label>Room error</label><input type="text" id="node-input-roomErrorTopic" placeholder="heating/+/room/error" /></div>
+    <div class="form-row"><label>Room tick</label><input type="text" id="node-input-roomTickTopic" placeholder="heating/+/tick" /></div>
+    <div id="loop-supervisor-form-tips" class="form-tips"></div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-loop-supervisor">
+    <p>Discovers floor loops from presence payloads and forces valves open or closed when room error exceeds a recovery band, until the next room tick or <b>max force</b> expires.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Presence <span class="property-type">object</span></dt>
+        <dd>Topic ending in <code>/presence</code>. Payload must include <code>roomId</code>, <code>loopId</code>, and <code>topics</code> with force-open / force-close topic strings for that loop.</dd>
+        <dt>Room error <span class="property-type">number °C</span></dt>
+        <dd>Topic containing <code>/room/error</code> (room id is path segment 2, e.g. <code>heating/&lt;roomId&gt;/room/error</code>). If |error| ≥ band, forces all registered loops in that room open (positive) or closed (negative).</dd>
+        <dt>Room tick <span class="property-type">any</span></dt>
+        <dd>Topic ending in <code>/tick</code>. Clears active forces for that room (sends 0 on force topics).</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Force open / force close <span class="property-type">0/1</span></dt>
+        <dd>Messages on the force topics advertised in presence. Payload 1 asserts force; 0 clears on tick or when clearing.</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>Matching is by topic shape (suffix / substring), not by filtering the configured wildcard strings. Forces are not re-asserted while still active for a loop. Active forces expire after <b>max force (s)</b> if no tick clears them.</p>
+</script>

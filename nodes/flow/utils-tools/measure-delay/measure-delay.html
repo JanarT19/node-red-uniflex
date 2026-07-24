@@ -1,0 +1,321 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-measure-delay", {
+        category: "uniflex utils",
+        color: "#e6e0f8",
+        defaults: {
+            name: { value: "" },
+            trigger: { value: "" },
+            partner: { value: "" },
+            timeout: { value: 1000, validate: (v) => !isNaN(v) && v > 0 },
+            responseType: { value: "exact" },
+            tolerance: { value: 0, validate: (v) => !isNaN(v) && v >= 0 },
+            suppressTimeoutMessage: { value: false },
+            systemLogging: { value: false },
+            triggerOnChangeOnly: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-clock-o",
+        label: function () {
+            return this.name || "measure delay";
+        },
+        paletteLabel: function () {
+            return "measure delay";
+        },
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-trigger").val(node.trigger);
+            $("#node-input-partner").val(node.partner);
+            $("#node-input-timeout").val(node.timeout);
+            $("#node-input-responseType").val(node.responseType || "exact");
+            $("#node-input-tolerance").val(node.tolerance ?? 0);
+            $("#node-input-suppressTimeoutMessage").prop("checked", !!node.suppressTimeoutMessage);
+            $("#node-input-systemLogging").prop("checked", !!node.systemLogging);
+            $("#node-input-triggerOnChangeOnly").prop("checked", !!node.triggerOnChangeOnly);
+
+            // Update tip text when relevant fields change
+            $("#node-input-trigger, #node-input-timeout, #node-input-suppressTimeoutMessage, #node-input-systemLogging, #node-input-triggerOnChangeOnly, #node-input-responseType").on("change keyup", updateTipText);
+            $("#node-input-responseType").on("change", updateResponseTypeVisibility);
+
+            // Initialize topic dropdown and tip text
+            queryControllerConfig();
+            updateResponseTypeVisibility();
+            updateTipText();
+
+            // Show/hide tolerance input depending on responseType
+            function updateResponseTypeVisibility() {
+                const v = $("#node-input-responseType").val();
+
+                if (v === "tolerance") {
+                    $("#node-input-tolerance").closest(".form-row").show();
+                } else {
+                    $("#node-input-tolerance").closest(".form-row").hide();
+                }
+            }
+
+            // Query topics defined in read and write nodes
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-trigger"));
+                    initializeAutocomplete($("#node-input-partner"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            // Initialize autocomplete for topic inputs in the editable list
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            // Don't change the input value on hover/focus
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            // Call the onSelect callback if provided
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            // Return a list of topics from the controller configuration
+            // Structure: [ { key: "ABC", member: 1, topic: test/1, label: ... } ]
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                return result;
+            }
+
+            // Update tip text based on current settings
+            function updateTipText() {
+                const tipText1 = `Starts timer on message with topic "${$("#node-input-trigger").val() || "<trigger>"}".`;
+                const respType = $("#node-input-responseType").val() || "exact";
+                const tipText2 = respType === "any_change"
+                    ? `Waits up to ${$("#node-input-timeout").val() || "<timeout>"} ms for partner change or partner value different from trigger.`
+                    : `Waits up to ${$("#node-input-timeout").val() || "<timeout>"} ms for a matching response.`;
+                const suppressTimeout = $("#node-input-suppressTimeoutMessage").is(":checked");
+                const sysLog = $("#node-input-systemLogging").is(":checked");
+                const trigOnChange = $("#node-input-triggerOnChangeOnly").is(":checked");
+                const tipText3 = suppressTimeout
+                    ? "Timeout events are suppressed; only matches/mismatches are reported."
+                    : "If no response arrives in time, or the value differs, an error is raised.";
+                const tipText4 = sysLog
+                    ? "System logging enabled: emits trigger/response/timeout lines with epoch timestamps."
+                    : "";
+                const tipText5 = trigOnChange
+                    ? "Trigger only on value change enabled: repeated same trigger values are ignored."
+                    : "";
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+                $("#node-input-tip-text-4").text(tipText4);
+                $("#node-input-tip-text-5").text(tipText5);
+            }
+        },
+        // Save the values from the UI to the node configuration
+        oneditsave: function () {
+            const node = this;
+
+            node.name = $("#node-input-name").val();
+            node.trigger = $("#node-input-trigger").val();
+            node.partner = $("#node-input-partner").val();
+            node.timeout = parseInt($("#node-input-timeout").val());
+            node.responseType = $("#node-input-responseType").val();
+            node.tolerance = parseFloat($("#node-input-tolerance").val()) || 0;
+            node.suppressTimeoutMessage = $("#node-input-suppressTimeoutMessage").is(":checked");
+            node.systemLogging = $("#node-input-systemLogging").is(":checked");
+            node.triggerOnChangeOnly = $("#node-input-triggerOnChangeOnly").is(":checked");
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .measure-delay-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .measure-delay-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .measure-delay-div .form-row div,
+    .measure-delay-div .form-row input,
+    .measure-delay-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .measure-delay-div .form-row select {
+        width: 66% !important;
+    }
+
+    .measure-delay-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .measure-delay-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .measure-delay-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    /* Autocomplete widget styling */
+    .measure-delay-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .measure-delay-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+        position: relative;
+    }
+
+    .measure-delay-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+</style>
+
+<!-- Form fields for the node -->
+<script type="text/html" data-template-name="uniflex-measure-delay">
+    <div class="measure-delay-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+
+        <div class="form-divider"></div>
+
+        <div class="form-row">
+            <label for="node-input-trigger"><i class="fa fa-bolt"></i> Trigger topic</label>
+            <input type="text" id="node-input-trigger" />
+            <div class="help-text">Topic that arms the timer when a message arrives with this topic and payload.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-partner"><i class="fa fa-link"></i> Response topic</label>
+            <input type="text" id="node-input-partner" />
+            <div class="help-text">Topic that must provide the matching value (leave blank for any topic).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-responseType"><i class="fa fa-check-circle"></i> Response type</label>
+            <select id="node-input-responseType">
+                <option value="exact">Only accept exact value</option>
+                <option value="tolerance">Accept difference within X</option>
+                <option value="any_change">Any change to any change</option>
+            </select>
+            <div class="help-text">Exact/tolerance compare trigger and response values. For switch-to-lamp use exact with trigger DI41W.4 and partner DO41W.4. Any-change accepts partner change since trigger or partner value different from trigger (inverted DO/DI).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-tolerance"><i class="fa fa-sliders"></i> Response tolerance</label>
+            <input type="number" id="node-input-tolerance" step="any" />
+            <div class="help-text">Maximum absolute difference allowed to be considered a valid response.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-timeout"><i class="fa fa-clock-o"></i> Timeout (ms)</label>
+            <input type="number" id="node-input-timeout" />
+            <div class="help-text">Wait before raising a timeout error.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-suppressTimeoutMessage"><i class="fa fa-bell-slash-o"></i> Suppress timeout message</label>
+            <input type="checkbox" id="node-input-suppressTimeoutMessage" style="width:auto; max-width:none;" />
+            <div class="help-text">When enabled, timeout status/output is suppressed while still waiting for a late matching response.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-systemLogging"><i class="fa fa-file-text-o"></i> System logging</label>
+            <input type="checkbox" id="node-input-systemLogging" style="width:auto; max-width:none;" />
+            <div class="help-text">Write detailed events (trigger/response/timeout/mismatch) to Node-RED system log with epoch timestamps.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-triggerOnChangeOnly"><i class="fa fa-filter"></i> Trigger only on value change</label>
+            <input type="checkbox" id="node-input-triggerOnChangeOnly" style="width:auto; max-width:none;" />
+            <div class="help-text">Ignore repeated trigger messages with the same value to reduce same-stream noise.</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+        <div class="form-tips" id="node-input-tip-text-4"></div>
+        <div class="form-tips" id="node-input-tip-text-5"></div>
+
+        <br />
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-measure-delay">
+    <p><b>measure-delay</b> waits for a second message after the trigger.</p>
+
+    <ul>
+        <li><b>Trigger topic</b> - first message with this topic arms the timer.</li>
+        <li><b>Response type</b> - exact, tolerance, or any-change (partner value change only).</li>
+        <li><b>Response topic</b> - partner message topic (blank = any topic).</li>
+        <li><b>Timeout</b> - window to wait before raising a timeout error.</li>
+        <li><b>Suppress timeout message</b> - ignore timeout status/output and keep waiting for late response.</li>
+        <li><b>System logging</b> - write detailed events to system log with epoch timestamp for cross-checking external logs.</li>
+        <li><b>Trigger only on value change</b> - ignore repeated same-value triggers to reduce stream republish noise.</li>
+    </ul>
+
+    <p>Outputs:</p>
+    <ul>
+        <li><code>{ok:true}</code> - response received in time and value matches.</li>
+        <li><code>{error:"mismatch"}</code> - response arrived but value differed.</li>
+        <li><code>{error:"timeout"}</code> - response never arrived.</li>
+    </ul>
+</script>

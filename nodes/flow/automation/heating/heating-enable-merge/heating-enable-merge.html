@@ -1,0 +1,210 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-heating-enable-merge", {
+        category: "uniflex home",
+        color: "#FFE4B5",
+        icon: "font-awesome/fa-compress",
+        defaults: {
+            name: { value: "" },
+            scheduleEnableTopic: { value: "" },
+            scheduleHpTopic: { value: "" },
+            scheduleGasTopic: { value: "" },
+            hewTopic1: { value: "" },
+            hewTopic2: { value: "" },
+            hewTopic3: { value: "" },
+            autoHpTopic: { value: "" },
+            autoGasTopic: { value: "" },
+            manualForceHpTopic: { value: "" },
+            manualForceGasTopic: { value: "" },
+            manualBlockHpTopic: { value: "" },
+            manualBlockGasTopic: { value: "" },
+            outTopicGas: { value: "" },
+            outTopicGasRequest: { value: "" },
+            outTopicHp: { value: "" },
+            outTopicCooling: { value: "" }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "heating enable merge";
+        },
+        paletteLabel: "heating enable merge",
+
+        oneditprepare: function () {
+            const node = this;
+            $("#node-input-name").val(node.name || "");
+            $("#node-input-scheduleEnableTopic").val(node.scheduleEnableTopic || "");
+            $("#node-input-scheduleHpTopic").val(node.scheduleHpTopic || "");
+            $("#node-input-scheduleGasTopic").val(node.scheduleGasTopic || "");
+            $("#node-input-hewTopic1").val(node.hewTopic1 || "");
+            $("#node-input-hewTopic2").val(node.hewTopic2 || "");
+            $("#node-input-hewTopic3").val(node.hewTopic3 || "");
+            $("#node-input-autoHpTopic").val(node.autoHpTopic || "");
+            $("#node-input-autoGasTopic").val(node.autoGasTopic || "");
+            $("#node-input-manualForceHpTopic").val(node.manualForceHpTopic || "");
+            $("#node-input-manualForceGasTopic").val(node.manualForceGasTopic || "");
+            $("#node-input-manualBlockHpTopic").val(node.manualBlockHpTopic || "");
+            $("#node-input-manualBlockGasTopic").val(node.manualBlockGasTopic || "");
+            $("#node-input-outTopicGas").val(node.outTopicGas || "");
+            $("#node-input-outTopicGasRequest").val(node.outTopicGasRequest || "");
+            $("#node-input-outTopicHp").val(node.outTopicHp || "");
+            $("#node-input-outTopicCooling").val(node.outTopicCooling || "");
+
+            let _controllers = {};
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (let i = 0; i < controllers.length; i++) {
+                    result.push.apply(result, controllers[i].formattedTopics || []);
+                }
+                return result;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = (request.term || "").toLowerCase();
+                        const topics = getTopics();
+                        const matches = topics.filter(function (item) {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function () { return false; },
+                    select: function (event, ui) {
+                        this.value = ui.item.topic || ui.item.value || ui.item.label || "";
+                        return false;
+                    }
+                });
+            }
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                initializeAutocomplete($("#node-input-scheduleEnableTopic"));
+                initializeAutocomplete($("#node-input-scheduleHpTopic"));
+                initializeAutocomplete($("#node-input-scheduleGasTopic"));
+                initializeAutocomplete($("#node-input-hewTopic1"));
+                initializeAutocomplete($("#node-input-hewTopic2"));
+                initializeAutocomplete($("#node-input-hewTopic3"));
+                initializeAutocomplete($("#node-input-autoHpTopic"));
+                initializeAutocomplete($("#node-input-autoGasTopic"));
+                initializeAutocomplete($("#node-input-manualForceHpTopic"));
+                initializeAutocomplete($("#node-input-manualForceGasTopic"));
+                initializeAutocomplete($("#node-input-manualBlockHpTopic"));
+                initializeAutocomplete($("#node-input-manualBlockGasTopic"));
+                initializeAutocomplete($("#node-input-outTopicGas"));
+                initializeAutocomplete($("#node-input-outTopicGasRequest"));
+                initializeAutocomplete($("#node-input-outTopicHp"));
+                initializeAutocomplete($("#node-input-outTopicCooling"));
+            }).fail(function () {
+                _controllers = {};
+            });
+        },
+
+        oneditsave: function () {
+            this.name = $("#node-input-name").val();
+            this.scheduleEnableTopic = $("#node-input-scheduleEnableTopic").val();
+            this.scheduleHpTopic = $("#node-input-scheduleHpTopic").val();
+            this.scheduleGasTopic = $("#node-input-scheduleGasTopic").val();
+            this.hewTopic1 = $("#node-input-hewTopic1").val();
+            this.hewTopic2 = $("#node-input-hewTopic2").val();
+            this.hewTopic3 = $("#node-input-hewTopic3").val();
+            this.autoHpTopic = $("#node-input-autoHpTopic").val();
+            this.autoGasTopic = $("#node-input-autoGasTopic").val();
+            this.manualForceHpTopic = $("#node-input-manualForceHpTopic").val();
+            this.manualForceGasTopic = $("#node-input-manualForceGasTopic").val();
+            this.manualBlockHpTopic = $("#node-input-manualBlockHpTopic").val();
+            this.manualBlockGasTopic = $("#node-input-manualBlockGasTopic").val();
+            this.outTopicGas = $("#node-input-outTopicGas").val();
+            this.outTopicGasRequest = $("#node-input-outTopicGasRequest").val();
+            this.outTopicHp = $("#node-input-outTopicHp").val();
+            this.outTopicCooling = $("#node-input-outTopicCooling").val();
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-heating-enable-merge">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="e.g. heating enable merge" />
+    </div>
+    <h4 style="margin-top:10px;">Schedule (from calendar via cal2datastream → datastream)</h4>
+    <div class="form-row">
+        <label for="node-input-scheduleHpTopic">Schedule HP topic</label>
+        <input type="text" id="node-input-scheduleHpTopic" style="min-width:140px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-scheduleGasTopic">Schedule gas topic</label>
+        <input type="text" id="node-input-scheduleGasTopic" style="min-width:140px;" />
+    </div>
+    <div class="form-tips">Two members only: current-slot hp_ena and gas_ena. Populate via cal2datastream → write-data-streams. Heaters use this datastream, not direct calendar.</div>
+    <div class="form-row">
+        <label for="node-input-scheduleEnableTopic">Or single topic with payload [hp, gas]</label>
+        <input type="text" id="node-input-scheduleEnableTopic" style="min-width:140px;" />
+    </div>
+    <h4 style="margin-top:10px;">Emergency (forced hp / gas / cooling)</h4>
+    <div class="form-row">
+        <label for="node-input-hewTopic1">Forced HP topic</label>
+        <input type="text" id="node-input-hewTopic1" style="min-width:140px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-hewTopic2">Forced gas topic</label>
+        <input type="text" id="node-input-hewTopic2" style="min-width:140px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-hewTopic3">Forced cooling topic</label>
+        <input type="text" id="node-input-hewTopic3" style="min-width:140px;" />
+    </div>
+    <h4 style="margin-top:10px;">Auto source select (optional, e.g. HSAW)</h4>
+    <div class="form-row">
+        <label for="node-input-autoHpTopic">Auto HP enable topic</label>
+        <input type="text" id="node-input-autoHpTopic" placeholder="0 blocks auto HP, 1 allows auto HP" style="min-width:140px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-autoGasTopic">Auto gas enable topic</label>
+        <input type="text" id="node-input-autoGasTopic" placeholder="0 blocks auto gas, 1 allows auto gas" style="min-width:140px;" />
+    </div>
+    <h4 style="margin-top:10px;">Manual overrides (optional, e.g. HSMW / ISETW)</h4>
+    <div class="form-row">
+        <label for="node-input-manualForceHpTopic">Manual force HP topic</label>
+        <input type="text" id="node-input-manualForceHpTopic" placeholder="1 forces HP on" style="min-width:140px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-manualForceGasTopic">Manual force gas topic</label>
+        <input type="text" id="node-input-manualForceGasTopic" placeholder="1 forces gas on" style="min-width:140px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-manualBlockHpTopic">Manual block HP topic</label>
+        <input type="text" id="node-input-manualBlockHpTopic" placeholder="1 blocks auto HP" style="min-width:140px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-manualBlockGasTopic">Manual block gas topic</label>
+        <input type="text" id="node-input-manualBlockGasTopic" placeholder="1 blocks auto gas" style="min-width:140px;" />
+    </div>
+    <h4 style="margin-top:10px;">Output topics (effective = schedule OR emergency)</h4>
+    <div class="form-row">
+        <label for="node-input-outTopicGas">Gas enable topic</label>
+        <input type="text" id="node-input-outTopicGas" placeholder="e.g. ISETW.2" style="min-width:140px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-outTopicGasRequest">Gas request topic (optional)</label>
+        <input type="text" id="node-input-outTopicGasRequest" placeholder="e.g. ISETW.4" style="min-width:140px;" title="Same value as gas enable; set for immergas HREQV keepalive (e.g. ISETW.4)" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-outTopicHp">HP heating enable topic (optional)</label>
+        <input type="text" id="node-input-outTopicHp" style="min-width:140px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-outTopicCooling">Cooling enable topic (optional)</label>
+        <input type="text" id="node-input-outTopicCooling" style="min-width:140px;" />
+    </div>
+    <p class="form-tips">HP and gas can both be enabled simultaneously when needed. Gas and cooling are mutually exclusive: if both effective, gas wins. Manual force has highest priority, then manual block, then auto-selected demand.</p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-heating-enable-merge">
+    <p><b>Heating enable merge</b> combines schedule (hp/gas from calendar, via a datastream) with emergency (forced hp/gas/cooling), auto source selection, and manual overrides. Outputs effective 0/1 per source. All heaters use this path; no direct calendar access.</p>
+    <p><b>Logic:</b> for each source (HP/gas), priority is: manual force &gt; manual block &gt; (schedule OR emergency) gated by auto select. HP and gas may both be 1. If gas and cooling would both be 1, cooling is forced to 0 (gas wins).</p>
+    <p><b>Schedule:</b> Calendar has hp_ena and gas_ena only (2 members). Populate a schedule datastream via <b>cal2datastream</b> (hp_ena→member 1, gas_ena→member 2) → <b>write-data-streams</b>. Configure this node with the topic for each schedule member.</p>
+    <p><b>Wiring:</b> read-data-streams (schedule + emergency topics) → merge input. Merge output → write-data-streams (gas/HP/cooling enable topics). Use autocomplete to pick your datastream topics.</p>
+</script>

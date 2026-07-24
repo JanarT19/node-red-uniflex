@@ -1,0 +1,174 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-gas-control", {
+        category: "uniflex home",
+        color: "#FFE4D3",
+        icon: "font-awesome/fa-fire",
+        defaults: {
+            name: { value: "" },
+            tankTempTopic: { value: "" },
+            tankTargetTopic: { value: "" },
+            qNeedTopic: { value: "" },
+            enableCmdTopic: { value: "" },
+            blockTopic: { value: "" },
+            spMinTopic: { value: "" },
+            spMaxTopic: { value: "" },
+            outSetpointTopic: { value: "" },
+            outEnableTopic: { value: "" },
+            outRequestTopic: { value: "" },
+            requestWriteTopic: { value: "HREQV.1" },
+            setpointWriteTopic: { value: "HSETV.1" },
+            setpointActualTopic: { value: "THFW.2" },
+            pumpHeatingTopic: { value: "IMODW.2" },
+            pumpDhwTopic: { value: "IMODW.3" },
+            flameTopic: { value: "IMODW.4" },
+            forcedWritePeriodSec: { value: 20, validate: RED.validators.number() },
+            stuckTimeoutSec: { value: 60, validate: RED.validators.number() },
+            recoveryRetrySec: { value: 300, validate: RED.validators.number() },
+            recoveryBumpC: { value: 1.0, validate: RED.validators.number() },
+            setpointMismatchEpsC: { value: 0.1, validate: RED.validators.number() },
+            ffGainCPerKw: { value: 0.0, validate: RED.validators.number() },
+            fbGain: { value: 0.6, validate: RED.validators.number() },
+            maxTrimC: { value: 4.0, validate: RED.validators.number() },
+            requestValue: { value: 85, validate: RED.validators.number() },
+            enableSystemLog: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        outputLabels: ["Gas commands"],
+        label: function () {
+            return this.name || "gas control";
+        },
+        paletteLabel: "gas control",
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (let i = 0; i < controllers.length; i++) {
+                    result.push.apply(result, controllers[i].formattedTopics || []);
+                }
+                return result;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = (request.term || "").toLowerCase();
+                        const topics = getTopics();
+                        const matches = topics.filter(function (item) {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function () { return false; },
+                    select: function (event, ui) {
+                        this.value = ui.item.topic || ui.item.value || ui.item.label || "";
+                        return false;
+                    }
+                });
+            }
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                [
+                    "#node-input-tankTempTopic", "#node-input-tankTargetTopic", "#node-input-qNeedTopic",
+                    "#node-input-enableCmdTopic", "#node-input-blockTopic",
+                    "#node-input-spMinTopic", "#node-input-spMaxTopic",
+                    "#node-input-outSetpointTopic", "#node-input-outEnableTopic", "#node-input-outRequestTopic",
+                    "#node-input-requestWriteTopic", "#node-input-setpointWriteTopic",
+                    "#node-input-setpointActualTopic", "#node-input-pumpHeatingTopic",
+                    "#node-input-pumpDhwTopic", "#node-input-flameTopic"
+                ].forEach((sel) => initializeAutocomplete($(sel)));
+            }).fail(function () {
+                _controllers = {};
+            });
+
+            const labels = $("#dialog-form label[title]");
+            if (!$("#uniflex-help-tooltip-style").length) {
+                $("head").append('<style id="uniflex-help-tooltip-style">.uniflex-help-tooltip{background:#fff8c4 !important;border:1px solid #d4b106 !important;color:#2b2b2b !important;max-width:560px !important;box-shadow:0 2px 6px rgba(0,0,0,.2) !important;padding:8px 10px !important;line-height:1.35 !important;}.uniflex-help-tooltip .ui-tooltip-content{font-size:12px !important;}</style>');
+            }
+            labels.each(function () {
+                if ($(this).data("ui-tooltip")) $(this).tooltip("destroy");
+            });
+            labels.tooltip({
+                track: false,
+                show: { delay: 150 },
+                hide: { delay: 0 },
+                position: { my: "left bottom-10", at: "left top", collision: "flipfit" },
+                classes: { "ui-tooltip": "uniflex-help-tooltip" }
+            });
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-gas-control">
+    <div class="form-row"><label>Name</label><input type="text" id="node-input-name" /></div>
+    <h4>Inputs</h4>
+    <div class="form-row"><label title="Purpose: measured tank temperature (actual). Unit: degC. Source: ESTTW.1. Destination: gas-control feedback.">Tank temp act in</label><input type="text" id="node-input-tankTempTopic" placeholder="ESTTW.1" /></div>
+    <div class="form-row"><label title="Purpose: target tank setpoint intent. Unit: degC. Source: tank-control output. Destination: gas-control setpoint synthesis.">Tank target in</label><input type="text" id="node-input-tankTargetTopic" placeholder="HTSW.2" /></div>
+    <div class="form-row"><label title="Purpose: optional feedforward demand. Unit: kW. Source: tank-control demand output. Destination: setpoint feedforward trim.">Q need in (optional)</label><input type="text" id="node-input-qNeedTopic" placeholder="HQV.1" /></div>
+    <div class="form-row"><label title="Purpose: gas enable command. Unit: 0/1. Source: tank-control gas enable output. Destination: final gas enable output.">Enable cmd in</label><input type="text" id="node-input-enableCmdTopic" placeholder="ISETW.2 command source" /></div>
+    <div class="form-row"><label title="Purpose: safety block input. Unit: 0/1. Source: safety-interlock block gas output. Destination: force gas disable.">Block in</label><input type="text" id="node-input-blockTopic" /></div>
+    <div class="form-row"><label title="Purpose: dynamic minimum setpoint clamp. Unit: degC. Source: HTSW.3. Destination: gas setpoint clamp.">SP min clamp in</label><input type="text" id="node-input-spMinTopic" placeholder="HTSW.3" /></div>
+    <div class="form-row"><label title="Purpose: dynamic maximum setpoint clamp. Unit: degC. Source: HTSW.4. Destination: gas setpoint clamp.">SP max clamp in</label><input type="text" id="node-input-spMaxTopic" placeholder="HTSW.4" /></div>
+
+    <hr />
+    <h4>Outputs</h4>
+    <div class="form-row"><label title="Purpose: gas setpoint output for Immergas setpoint write path. Unit: degC. Source: gas-control output. Destination: THFW.1 (or equivalent).">Gas setpoint out</label><input type="text" id="node-input-outSetpointTopic" placeholder="THFW.1" /></div>
+    <div class="form-row"><label title="Purpose: final gas enable output. Unit: 0/1. Source: gas-control output. Destination: ISETW.2 (or equivalent).">Gas enable out</label><input type="text" id="node-input-outEnableTopic" placeholder="ISETW.2" /></div>
+    <div class="form-row"><label title="Purpose: optional gas request output value when enabled. Unit: system command unit. Source: gas-control output. Destination: ISETW.4 (or equivalent).">Gas request out (optional)</label><input type="text" id="node-input-outRequestTopic" placeholder="ISETW.4" /></div>
+    <div class="form-row"><label title="Purpose: direct setpoint write to boiler register. Unit: degC. Destination: HSETV.1.">Setpoint direct write topic</label><input type="text" id="node-input-setpointWriteTopic" placeholder="HSETV.1" /></div>
+    <div class="form-row"><label title="Purpose: direct keepalive write topic for boiler request. Unit: command value. Source: gas-control periodic keepalive. Destination: HREQV.1.">Request keepalive write topic</label><input type="text" id="node-input-requestWriteTopic" placeholder="HREQV.1" /></div>
+    <div class="form-row"><label title="Purpose: actual boiler setpoint feedback for mismatch detection. Unit: degC. Source: THFW.2.">Setpoint actual in</label><input type="text" id="node-input-setpointActualTopic" placeholder="THFW.2" /></div>
+    <div class="form-row"><label title="Purpose: pump-heating activity feedback for stuck recovery logic. Unit: 0/1. Source: IMODW.2.">Pump heating in</label><input type="text" id="node-input-pumpHeatingTopic" placeholder="IMODW.2" /></div>
+    <div class="form-row"><label title="Purpose: pump-DHW activity feedback for stuck recovery logic. Unit: 0/1. Source: IMODW.3.">Pump DHW in</label><input type="text" id="node-input-pumpDhwTopic" placeholder="IMODW.3" /></div>
+    <div class="form-row"><label title="Purpose: flame activity feedback for stuck recovery logic. Unit: 0/1. Source: IMODW.4.">Flame in</label><input type="text" id="node-input-flameTopic" placeholder="IMODW.4" /></div>
+
+    <h4>Params</h4>
+    <div class="form-row"><label title="Purpose: feedforward trim gain from demand to setpoint. Unit: degC/kW.">FF gain (degC/kW)</label><input type="number" step="0.01" id="node-input-ffGainCPerKw" /></div>
+    <div class="form-row"><label title="Purpose: feedback trim gain from (target-actual) error. Unit: degC/degC.">FB gain</label><input type="number" step="0.01" id="node-input-fbGain" /></div>
+    <div class="form-row"><label title="Purpose: absolute cap for feedback trim magnitude. Unit: degC.">Max trim (degC)</label><input type="number" step="0.1" id="node-input-maxTrimC" /></div>
+    <div class="form-row"><label title="Purpose: value sent to Gas request out when enabled. Unit: system command unit.">Request value</label><input type="number" step="1" id="node-input-requestValue" /></div>
+    <div class="form-row"><label title="Purpose: keepalive period for direct request write topic. Unit: seconds.">Keepalive period (s)</label><input type="number" step="1" id="node-input-forcedWritePeriodSec" /></div>
+    <div class="form-row"><label title="Purpose: duration with all activity signals OFF before recovery is attempted. Unit: seconds.">Stuck timeout (s)</label><input type="number" step="1" id="node-input-stuckTimeoutSec" /></div>
+    <div class="form-row"><label title="Purpose: minimum time between recovery attempts. Unit: seconds.">Recovery retry (s)</label><input type="number" step="1" id="node-input-recoveryRetrySec" /></div>
+    <div class="form-row"><label title="Purpose: temporary setpoint bump used in recovery sequence. Unit: degC.">Recovery bump (degC)</label><input type="number" step="0.1" id="node-input-recoveryBumpC" /></div>
+    <div class="form-row"><label title="Purpose: minimum mismatch needed before direct setpoint write. Unit: degC.">Setpoint mismatch eps (degC)</label><input type="number" step="0.01" id="node-input-setpointMismatchEpsC" /></div>
+    <div class="form-row"><label title="If enabled, gas-control writes detailed internal diagnostics to Node-RED log on each compute/update. State-change logs are always emitted.">Enable system log</label><input type="checkbox" id="node-input-enableSystemLog" style="width:auto;vertical-align:middle;" /></div>
+    <p class="form-tips">This node includes old Immergas quirks: periodic HREQV keepalive, selective HSETV writes by THFW mismatch, and stuck-heating +1C recovery.</p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-gas-control">
+    <p>Gas adapter for Immergas-style boilers: synthesizes tank setpoint/enable, writes HSETV/HREQV with keepalive, and runs stuck-heating recovery.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Tank temp / tank target <span class="property-type">number °C</span></dt>
+        <dd>Required for compute. Feedback and target from tank-control / sensors.</dd>
+        <dt>Enable cmd / block <span class="property-type">0/1</span></dt>
+        <dd>Enable from tank-control; block forces off.</dd>
+        <dt>Q need <span class="property-type">number kW</span></dt>
+        <dd>Optional feedforward demand for setpoint trim.</dd>
+        <dt>SP min / max clamps <span class="property-type">number °C</span></dt>
+        <dd>Optional dynamic clamp limits.</dd>
+        <dt>Setpoint actual / pump / flame <span class="property-type">number | 0/1</span></dt>
+        <dd>THFW.2-style actual SP for mismatch writes; IMODW pump/flame for stuck detection.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Gas setpoint / enable / request <span class="property-type">number | 0/1</span></dt>
+        <dd>Changed-only outputs on configured topics (request value when enabled, else 0).</dd>
+        <dt>HSETV / HREQV direct writes <span class="property-type">number</span></dt>
+        <dd>Setpoint written when desired vs actual mismatch ≥ eps. HREQV keepalive sent periodically while enabled.</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>
+        Desired SP = clamp(tankTarget + FB trim + FF trim). While enabled, if heating pump, DHW pump, and flame all appear off longer than stuck timeout,
+        temporarily bumps setpoint by recovery bump, then restores after 60 s (respects recovery retry spacing).
+        State-change logs always; optional system log adds per-compute diagnostics.
+    </p>
+</script>

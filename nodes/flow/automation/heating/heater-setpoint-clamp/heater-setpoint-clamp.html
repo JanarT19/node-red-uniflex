@@ -1,0 +1,404 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-heater-setpoint-clamp", {
+        category: "uniflex home",
+        color: "#FFE4B5",
+        icon: "font-awesome/fa-thermometer-half",
+        defaults: {
+            name: { value: "" },
+            errorTopic: { value: "", required: true },
+            tankTopic: { value: "", required: true },
+            flowFromTankTopic: { value: "", required: true },
+            flowRateTopic: { value: "" },
+            dhwActiveTopic: { value: "" },
+            outputTopic: { value: "" },
+            tankFlowLimit: { value: 40, validate: RED.validators.number() },
+            heaterLimit: { value: 50, validate: RED.validators.number() },
+            minSetpoint: { value: 25, validate: RED.validators.number() },
+            feedforwardGain: { value: 1, validate: RED.validators.number() },
+            feedforwardBaseFlow: { value: 0.35, validate: RED.validators.number() },
+            Kp: { value: 1, validate: RED.validators.number() },
+            Ii: { value: 0.1, validate: RED.validators.number() },
+            refSampleSec: { value: 60, validate: RED.validators.number() },
+            clampKp: { value: 2, validate: RED.validators.number() },
+            clampIi: { value: 0.03, validate: RED.validators.number() },
+            persistencePath: { value: "" },
+            outputInt: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "heater setpoint clamp";
+        },
+        paletteLabel: "heater setpoint clamp",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            function updateTipText() {
+                const err = $("#node-input-errorTopic").val() || "<not set>";
+                const tank = $("#node-input-tankTopic").val() || "<not set>";
+                const flow = $("#node-input-flowFromTankTopic").val() || "<not set>";
+                const out = $("#node-input-outputTopic").val() || "<same as error topic>";
+                const L = $("#node-input-tankFlowLimit").val() || "40";
+                const H = $("#node-input-heaterLimit").val() || "50";
+                const minSp = $("#node-input-minSetpoint").val() || "25";
+                let tip = `Main PI: error (${err}) → [${minSp}, effectiveH]; Clamp PI: tank (${tank}), flow (${flow}) → effectiveH ≤ ${H}; out → ${out}`;
+                if ($("#node-input-outputInt").prop("checked")) tip += " [integer]";
+                $("#node-input-tip-text").text(tip);
+            }
+
+            $("#node-input-errorTopic, #node-input-tankTopic, #node-input-flowFromTankTopic, #node-input-flowRateTopic, #node-input-dhwActiveTopic, #node-input-outputTopic, #node-input-tankFlowLimit, #node-input-heaterLimit, #node-input-minSetpoint, #node-input-feedforwardGain, #node-input-feedforwardBaseFlow, #node-input-Kp, #node-input-Ii, #node-input-refSampleSec, #node-input-clampKp, #node-input-clampIi, #node-input-persistencePath, #node-input-outputInt").on(
+                "input change",
+                updateTipText
+            );
+
+            queryControllerConfig();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON("uniflex/controller-config", function (data) {
+                    _controllers = data;
+                    initializeAutocomplete($("#node-input-errorTopic"));
+                    initializeAutocomplete($("#node-input-tankTopic"));
+                    initializeAutocomplete($("#node-input-flowFromTankTopic"));
+                    initializeAutocomplete($("#node-input-flowRateTopic"));
+                    initializeAutocomplete($("#node-input-dhwActiveTopic"));
+                    initializeAutocomplete($("#node-input-outputTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function renderTopicItem(ul, item) {
+                const term = (this.term || "").trim();
+                const label = item.label || item.topic || "";
+                let highlightedLabel = label;
+                if (term) {
+                    const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                    highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                }
+                return $("<li></li>").data("ui-autocomplete-item", item).append($("<div></div>").html(highlightedLabel)).appendTo(ul);
+            }
+
+            function initializeAutocomplete(element) {
+                if (element.data("ui-autocomplete")) {
+                    element.autocomplete("destroy");
+                }
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = (request.term || "").toLowerCase();
+                            const selection = getTopics();
+                            const matches = (selection || []).filter(function (obj) {
+                                const l = (obj.label || "").toLowerCase();
+                                const t = (obj.topic || "").toLowerCase();
+                                return l.indexOf(term) > -1 || t.indexOf(term) > -1;
+                            });
+                            matches.sort(function (a, b) {
+                                const ta = (a.topic || a.label || "").toLowerCase();
+                                const tb = (b.topic || b.label || "").toLowerCase();
+                                return ta.localeCompare(tb);
+                            });
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic || ui.item.label);
+                            updateTipText();
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    });
+                element.autocomplete("instance")._renderItem = renderTopicItem;
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers && _controllers.controllers ? _controllers.controllers : [];
+                controllers.forEach(function (c) {
+                    if (c.formattedTopics) result.push.apply(result, c.formattedTopics);
+                });
+                return result.sort(function (a, b) {
+                    const ta = (a.topic || a.label || "").toLowerCase();
+                    const tb = (b.topic || b.label || "").toLowerCase();
+                    return ta.localeCompare(tb);
+                });
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .heater-setpoint-clamp-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .heater-setpoint-clamp-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .heater-setpoint-clamp-div .form-row div,
+    .heater-setpoint-clamp-div .form-row input,
+    .heater-setpoint-clamp-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .heater-setpoint-clamp-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        font-style: italic;
+        color: #555;
+    }
+
+    .heater-setpoint-clamp-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .heater-setpoint-clamp-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 8px 0;
+    }
+
+    .heater-setpoint-clamp-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+    }
+
+    .heater-setpoint-clamp-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .heater-setpoint-clamp-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    .heater-setpoint-clamp-div input[type="text"] {
+        user-select: text !important;
+        cursor: text !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-heater-setpoint-clamp">
+    <div class="heater-setpoint-clamp-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g. heater clamp" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Topics (datastreams from read/write nodes – autocomplete)</b>
+
+        <div class="form-row">
+            <label for="node-input-errorTopic"><i class="fa fa-sign-in"></i> Average room temperature error topic</label>
+            <input type="text" id="node-input-errorTopic" placeholder="e.g. room error" />
+            <div class="help-text">Error = actual − setpoint. Positive = too warm (reduce heat); negative = too cold (need more heat). Process on every message here. Required.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-tankTopic"><i class="fa fa-sign-in"></i> Tank temperature topic</label>
+            <input type="text" id="node-input-tankTopic" placeholder="tank °C" />
+            <div class="help-text">Tank temperature used for clamp PI. Required.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-flowFromTankTopic"><i class="fa fa-sign-in"></i> Flow-from-tank topic</label>
+            <input type="text" id="node-input-flowFromTankTopic" placeholder="flow °C" />
+            <div class="help-text">Flow-from-tank temperature. Required.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-flowRateTopic"><i class="fa fa-tachometer"></i> Flow rate topic (optional)</label>
+            <input type="text" id="node-input-flowRateTopic" placeholder="e.g. floor flow m³/h" />
+            <div class="help-text">Flow rate (m³/h) for feedforward. When flow is high and temp below limit, boost setpoint. Leave empty to disable feedforward.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-dhwActiveTopic"><i class="fa fa-shower"></i> DHW active topic (optional)</label>
+            <input type="text" id="node-input-dhwActiveTopic" placeholder="e.g. DHW active" />
+            <div class="help-text">When value is 1 (or true), heating setpoint is frozen. DHW production temporarily stops heating, but PI integration should not drift. Leave empty to disable.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="optional" />
+            <div class="help-text">Heater setpoint is sent here. If empty, uses error topic.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Main PI (room temperature → setpoint)</b>
+
+        <div class="form-row">
+            <label for="node-input-Kp"><i class="fa fa-sliders"></i> Kp</label>
+            <input type="number" id="node-input-Kp" placeholder="1" step="0.1" min="0" />
+            <div class="help-text">Proportional gain for room error.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-Ii"><i class="fa fa-sliders"></i> Ii</label>
+            <input type="number" id="node-input-Ii" placeholder="0.1" step="0.01" min="0" />
+            <div class="help-text">Integral gain (per reference sample).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-refSampleSec"><i class="fa fa-clock-o"></i> Reference sample (s)</label>
+            <input type="number" id="node-input-refSampleSec" placeholder="60" min="1" />
+            <div class="help-text">Reference period in seconds for integral gain.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-persistencePath"><i class="fa fa-folder-open"></i> Persistence path</label>
+            <input type="text" id="node-input-persistencePath" placeholder="e.g. /home/nodered/heating_state" title="Directory path only -- no filename. The node creates its own state file inside this directory. Leave blank to disable." />
+            <div class="help-text">Directory or full path to .json file. If path ends with .json it is the file path; otherwise a file <code>heater-setpoint-clamp-&lt;name&gt;.json</code> is created inside it. Leave empty to disable.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Clamp PI (tank/flow overshoot → effective high limit)</b>
+
+        <div class="form-row">
+            <label for="node-input-clampKp"><i class="fa fa-sliders"></i> Clamp Kp</label>
+            <input type="number" id="node-input-clampKp" placeholder="2" step="0.5" min="0" />
+            <div class="help-text">Proportional gain for overshoot error. Higher = faster response to overshoot.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-clampIi"><i class="fa fa-sliders"></i> Clamp Ii</label>
+            <input type="number" id="node-input-clampIi" placeholder="0.03" step="0.01" min="0" />
+            <div class="help-text">Integral gain for clamp. Lower = slower return to heater limit after overshoot clears. Default 0.03.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Limits (°C)</b>
+
+        <div class="form-row">
+            <label for="node-input-tankFlowLimit"><i class="fa fa-thermometer-quarter"></i> Tank/flow limit</label>
+            <input type="number" id="node-input-tankFlowLimit" placeholder="40" step="0.5" min="-20" max="80" />
+            <div class="help-text">Target max for tank and flow. Clamp PI error = max(tank, flow) − this.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-heaterLimit"><i class="fa fa-thermometer-half"></i> Heater max setpoint</label>
+            <input type="number" id="node-input-heaterLimit" placeholder="50" step="0.5" min="20" max="80" />
+            <div class="help-text">Maximum heater outflow setpoint (effectiveH cannot exceed this).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-minSetpoint"><i class="fa fa-thermometer-half"></i> Min setpoint</label>
+            <input type="number" id="node-input-minSetpoint" placeholder="25" step="0.5" min="10" max="50" />
+            <div class="help-text">Minimum output setpoint.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Feedforward</b>
+
+        <div class="form-row">
+            <label for="node-input-feedforwardGain"><i class="fa fa-bolt"></i> Feedforward gain</label>
+            <input type="number" id="node-input-feedforwardGain" placeholder="1" step="0.1" min="0" max="10" />
+            <div class="help-text">Boost = (flow − baseFlow) × (limit − flowTemp) × gain. Set 0 to disable feedforward.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-feedforwardBaseFlow"><i class="fa fa-minus-circle"></i> Base flow (no boost)</label>
+            <input type="number" id="node-input-feedforwardBaseFlow" placeholder="0.35" step="0.05" min="0" max="2" />
+            <div class="help-text">Flow rate (m³/h) below which no boost is applied. Accounts for circulation pump min speed. Default 0.35.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Output</b>
+
+        <div class="form-row">
+            <label for="node-input-outputInt"><i class="fa fa-hashtag"></i> Output as integer</label>
+            <input type="checkbox" id="node-input-outputInt" style="display:inline-block; width:auto; vertical-align:middle;" />
+            <div class="help-text">If checked, result is rounded with Math.round() before sending.</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-heater-setpoint-clamp">
+    <h3>Heater setpoint clamp</h3>
+    <p>
+        Generates the heater outflow setpoint using <b>two PI controllers</b>:
+    </p>
+    <ul>
+        <li><b>Main PI</b>: driven by room temperature error → outputs setpoint</li>
+        <li><b>Clamp PI</b>: driven by tank/flow overshoot → controls the effective high limit</li>
+    </ul>
+    <p>
+        This dual-PI approach provides <b>smooth, oscillation-free</b> control. Instead of discrete corrections
+        when overshoot is detected, the clamp PI gradually reduces the effective high limit, and gradually
+        returns it to the heater limit when overshoot clears.
+    </p>
+
+    <h4>Inputs</h4>
+    <ul>
+        <li><b>Error topic</b>: average room temperature error (negative = too cold, need more heat; positive = too warm). Main PI runs on every message here.</li>
+        <li><b>Tank topic</b>: tank temperature (°C). Clamp PI runs on every update.</li>
+        <li><b>Flow-from-tank topic</b>: flow-from-tank temperature (°C). Clamp PI runs on every update.</li>
+        <li><b>Flow rate topic</b> (optional): flow rate (m³/h) for feedforward boost.</li>
+        <li><b>DHW active topic</b> (optional): value 1 or true freezes all setpoint changes during DHW production.</li>
+    </ul>
+
+    <h4>Clamp PI (overshoot control)</h4>
+    <p>
+        The clamp PI controls the <b>effective high limit</b> (effectiveH) for the main PI output:
+    </p>
+    <p>
+        <code>clampError = max(tank, flow) − tankFlowLimit</code><br/>
+        <code>effectiveH = heaterLimit − clampPI(clampError)</code>
+    </p>
+    <p>
+        <b>When overshoot exists</b> (clampError &gt; 0): the clamp PI output increases, reducing effectiveH.
+        This smoothly limits how high the setpoint can go.
+    </p>
+    <p>
+        <b>When no overshoot</b> (clampError &lt; 0): the clamp PI integral slowly decreases, allowing effectiveH
+        to gradually rise back toward heaterLimit. This prevents the "jump back" that caused oscillation.
+    </p>
+    <p>
+        <b>Clamp Kp</b>: Controls immediate response to overshoot. Higher = faster reduction when overshoot detected.
+        Default 2 (1°C overshoot → 2°C immediate reduction in effectiveH).
+    </p>
+    <p>
+        <b>Clamp Ii</b>: Controls how fast effectiveH returns to heaterLimit after overshoot clears.
+        Lower = slower return = more stable. Default 0.03.
+    </p>
+
+    <h4>Feedforward (flow-weighted boost)</h4>
+    <p>
+        When <b>flow rate topic</b> is set, the node calculates a feedforward boost:
+    </p>
+    <p>
+        <code>boost = max(0, flowRate − baseFlow) × max(0, limit − flowTemp) × gain</code>
+    </p>
+    <p>
+        This provides fast response to valve switches without waiting for the slow main PI integral.
+        The boost is added to the main PI output, then clamped to effectiveH.
+    </p>
+
+    <h4>DHW freeze</h4>
+    <p>
+        When <b>DHW active topic</b> receives value 1, all setpoint changes are frozen.
+        Both PI controllers pause integration. When DHW ends, control resumes from where it was frozen.
+    </p>
+
+    <h4>Output</h4>
+    <p>
+        Final output = <code>clamp(mainPI + feedforward, minSetpoint, effectiveH)</code>
+    </p>
+    <p>
+        Persistence saves the main PI integral hourly and on restart. The clamp PI integral is not persisted
+        (starts at 0, meaning effectiveH = heaterLimit initially).
+    </p>
+
+    <h4>Status</h4>
+    <p>
+        Shows the setpoint value. When clamp is active, shows reduction:
+        <code>setpoint: 42.0°C (clamp −3.5)</code>
+    </p>
+</script>

@@ -1,0 +1,370 @@
+<script type="text/html" data-template-name="uniflex-thermal-model-config">
+    <style>
+        .thermal-section { margin-bottom: 15px; }
+        .thermal-section h4 { margin: 10px 0 5px 0; color: #666; border-bottom: 1px solid #ddd; padding-bottom: 3px; }
+        .thermal-inline { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+        .thermal-inline label { min-width: 60px; }
+        .thermal-inline input[type="number"] { width: 70px; }
+        .thermal-tip { font-size: 11px; color: #888; margin: 3px 0 8px 0; }
+        .thermal-derived { background: #f5f5f5; padding: 8px; border-radius: 4px; font-family: monospace; font-size: 11px; }
+        .export-section { margin-top: 15px; padding: 10px; background: #f0f8ff; border-radius: 4px; }
+        .export-section button { margin-right: 10px; }
+    </style>
+
+    <div class="form-row">
+        <label for="node-config-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-config-input-name" placeholder="K20 House" />
+    </div>
+
+    <div class="thermal-section">
+        <h4><i class="fa fa-building"></i> Building Thermal Mass</h4>
+        <div class="thermal-inline">
+            <label for="node-config-input-Cf">Cf:</label>
+            <input type="number" id="node-config-input-Cf" step="0.1" /> kWh/°C
+            <label for="node-config-input-Ci">Ci:</label>
+            <input type="number" id="node-config-input-Ci" step="0.1" /> kWh/°C
+            <label for="node-config-input-Uf">Uf:</label>
+            <input type="number" id="node-config-input-Uf" step="0.01" /> kW/°C
+        </div>
+        <div class="thermal-tip">Cf = floor slab thermal mass. Ci = air + light structures. Uf = floor-to-air heat transfer rate.</div>
+    </div>
+
+    <div class="thermal-section">
+        <h4><i class="fa fa-home"></i> Envelope Heat Loss</h4>
+        <div class="thermal-inline">
+            <label for="node-config-input-Uenv_base">Uenv:</label>
+            <input type="number" id="node-config-input-Uenv_base" step="0.001" /> kW/°C
+            <label for="node-config-input-k_wind">k_wind:</label>
+            <input type="number" id="node-config-input-k_wind" step="0.001" />
+            <label for="node-config-input-k_temp">k_temp:</label>
+            <input type="number" id="node-config-input-k_temp" step="0.001" />
+            <label for="node-config-input-Q_solar_max">Q_solar:</label>
+            <input type="number" id="node-config-input-Q_solar_max" step="0.1" /> kW
+        </div>
+        <div class="thermal-inline" style="margin-top: 5px;">
+            <label for="node-config-input-Tbalance">Tbalance:</label>
+            <input type="number" id="node-config-input-Tbalance" step="0.5" /> °C
+            <span id="thermal-q-internal" style="margin-left: 10px; font-style: italic;"></span>
+        </div>
+        <div class="thermal-tip">Uenv = base envelope loss at Tbalance (calm). k_wind = additional loss per m/s wind. k_temp = additional loss per °C below Tbalance (stack effect). Q_solar = max solar gain. Tbalance = outdoor temp above which no heating needed.</div>
+    </div>
+
+    <div class="thermal-section">
+        <h4><i class="fa fa-arrows-h"></i> Heat Distribution Limits</h4>
+        <div class="thermal-inline">
+            <label for="node-config-input-Q_floor_max">Floor:</label>
+            <input type="number" id="node-config-input-Q_floor_max" step="0.1" /> kW
+            <label for="node-config-input-Q_vent_max">Vent:</label>
+            <input type="number" id="node-config-input-Q_vent_max" step="0.1" /> kW
+            <span id="thermal-q-total" style="margin-left: 15px; font-weight: bold;"></span>
+        </div>
+        <div class="thermal-tip">Maximum heat the distribution system can absorb. Floor + vent = total usable heating power.</div>
+        <div class="thermal-inline" style="margin-top: 5px;">
+            <label for="node-config-input-floor_lead_hours">Floor lead:</label>
+            <input type="number" id="node-config-input-floor_lead_hours" step="0.25" style="width:60px;" /> h
+            <span style="margin-left: 10px; color: #888; font-size: 0.9em;">(pipe-to-surface lag for solar FF)</span>
+        </div>
+    </div>
+
+    <div class="thermal-section">
+        <h4><i class="fa fa-snowflake-o"></i> Heat Pump</h4>
+        <div class="thermal-inline">
+            <label for="node-config-input-hp_Qmax">Power:</label>
+            <input type="number" id="node-config-input-hp_Qmax" step="0.1" /> kW @ +10°C
+        </div>
+        <div class="thermal-inline" style="margin-top: 5px;">
+            <label>COP at</label>
+            <input type="number" id="node-config-input-hp_copT1" step="1" style="width:50px;" /> °C:
+            <input type="number" id="node-config-input-hp_copV1" step="0.1" style="width:55px;" />
+            <label style="margin-left: 15px;">COP at</label>
+            <input type="number" id="node-config-input-hp_copT2" step="1" style="width:50px;" /> °C:
+            <input type="number" id="node-config-input-hp_copV2" step="0.1" style="width:55px;" />
+        </div>
+        <div class="thermal-tip">HP nominal power at +10°C. COP curve for capacity derating at cold temps.</div>
+        <div class="thermal-inline" style="margin-top: 5px;">
+            <label>COP plane:</label>
+            <input type="number" id="node-config-input-cop_a" step="0.01" style="width:55px;" /> +
+            <input type="number" id="node-config-input-cop_b" step="0.001" style="width:60px;" /> ×Tout +
+            <input type="number" id="node-config-input-cop_c" step="0.001" style="width:60px;" /> ×Power
+        </div>
+        <div class="thermal-tip">COP = a + b×Tout + c×Power. Set a=0 to use the two-point COP curve above instead.</div>
+    </div>
+
+    <div class="thermal-section">
+        <h4><i class="fa fa-fire"></i> Gas Boiler</h4>
+        <div class="thermal-inline">
+            <label for="node-config-input-gas_Qmax">Power:</label>
+            <input type="number" id="node-config-input-gas_Qmax" step="0.1" /> kW
+            <label for="node-config-input-gas_efficiency">Efficiency:</label>
+            <input type="number" id="node-config-input-gas_efficiency" step="0.01" style="width:55px;" />
+        </div>
+        <div class="thermal-tip">Gas boiler rated output and efficiency (0.95 for condensing).</div>
+    </div>
+
+    <div class="thermal-section">
+        <h4><i class="fa fa-magic"></i> Weather Feedforward</h4>
+        <div class="form-row">
+            <label for="node-config-input-ffEnable"><i class="fa fa-magic"></i> Enable</label>
+            <input type="checkbox" id="node-config-input-ffEnable" style="width: auto;" />
+        </div>
+        <div class="thermal-inline">
+            <label for="node-config-input-ffHorizon1">Horizon 1:</label>
+            <input type="number" id="node-config-input-ffHorizon1" min="1" max="24" /> h
+            <label for="node-config-input-ffHorizon2">Horizon 2:</label>
+            <input type="number" id="node-config-input-ffHorizon2" min="1" max="48" /> h
+            <label for="node-config-input-ffGainTout">Gain Tout:</label>
+            <input type="number" id="node-config-input-ffGainTout" step="0.01" />
+            <label for="node-config-input-ffGainWind">Gain Wind:</label>
+            <input type="number" id="node-config-input-ffGainWind" step="0.01" />
+        </div>
+        <div class="thermal-tip">Building-wide floor-loop feedforward. Uses Tbalance above for no-heating outdoor reference.</div>
+        <div class="thermal-inline" style="margin-top: 5px;">
+            <label for="node-config-input-ffToutTopicPrefix">Temp topic:</label>
+            <input type="text" id="node-config-input-ffToutTopicPrefix" placeholder="FCTW" style="width:70px;" />
+            <label for="node-config-input-ffWindTopicPrefix">Wind topic:</label>
+            <input type="text" id="node-config-input-ffWindTopicPrefix" placeholder="FCWW" style="width:70px;" />
+        </div>
+        <div class="thermal-tip">Iolayer forecast prefixes from forecast-publisher (FCTW.1-.4, FCWW.1-.4).</div>
+    </div>
+
+    <div class="thermal-section">
+        <h4><i class="fa fa-clock-o"></i> FF Param Learning Window</h4>
+        <div class="thermal-inline">
+            <label for="node-config-input-learningWindowStart">Start:</label>
+            <input type="number" id="node-config-input-learningWindowStart" min="-1" max="23" step="1" style="width:60px;" /> h
+            <label for="node-config-input-learningWindowEnd">End:</label>
+            <input type="number" id="node-config-input-learningWindowEnd" min="-1" max="23" step="1" style="width:60px;" /> h
+        </div>
+        <div class="thermal-tip">Local hours when mpc-room-advanced accepts updated FF params from iolayer. -1/-1 = always accept. Default 02:00-04:00.</div>
+    </div>
+
+    <div class="thermal-section">
+        <h4><i class="fa fa-calculator"></i> Derived Values</h4>
+        <div class="thermal-derived" id="thermal-derived-values">
+            (Calculated on save)
+        </div>
+    </div>
+
+    <div class="export-section">
+        <h4><i class="fa fa-download"></i> Backup / Export</h4>
+        <button type="button" id="thermal-export-btn" class="red-ui-button">
+            <i class="fa fa-save"></i> Export to YAML
+        </button>
+        <span id="thermal-export-status" style="font-size: 11px; color: #666;"></span>
+        <div class="thermal-tip" style="margin-top: 8px;">
+            Exports current config to ~/.node-red/backups/ as human-readable YAML with comments.
+        </div>
+    </div>
+</script>
+
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-thermal-model-config", {
+        category: "config",
+        defaults: {
+            name: { value: "Thermal Model", required: true },
+            // Building
+            Cf: { value: 80.0, required: true },
+            Ci: { value: 43.3, required: true },
+            Uf: { value: 2.0, required: true },
+            // Envelope
+            Uenv_base: { value: 0.45, required: true },
+            k_wind: { value: 0.0211, required: true },
+            k_temp: { value: 0.011, required: true },
+            Q_solar_max: { value: 7.09, required: true },
+            Tbalance: { value: 15, required: true },
+            // Distribution
+            Q_floor_max: { value: 20.0, required: true },
+            Q_vent_max: { value: 2.2, required: true },
+            floor_lead_hours: { value: 2.0, required: true },
+            // HP
+            hp_Qmax: { value: 15.0, required: true },
+            hp_copT1: { value: -10, required: true },
+            hp_copV1: { value: 2.0, required: true },
+            hp_copT2: { value: 10, required: true },
+            hp_copV2: { value: 3.1, required: true },
+            // COP plane (set cop_a=0 to use linear COP above)
+            cop_a: { value: 2.31, required: false },
+            cop_b: { value: 0.050, required: false },
+            cop_c: { value: 0.047, required: false },
+            // Gas
+            gas_Qmax: { value: 28.0, required: true },
+            gas_efficiency: { value: 0.95, required: true },
+            // Weather feedforward
+            ffEnable: { value: true },
+            ffHorizon1: { value: 6, validate: RED.validators.number() },
+            ffHorizon2: { value: 12, validate: RED.validators.number() },
+            ffGainTout: { value: 0.25, validate: RED.validators.number() },
+            ffGainWind: { value: 0.02, validate: RED.validators.number() },
+            ffToutTopicPrefix: { value: "FCTW" },
+            ffWindTopicPrefix: { value: "FCWW" },
+            learningWindowStart: { value: 2, validate: RED.validators.number() },
+            learningWindowEnd: { value: 4, validate: RED.validators.number() }
+        },
+        label: function () {
+            return this.name || "Thermal Model";
+        },
+        oneditprepare: function () {
+            const node = this;
+
+            // Update derived values display
+            function updateDerived() {
+                const Cf = parseFloat($("#node-config-input-Cf").val()) || 80;
+                const Ci = parseFloat($("#node-config-input-Ci").val()) || 43.3;
+                const Uf = parseFloat($("#node-config-input-Uf").val()) || 2.0;
+                const Uenv = parseFloat($("#node-config-input-Uenv_base").val()) || 0.45;
+                const k_wind = parseFloat($("#node-config-input-k_wind").val()) || 0.0211;
+                const k_temp = parseFloat($("#node-config-input-k_temp").val()) || 0.011;
+                const Tbalance = parseFloat($("#node-config-input-Tbalance").val()) || 15;
+                const Q_floor = parseFloat($("#node-config-input-Q_floor_max").val()) || 20;
+                const Q_vent = parseFloat($("#node-config-input-Q_vent_max").val()) || 2.2;
+                const hp_Qmax = parseFloat($("#node-config-input-hp_Qmax").val()) || 15;
+                const hp_copT1 = parseFloat($("#node-config-input-hp_copT1").val()) || -10;
+                const hp_copV1 = parseFloat($("#node-config-input-hp_copV1").val()) || 2.0;
+                const hp_copT2 = parseFloat($("#node-config-input-hp_copT2").val()) || 10;
+                const hp_copV2 = parseFloat($("#node-config-input-hp_copV2").val()) || 3.1;
+
+                const C_total = Cf + Ci;
+                const tau_floor = Cf / Uf;
+                const tau_air = Ci / Uf;
+                const tau_house_calm = C_total / Uenv;
+                const Uenv_10 = Uenv + k_wind * 10;
+                const tau_house_wind = C_total / Uenv_10;
+                const Q_dist = Q_floor + Q_vent;
+                const Q_internal = Uenv * (20 - Tbalance);
+
+                // HP capacity at temps
+                function getCop(T) {
+                    const slope = (hp_copV2 - hp_copV1) / (hp_copT2 - hp_copT1);
+                    return Math.max(1.0, hp_copV1 + slope * (T - hp_copT1));
+                }
+                function getHpCap(T) {
+                    return hp_Qmax * Math.min(1.0, getCop(T) / hp_copV2);
+                }
+
+                const hp_cap_m10 = getHpCap(-10).toFixed(1);
+                const hp_cap_0 = getHpCap(0).toFixed(1);
+
+                // Update total display
+                $("#thermal-q-total").text("Total: " + Q_dist.toFixed(1) + " kW");
+                $("#thermal-q-internal").text("→ Q_internal = " + Q_internal.toFixed(2) + " kW");
+
+                // Update derived values display
+                $("#thermal-derived-values").html(
+                    `C_total = ${C_total.toFixed(1)} kWh/°C | ` +
+                    `τ_floor = ${tau_floor.toFixed(0)}h | ` +
+                    `τ_air = ${tau_air.toFixed(0)}h<br>` +
+                    `τ_house (calm) = ${tau_house_calm.toFixed(0)}h | ` +
+                    `τ_house (10m/s) = ${tau_house_wind.toFixed(0)}h<br>` +
+                    `Uenv @ 10m/s = ${Uenv_10.toFixed(3)} kW/°C<br>` +
+                    `Uenv @ 0°C = ${(Uenv + k_temp * Tbalance).toFixed(3)} kW/°C | ` +
+                    `Uenv @ -10°C = ${(Uenv + k_temp * (Tbalance + 10)).toFixed(3)} kW/°C<br>` +
+                    `Tbalance = ${Tbalance}°C → Q_internal = ${Q_internal.toFixed(2)} kW<br>` +
+                    `HP @ -10°C = ${hp_cap_m10} kW | ` +
+                    `HP @ 0°C = ${hp_cap_0} kW | ` +
+                    `HP @ +10°C = ${hp_Qmax} kW`
+                );
+            }
+
+            // Bind update to all inputs
+            $("input[id^='node-config-input-']").on("change keyup", updateDerived);
+            updateDerived();
+
+            const forecastDatastreams = [
+                { label: "FCTW - ForecaTemp (temperature)", value: "FCTW" },
+                { label: "FCWW - ForecaWind (wind speed)", value: "FCWW" },
+                { label: "FCCW - ForecaClouds (cloudiness)", value: "FCCW" }
+            ];
+            function initForecastAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const matches = forecastDatastreams.filter(function (item) {
+                            return item.label.toLowerCase().indexOf(term) >= 0 ||
+                                item.value.toLowerCase().indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    select: function (event, ui) {
+                        element.val(ui.item.value);
+                        return false;
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", "");
+                });
+            }
+            initForecastAutocomplete($("#node-config-input-ffToutTopicPrefix"));
+            initForecastAutocomplete($("#node-config-input-ffWindTopicPrefix"));
+
+            // Export button
+            $("#thermal-export-btn").on("click", function () {
+                if (!node.id) {
+                    $("#thermal-export-status").text("Save the config first before exporting.");
+                    return;
+                }
+                $.ajax({
+                    url: "thermal-model-config/" + node.id + "/export",
+                    type: "POST",
+                    success: function (resp) {
+                        $("#thermal-export-status").text("Exported: " + resp.filename);
+                    },
+                    error: function (err) {
+                        $("#thermal-export-status").text("Error: " + (err.responseJSON?.error || "Unknown"));
+                    }
+                });
+            });
+        }
+    });
+</script>
+
+<script type="text/html" data-help-name="uniflex-thermal-model-config">
+    <p><b>Thermal Model Configuration</b> - Centralized building physics and heat source parameters for MPC nodes.</p>
+
+    <h3>Purpose</h3>
+    <p>This configuration node stores validated thermal model parameters that are shared between <code>mpc-house</code> and other heating nodes. Centralizing these values ensures consistency and makes tuning easier.</p>
+
+    <h3>Building Thermal Mass</h3>
+    <ul>
+        <li><b>Cf</b> (kWh/°C) - Floor slab thermal mass. Typical: 5-15 for concrete slab.</li>
+        <li><b>Ci</b> (kWh/°C) - Air + light structures thermal mass. Typical: 0.5-2.</li>
+        <li><b>Uf</b> (kW/°C) - Floor-to-air heat transfer rate. Typical: 0.2-0.5.</li>
+    </ul>
+
+    <h3>Envelope Heat Loss</h3>
+    <ul>
+        <li><b>Uenv</b> (kW/°C) - Base envelope heat loss in calm conditions.</li>
+        <li><b>k_wind</b> - Additional heat loss per m/s wind speed.</li>
+        <li><b>Q_solar</b> (kW) - Maximum solar gain on clear sky day.</li>
+    </ul>
+
+    <h3>Heat Distribution Limits</h3>
+    <ul>
+        <li><b>Q_floor_max</b> (kW) - Maximum floor heating capacity.</li>
+        <li><b>Q_vent_max</b> (kW) - Maximum ventilation heating capacity.</li>
+        <li><b>floor_lead_hours</b> (h) - Pipe-to-surface thermal lag. Pre-shifts solar FF for floor circuits so the floor starts absorbing before sun arrives. Default 2.0 h.</li>
+        <li><b>Q_distribution</b> (kW) - Total distribution system capacity (floor + vent + other).</li>
+    </ul>
+
+    <h3>Heat Sources</h3>
+    <ul>
+        <li><b>hp_Qmax</b> (kW) - Heat pump rated capacity at mild conditions (+10°C).</li>
+        <li><b>gas_Qmax</b> (kW) - Gas boiler rated capacity.</li>
+        <li><b>hp_derating</b> - HP capacity derating coefficients at various outdoor temperatures.</li>
+    </ul>
+
+    <h3>Derived Values</h3>
+    <p>The UI displays calculated values based on your inputs:</p>
+    <ul>
+        <li><b>C_total</b> - Total thermal mass (Cf + Ci)</li>
+        <li><b>τ_floor</b> - Floor thermal time constant (hours)</li>
+        <li><b>τ_air</b> - Air thermal time constant (hours)</li>
+        <li><b>τ_house</b> - Whole-house time constant in calm and windy conditions</li>
+        <li><b>HP capacity</b> - Derated HP capacity at -10°C, 0°C, and +10°C</li>
+    </ul>
+
+    <h3>Export/Import</h3>
+    <p>Use the Export button to save configuration to a YAML file for backup. Configuration is stored in Node-RED flows, but YAML export provides human-readable backup.</p>
+
+    <h3>Usage</h3>
+    <p>Select this configuration node in the <code>mpc-house</code> node's "Thermal Model" dropdown. The MPC node will use these parameters for its simulations.</p>
+</script>

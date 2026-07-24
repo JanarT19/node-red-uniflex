@@ -1,0 +1,128 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-hp-watchdog", {
+        category: "uniflex home",
+        color: "#D1FAE5",
+        icon: "font-awesome/fa-heartbeat",
+        defaults: {
+            name: { value: "" },
+            enableCmdTopic: { value: "hp_enable" },
+            needHeatTopic: { value: "HQV.1" },
+            compSpeedTopic: { value: "ESCSV" },
+            defrostTopic: { value: "" },
+            blockTopic: { value: "" },
+            outAvailTopic: { value: "HAVW.2" },
+            needThresholdKw: { value: 0.1, validate: RED.validators.number() },
+            compSpeedMinHz: { value: 10, validate: RED.validators.number() },
+            noEvidenceTimeoutSec: { value: 600, validate: RED.validators.number() },
+            recoveryClearSec: { value: 180, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () { return this.name || "hp-watchdog"; },
+        paletteLabel: "hp watchdog",
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const out = [];
+                const seen = new Set();
+                const controllers = _controllers && Array.isArray(_controllers.controllers) ? _controllers.controllers : [];
+                for (let i = 0; i < controllers.length; i++) {
+                    const c = controllers[i] || {};
+                    const fromFormatted = Array.isArray(c.formattedTopics) ? c.formattedTopics : [];
+                    for (let j = 0; j < fromFormatted.length; j++) {
+                        const item = fromFormatted[j] || {};
+                        const topic = String(item.topic || item.value || "").trim();
+                        if (!topic || seen.has(topic)) continue;
+                        seen.add(topic);
+                        out.push({
+                            label: item.label || topic,
+                            topic: topic
+                        });
+                    }
+                    const services = c.services || {};
+                    Object.keys(services).forEach(function (k) {
+                        if (!k || seen.has(k)) return;
+                        seen.add(k);
+                        out.push({ label: k, topic: k });
+                    });
+                }
+                return out;
+            }
+            function initAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = (request.term || "").toLowerCase();
+                        const matches = getTopics().filter(function (item) {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function () { return false; },
+                    select: function (event, ui) {
+                        this.value = ui.item.topic || ui.item.value || ui.item.label || "";
+                        return false;
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", "");
+                });
+            }
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                [
+                    "#node-input-enableCmdTopic",
+                    "#node-input-needHeatTopic",
+                    "#node-input-compSpeedTopic",
+                    "#node-input-defrostTopic",
+                    "#node-input-blockTopic",
+                    "#node-input-outAvailTopic"
+                ].forEach((sel) => initAutocomplete($(sel)));
+            }).fail(function () { _controllers = {}; });
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-hp-watchdog">
+    <div class="form-row"><label>Name</label><input type="text" id="node-input-name" /></div>
+    <h4>Input topics</h4>
+    <div class="form-row"><label>Enable cmd</label><input type="text" id="node-input-enableCmdTopic" /></div>
+    <div class="form-row"><label>Need heat (kW)</label><input type="text" id="node-input-needHeatTopic" /></div>
+    <div class="form-row"><label>Comp speed (Hz)</label><input type="text" id="node-input-compSpeedTopic" /></div>
+    <div class="form-row"><label>Defrost (opt)</label><input type="text" id="node-input-defrostTopic" /></div>
+    <div class="form-row"><label>Block (opt)</label><input type="text" id="node-input-blockTopic" /></div>
+    <h4>Output topic</h4>
+    <div class="form-row"><label>Available out</label><input type="text" id="node-input-outAvailTopic" /></div>
+    <h4>Params</h4>
+    <div class="form-row"><label>Need threshold (kW)</label><input type="number" step="0.01" id="node-input-needThresholdKw" /></div>
+    <div class="form-row"><label>Min comp speed (Hz)</label><input type="number" step="0.1" id="node-input-compSpeedMinHz" /></div>
+    <div class="form-row"><label>No-evidence timeout (s)</label><input type="number" step="1" id="node-input-noEvidenceTimeoutSec" /></div>
+    <div class="form-row"><label>Recovery clear (s)</label><input type="number" step="1" id="node-input-recoveryClearSec" /></div>
+    <p class="form-tips">Output is problem flag: 0=OK, 1=HP unavailable due to no running evidence while enabled and heat is needed.</p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-hp-watchdog">
+    <p>Heat-pump availability watchdog. While HP is enabled and heat is needed, expects compressor-speed evidence; otherwise raises a problem flag for tank-control.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Enable cmd <span class="property-type">0/1</span></dt>
+        <dd>HP enable command topic.</dd>
+        <dt>Need heat <span class="property-type">number kW</span></dt>
+        <dd>Heat demand; treated as need when &gt; need threshold.</dd>
+        <dt>Comp speed <span class="property-type">number Hz</span></dt>
+        <dd>Evidence of running: speed ≥ min compressor speed.</dd>
+        <dt>Defrost / block <span class="property-type">0/1</span></dt>
+        <dd>Optional. When active, monitoring is idle (problem cleared).</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Available / problem out <span class="property-type">0/1</span></dt>
+        <dd>On configured output topic: <code>0</code> = OK, <code>1</code> = unavailable (no evidence timeout). Wire to tank-control source-problem (HP member).</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>Monitor is active only when enable=1, need=1, and not defrost/block. If evidence is missing longer than <b>no-evidence timeout</b>, problem=1. After evidence returns, problem clears only after <b>recovery clear</b> seconds of continuous evidence. Output is sent only when the problem value changes.</p>
+</script>

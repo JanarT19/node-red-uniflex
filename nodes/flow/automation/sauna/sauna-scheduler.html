@@ -1,0 +1,370 @@
+<!-- sauna-scheduler.html -->
+<script type="text/javascript">
+    console.log("[sauna-scheduler UI] v1.0.0 loaded");
+
+    RED.nodes.registerType('uniflex-sauna-scheduler', {
+        category: "uniflex home",
+        paletteLabel: "sauna scheduler",
+        color: '#FFA500',
+        defaults: {
+            name: { value: "" },
+            targetTime: { value: "18:00" },
+            preheatDuration: { value: 2.0 },
+            heaterPowerKw: { value: 6.0 },
+            priceSeriesTitle: { value: "elering" },
+            eventTitle: { value: "sauna_preheat" },
+            triggerTopic: { value: "" },
+            calendarTopic: { value: "sauna_calendar" },
+            timeFactor: { value: 1.0 },
+            heaterLogPath: { value: "" },
+            maxPreheatPer24hSec: { value: 3600 },
+            enableLogging: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-calendar-check-o",
+        label: function () {
+            return this.name || "sauna-scheduler";
+        },
+        oneditprepare: function () {
+            const node = this;
+
+            // Update message preview when fields change
+            function updatePreview() {
+                const priceSeries = $("#node-input-priceSeriesTitle").val() || "elering";
+                const eventTitle = $("#node-input-eventTitle").val() || "sauna_preheat";
+                const calendarTopic = $("#node-input-calendarTopic").val() || "sauna_calendar";
+                const duration = parseFloat($("#node-input-preheatDuration").val()) || 2.0;
+                const heaterPowerKw = parseFloat($("#node-input-heaterPowerKw").val()) || 6.0;
+                const durationSeconds = Math.round(duration * 3600);
+                const intervalEnergyKwh = (heaterPowerKw * 0.25).toFixed(2);
+
+                // Update preview
+                $("#preview-price-series").text(priceSeries);
+                $("#preview-event-title-1").text(eventTitle);
+                $("#preview-event-title-2").text(eventTitle);
+                $("#preview-topic-1").text(calendarTopic);
+                $("#preview-topic-2").text(calendarTopic);
+                $("#preview-topic-3").text(calendarTopic);
+                $("#preview-duration").text(durationSeconds);
+                $("#preview-duration-hours").text(duration.toFixed(1));
+                $("#preview-interval-energy").text(intervalEnergyKwh);
+            }
+
+            // Update preview on field changes
+            $("#node-input-priceSeriesTitle").on("input", updatePreview);
+            $("#node-input-eventTitle").on("input", updatePreview);
+            $("#node-input-calendarTopic").on("input", updatePreview);
+            $("#node-input-preheatDuration").on("input", updatePreview);
+            $("#node-input-heaterPowerKw").on("input", updatePreview);
+
+            // Initial update
+            updatePreview();
+
+            // Auto-suggest topic names based on event title
+            $("#node-input-eventTitle").on("blur", function () {
+                const eventTitle = $(this).val().trim();
+                if (!eventTitle) return;
+
+                // Only suggest if field is empty or generic
+                const currentTopic = $("#node-input-calendarTopic").val();
+
+                // Generate suggestion
+                const suggestedTopic = eventTitle.replace("_", "_cal_").replace(/[^a-zA-Z0-9_]/g, "_");
+
+                // Auto-fill if empty or generic
+                if (!currentTopic || currentTopic === "sauna_calendar") {
+                    $("#node-input-calendarTopic").val(suggestedTopic);
+                    updatePreview();
+                }
+            });
+        },
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-sauna-scheduler">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Sauna Scheduler">
+    </div>
+
+    <hr>
+    <h4>Schedule Configuration</h4>
+    <p style="margin: 5px 0 10px 0; color: #666; font-size: 0.9em;">
+        <b>Note:</b> Use inject node to trigger pre-heating event creation on wanted time and day of week.
+    </p>
+
+    <div class="form-row">
+        <label for="node-input-targetTime"><i class="fa fa-clock-o"></i> Target Time</label>
+        <input type="text" id="node-input-targetTime" placeholder="18:00" style="width: 100px;">
+        <span style="margin-left: 10px; color: #999;">HH:MM (visiting start time)</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-preheatDuration"><i class="fa fa-hourglass-half"></i> Preheat Duration</label>
+        <input type="number" id="node-input-preheatDuration" step="0.5" min="0.5" max="8" style="width: 100px;">
+        <span style="margin-left: 10px; color: #999;">hours</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-heaterPowerKw"><i class="fa fa-bolt"></i> Heater Power</label>
+        <input type="number" id="node-input-heaterPowerKw" step="0.5" min="0.5" max="30" style="width: 100px;">
+        <span style="margin-left: 10px; color: #999;">kW (used for event kWh value)</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-maxPreheatPer24hSec"><i class="fa fa-hourglass-end"></i> Max Preheat /24h</label>
+        <input type="number" id="node-input-maxPreheatPer24hSec" step="60" min="0" max="86400" style="width: 120px;">
+        <span style="margin-left: 10px; color: #999;">seconds (default 3600 = 1h)</span>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-heaterLogPath"><i class="fa fa-file-text-o"></i> Heater Log Path</label>
+        <input type="text" id="node-input-heaterLogPath" placeholder="/path/to/heater.log">
+        <div class="help-text" style="margin-left: 105px; margin-top: 3px; color: #999; font-size: 0.85em;">
+            Optional. If set, scheduler computes used preheat in last 24h from ON/OFF preheat lines and caps new schedule by remaining quota.
+        </div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-timeFactor"><i class="fa fa-balance-scale"></i> Heat Loss Rate</label>
+        <input type="number" id="node-input-timeFactor" step="0.1" min="0" max="5" style="width: 100px;">
+        <span style="margin-left: 10px; color: #999;">%/h (makes earlier hours more expensive; typical: 1%/h)</span>
+    </div>
+
+    <hr>
+    <h4>Calendar Integration</h4>
+
+    <div class="form-row">
+        <label for="node-input-priceSeriesTitle"><i class="fa fa-line-chart"></i> Price Series</label>
+        <input type="text" id="node-input-priceSeriesTitle" placeholder="elering">
+        <div class="help-text" style="margin-left: 105px; margin-top: 3px; color: #999; font-size: 0.85em;">
+            Calendar series with electricity prices (e.g., "elering", "nordpool").
+        </div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-eventTitle"><i class="fa fa-calendar-check-o"></i> Event Title</label>
+        <input type="text" id="node-input-eventTitle" placeholder="sauna_preheat">
+        <div class="help-text" style="margin-left: 105px; margin-top: 3px; color: #999; font-size: 0.85em;">
+            Calendar series for preheat events (e.g., "sauna_preheat").
+        </div>
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-calendarTopic"><i class="fa fa-exchange"></i> Calendar Topic</label>
+        <input type="text" id="node-input-calendarTopic" placeholder="sauna_calendar">
+        <div class="help-text" style="margin-left: 105px; margin-top: 3px; color: #999; font-size: 0.85em;">
+            Topic for routing messages to/from sql-calendar node (both directions use same topic).
+        </div>
+        <div class="help-text" style="margin-left: 105px; margin-top: 3px; color: #1e90ff; font-size: 0.85em;">
+            -> Wire to ONE sql-calendar node (mode: <b>auto</b>, no topic filter needed) (*)<br>
+            <i>Same topic carries different <code>msg.mode</code> values: "read" -> "delete" -> "create"</i>
+        </div>
+    </div>
+
+    <hr>
+    <h4>Trigger</h4>
+
+    <div class="form-row">
+        <label for="node-input-triggerTopic"><i class="fa fa-sign-in"></i> Trigger Topic</label>
+        <input type="text" id="node-input-triggerTopic" placeholder="(leave empty to accept any)">
+        <div class="help-text" style="margin-left: 105px; margin-top: 3px; color: #999; font-size: 0.85em;">
+            Optional: Only trigger if incoming msg.topic matches. Leave empty to trigger on any message.
+        </div>
+    </div>
+
+    <hr>
+
+    <div class="form-row">
+        <label for="node-input-enableLogging"><i class="fa fa-file-text-o"></i> Enable Logging</label>
+        <input type="checkbox" id="node-input-enableLogging" style="width: auto; display: inline-block; margin-left: 5px;">
+    </div>
+
+    <hr>
+    <h4>Message Preview</h4>
+    <p style="margin: 5px 0 10px 0; color: #666; font-size: 0.9em;">
+        Based on your configuration, the scheduler will send these messages to the sql-calendar node:
+    </p>
+
+    <div id="message-preview" style="background: #f8f9fa; padding: 12px; border: 1px solid #dee2e6; border-radius: 4px; font-family: monospace; font-size: 0.85em;">
+        <div style="margin-bottom: 12px;">
+            <b style="color: #0066cc;">1. Read prices:</b>
+            <pre style="margin: 5px 0 0 20px; padding: 8px; background: #fff; border-left: 3px solid #0066cc;">{
+  topic: "<span id="preview-topic-1">sauna_calendar</span>",
+  mode: "read",
+  title: "<span id="preview-price-series">elering</span>",
+  start: <span style="color: #666;">&lt;now_timestamp&gt;</span>,
+  end: <span style="color: #666;">&lt;target_time_timestamp&gt;</span>
+}</pre>
+        </div>
+
+        <div style="margin-bottom: 12px;">
+            <b style="color: #dc3545;">2. Delete old events:</b>
+            <pre style="margin: 5px 0 0 20px; padding: 8px; background: #fff; border-left: 3px solid #dc3545;">{
+  topic: "<span id="preview-topic-2">sauna_calendar</span>",
+  mode: "delete",
+  title: "<span id="preview-event-title-1">sauna_preheat</span>",
+  start: <span style="color: #666;">&lt;today_00:00&gt;</span>,
+  end: <span style="color: #666;">&lt;today_23:59&gt;</span>
+}</pre>
+        </div>
+
+        <div>
+            <b style="color: #28a745;">3. Create new event:</b>
+            <pre style="margin: 5px 0 0 20px; padding: 8px; background: #fff; border-left: 3px solid #28a745;">{
+  topic: "<span id="preview-topic-3">sauna_calendar</span>",
+  mode: "create",
+  title: "<span id="preview-event-title-2">sauna_preheat</span>",
+  timestamp: <span style="color: #666;">&lt;best_hour_start&gt;</span>,
+  value: <span id="preview-interval-energy">1.50</span>, <span style="color: #666;">// kWh per 15 min interval</span>
+  duration: <span id="preview-duration">7200</span> <span style="color: #666;">// <span id="preview-duration-hours">2.0</span> hours in seconds</span>
+}</pre>
+        </div>
+    </div>
+
+    <p style="margin-top: 10px; font-size: 0.85em; color: #666;">
+        <i class="fa fa-info-circle"></i> All messages are sent sequentially to the same topic with different <code>mode</code> values.
+    </p>
+
+</script>
+
+<script type="text/html" data-help-name="uniflex-sauna-scheduler">
+    <p><b>Sauna Scheduler</b> - Schedules sauna preheating at the cheapest electricity price.</p>
+
+    <h3>Overview</h3>
+    <p>Finds the cheapest hour to preheat sauna before target time, with slight preference for hours closer to target (to minimize cooldown).</p>
+
+    <h3>Configuration</h3>
+    <ul>
+        <li><b>Target Time:</b> When sauna should be ready (HH:MM format)</li>
+        <li><b>Preheat Duration:</b> Hours needed to preheat</li>
+        <li><b>Heater Power:</b> Sauna heater nominal power in kW. Event value is calculated as kWh per 15-minute interval (kW x 0.25h).</li>
+        <li><b>Heat Loss Rate:</b> Energy loss in %/h while waiting. Used to calculate effective price = actual_price x (1 + waiting_hours x loss_rate/100). Typical value: 1%/h.</li>
+        <li><b>Price Series:</b> Calendar title with electricity prices (e.g., "elering")</li>
+        <li><b>Event Title:</b> Calendar title for preheat events (e.g., "sauna_preheat")</li>
+    </ul>
+
+    <h3>Operation</h3>
+    <ol>
+        <li>Triggered by inject node (use cron for specific days, e.g., "0 6 * * 4,0" for Thu/Sun at 6 AM)</li>
+        <li>Reads electricity prices from calendar via sql-calendar node</li>
+        <li>Calculates score for each hour: effective price = price x (1 + waiting_hours x loss_rate/100)</li>
+        <li><b>Automatically deletes</b> old preheat events for today (sends <code>msg.mode = "delete"</code>)</li>
+        <li><b>Automatically creates</b> new preheat event at best hour (sends <code>msg.mode = "create"</code>)</li>
+        <li>Status shows: <code>"preheat: 14:00-16:00"</code></li>
+    </ol>
+    <p style="margin-top: 10px; padding: 8px; background: #e8f4f8; border-left: 3px solid #1e90ff;">
+        <b>Note:</b> The scheduler handles delete and create operations <b>automatically</b>.
+        It uses <code>msg.mode</code> to tell the sql-calendar node which operation to perform.
+        You don't need to configure anything - just wire the nodes and it works!
+    </p>
+
+    <h3>What Happens When Triggered</h3>
+    <p>When inject node triggers the scheduler (e.g., Thu/Sun at 6 AM), the following sequence executes automatically:</p>
+
+    <ol style="line-height: 1.8; padding: 10px; background: #f8f9fa; border-left: 3px solid #007bff;">
+        <li><b>Read prices:</b> Scheduler -> sql-calendar with <code>msg.mode = "read"</code>
+            <ul style="margin-top: 5px;">
+                <li>Fetches electricity prices from <b>Price Series</b> (e.g., "elering")</li>
+                <li>Time range: now until <b>Target Time</b></li>
+            </ul>
+        </li>
+        <li><b>Calculate best hour:</b> Scheduler processes received prices
+            <ul style="margin-top: 5px;">
+                <li>For each hour: effective_price = price x (1 + waiting_hours x <b>Heat Loss Rate</b>/100)</li>
+                <li>Selects hour with lowest effective price</li>
+                <li>Calculates preheat start time: best_hour - <b>Preheat Duration</b></li>
+            </ul>
+        </li>
+        <li><b>Delete old events:</b> Scheduler -> sql-calendar with <code>msg.mode = "delete"</code>
+            <ul style="margin-top: 5px;">
+                <li>Removes all existing events with <b>Event Title</b> (e.g., "sauna_preheat")</li>
+                <li>Only for today (00:00 to 23:59)</li>
+            </ul>
+        </li>
+        <li><b>Create new event:</b> Scheduler -> sql-calendar with <code>msg.mode = "create"</code>
+            <ul style="margin-top: 5px;">
+                <li>Creates event with <b>Event Title</b> at calculated start time</li>
+                <li>Duration: <b>Preheat Duration</b> hours</li>
+                <li>Value: 1 (active)</li>
+            </ul>
+        </li>
+        <li><b>Update status:</b> Node shows <code>"preheat: HH:MM-HH:MM"</code> or error message</li>
+    </ol>
+
+    <p style="margin-top: 10px; padding: 6px; background: #d4edda; border-left: 3px solid #28a745;">
+        <b>OK All steps automatic:</b> You just configure and wire, the scheduler handles everything!
+    </p>
+
+    <h3>Flow Wiring to add pre-heating events to the calendar</h3>
+    <p><b>You need:</b> ONE inject node and ONE sql-calendar node.</p>
+
+    <h4>Setup:</h4>
+    <ol style="line-height: 1.6;">
+        <li><b>sql-calendar node:</b>
+            <ul>
+                <li>Mode: <code>auto</code> (accepts <code>msg.mode</code> from scheduler)</li>
+                <li>Output topic: Same as "Calendar Topic" above (e.g., <code>sauna_calendar</code>)</li>
+                <li>Topic filter: <b>Leave empty</b> (node accepts all incoming messages on its wire)</li>
+                <li>Wire: <code>sauna-scheduler <-> sql-calendar</code> (bidirectional - both ways)</li>
+            </ul>
+        </li>
+        <li><b>inject node:</b>
+            <ul>
+                <li>Cron: e.g., <code>"0 6 * * 4,0"</code> (Thu/Sun at 6 AM)</li>
+                <li>Wire: <code>inject -> sauna-scheduler</code> (one way)</li>
+            </ul>
+        </li>
+    </ol>
+
+    <p style="margin-top: 10px; padding: 6px; background: #fff3cd; border-left: 3px solid #ffc107;">
+        <b>Important:</b> The same topic (<code>sauna_calendar</code>) carries different operations sequentially:<br>
+        1st: <code>msg.mode = "read"</code> -> 2nd: <code>msg.mode = "delete"</code> -> 3rd: <code>msg.mode = "create"</code><br>
+        The sql-calendar node (in <code>auto</code> mode) processes each message based on its <code>msg.mode</code>.
+    </p>
+
+
+    <h3>How It Works (Fully Automated)</h3>
+    <ol>
+        <li>Inject node triggers scheduler on specific days (e.g., Thu/Sun 6 AM)</li>
+        <li>Scheduler -> sql-calendar: <code>mode="read"</code> to fetch "elering" prices</li>
+        <li>sql-calendar -> Scheduler: Returns price data</li>
+        <li>Scheduler calculates best preheat hour (cheapest price + heat loss)</li>
+        <li>Scheduler -> sql-calendar: <code>mode="delete"</code> to remove old "sauna_preheat" events</li>
+        <li>sql-calendar -> Scheduler: Confirms deletion</li>
+        <li>Scheduler -> sql-calendar: <code>mode="create"</code> to add new "sauna_preheat" event</li>
+        <li>sql-calendar -> Scheduler: Confirms creation</li>
+        <li>Scheduler shows status: <code>"preheat: 14:00-16:00"</code></li>
+    </ol>
+    <p style="margin-top: 10px; padding: 6px; background: #d4edda; border-left: 3px solid #28a745;">
+        <b>OK Zero configuration needed:</b> Just wire the nodes, all operations are automatic!
+    </p>
+
+    <h3>Separate Flow for Checking Active Events</h3>
+    <p>Scheduler only creates events. Use separate flow to check if preheat is currently active:</p>
+    <pre>
+[inject: every 60s] -> [sql-calendar: mode=check, title="sauna_preheat"]
+                         ?
+                      [format to 0/1]
+                         ?
+                      MQTT: SAKW.3 -> IO layer -> sauna-control
+    </pre>
+
+    <h3>Example</h3>
+    <ul>
+        <li>Target Time: 18:00</li>
+        <li>Preheat Duration: 2 hours</li>
+        <li>Inject cron: "0 6 * * 4,0" (Thu/Sun at 6 AM)</li>
+    </ul>
+    <p>Result: Each Thursday and Sunday at 6 AM, finds the cheapest 2-hour block ending by 6 PM.</p>
+
+    <h3>Status Messages</h3>
+    <ul>
+        <li><code>"preheat: 14:00-16:00"</code> - Event created successfully</li>
+        <li><code>"reading prices..."</code> - Fetching price data</li>
+        <li><code>"deleting old..."</code> - Removing previous events</li>
+        <li><code>"creating event..."</code> - Writing new event</li>
+        <li><code>"error: ..."</code> - Something went wrong</li>
+    </ul>
+</script>

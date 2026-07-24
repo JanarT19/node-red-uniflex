@@ -1,0 +1,364 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-room-loop", {
+        category: "uniflex home",
+        color: "#FFD9B3",
+        icon: "font-awesome/fa-home",
+        defaults: {
+            name: { value: "" },
+
+            globalTickTopic: { value: "heating/tick", required: true },
+            roomTickTopic: { value: "", required: true },
+
+            tickDelaySec: {
+                value: 0,
+                validate: function (v) {
+                    return v !== "" && !isNaN(v) && Number(v) >= 0;
+                }
+            },
+
+            tRoomTopic: { value: "", required: true },
+            spRoomTopic: { value: "", required: true },
+            tRetOut: { value: "", required: true },
+
+            errorTopic: { value: "" },
+
+            // Embedded PID parameters
+            Kp: {
+                value: 1.0,
+                validate: function (v) {
+                    return v !== "" && !isNaN(v) && Number(v) >= 0 && Number(v) <= 1;
+                }
+            },
+            Ii: {
+                value: 0.0,
+                validate: function (v) {
+                    return v !== "" && !isNaN(v) && Number(v) >= 0 && Number(v) <= 1;
+                }
+            },
+            Dd: {
+                value: 0.0,
+                validate: function (v) {
+                    return v !== "" && !isNaN(v) && Number(v) >= 0 && Number(v) <= 1;
+                }
+            },
+
+            outClampLow: { value: 10, validate: RED.validators.number() },
+            outClampHigh: { value: 40, validate: RED.validators.number() },
+
+            persistencePath: { value: "/home/nodered/heating_state" }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "room loop";
+        },
+        paletteLabel: "room loop",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            function updateTipText() {
+                const delay = $("#node-input-tickDelaySec").val() || "<not set>";
+                const tickTopic = $("#node-input-roomTickTopic").val() || `<not set>`;
+                const tretOut = $("#node-input-tRetOut").val() || `<not set>`;
+                const persistencePath = $("#node-input-persistencePath").val();
+                const name = $("#node-input-name").val();
+
+                const tipText1 = `On global tick, this node will publish a room sync tick '${tickTopic}' after ${delay}s delay.`;
+                const tipText2 = `Floor setpoint will be calculated using embedded PID controller and published to floor loops via '${tretOut}'`;
+                const tipText3 = persistencePath
+                    ? `PID parameters will be saved to '${persistencePath}/room-loop-${name}.json' for persistence across restarts.`
+                    : "PID parameters will not be persisted across restarts (persistence path not set).";
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+            }
+
+            // Define event listeners for form fields
+            $("#node-input-tickDelaySec, #node-input-roomTickTopic, #node-input-tRetOut, #node-input-persistencePath").on("input change", updateTipText);
+
+            // Initialize topic dropdown and tip text
+            queryControllerConfig();
+            updateTipText();
+
+            // Query topics defined in read and write nodes
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-tRoomTopic"));
+                    initializeAutocomplete($("#node-input-spRoomTopic"));
+
+                    initializeAutocomplete($("#node-input-tRetOut"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            // Initialize autocomplete for topic inputs in the editable list
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            // Don't change the input value on hover/focus
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            // Call the onSelect callback if provided
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            // Return a list of topics from the controller configuration
+            // Structure: [ { key: "ABC", member: 1, topic: test/1, label: ... } ]
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                return result;
+            }
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .room-loop-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .room-loop-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .room-loop-div .form-row div,
+    .room-loop-div .form-row>input,
+    .room-loop-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .room-loop-div .form-row select {
+        width: 66% !important;
+    }
+
+    .room-loop-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .room-loop-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .room-loop-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    /* Autocomplete widget styling */
+    .room-loop-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .room-loop-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+        position: relative;
+    }
+
+    .room-loop-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+</style>
+
+<!-- Form fields for the node -->
+<script type="text/html" data-template-name="uniflex-room-loop">
+    <div class="room-loop-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" />
+            <div class="help-text">Name must not contain spaces or forbidden topic characters (#, +, null).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Synchronization ticks</b>
+
+        <div class="form-row">
+            <label for="node-input-globalTickTopic"><i class="fa fa-clock-o"></i> Global tick topic</label>
+            <input type="text" id="node-input-globalTickTopic" placeholder="heating/tick" />
+            <div class="help-text">Global tick input topic; all room loops subscribe to this.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-tickDelaySec"><i class="fa fa-clock-o"></i> Global tick delay (s)</label>
+            <input type="number" id="node-input-tickDelaySec" min="0" />
+            <div class="help-text">Delay applied to the global tick before publishing the room-scoped tick.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-roomTickTopic"><i class="fa fa-clock-o"></i> Room tick topic</label>
+            <input type="text" id="node-input-roomTickTopic" placeholder="heating/<name>/tick" />
+            <div class="help-text">Room-scoped tick published after delay; floor loops subscribe to this.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Room and floor parameters</b>
+
+        <div class="form-row">
+            <label for="node-input-tRoomTopic"><i class="fa fa-thermometer-empty"></i> Room temperature topic</label>
+            <input type="text" id="node-input-tRoomTopic" />
+            <div class="help-text">The topic to receive the current room temperature value (°C).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-spRoomTopic"><i class="fa fa-thermometer-half"></i> Room setpoint topic</label>
+            <input type="text" id="node-input-spRoomTopic" />
+            <div class="help-text">The topic to receive the room temperature setpoint (°C).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-errorTopic"><i class="fa fa-exclamation-triangle"></i> Room error topic</label>
+            <input type="text" id="node-input-errorTopic" placeholder="heating/<name>/error" />
+            <div class="help-text">If set, publishes message on room tick.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-tRetOut"><i class="fa fa-thermometer-half"></i> Floor setpoint topic</label>
+            <input type="text" id="node-input-tRetOut" />
+            <div class="help-text">Topic to publish computed floor setpoint for floor loops; floor loops subscribe to this.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outClampLow"><i class="fa fa-minus"></i> Min floor setpoint (°C)</label>
+            <input type="number" id="node-input-outClampLow" step="0.1" />
+            <div class="help-text">Calculated floor setpoint output clamp minimum.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outClampHigh"><i class="fa fa-plus"></i> Max floor setpoint (°C)</label>
+            <input type="number" id="node-input-outClampHigh" step="0.1" />
+            <div class="help-text">Calculated floor setpoint output clamp maximum.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>PID parameters</b>
+
+        <div class="form-row">
+            <label for="node-input-Kp"><i class="fa fa-bolt"></i> Kp</label>
+            <input type="number" id="node-input-Kp" step="0.01" />
+            <div class="help-text">Proportional gain for the embedded PID controller.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-Ii"><i class="fa fa-refresh"></i> Ii</label>
+            <input type="number" id="node-input-Ii" step="0.01" />
+            <div class="help-text">Integral increment per reference sample.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-Dd"><i class="fa fa-minus"></i> Dd</label>
+            <input type="number" id="node-input-Dd" step="0.01" disabled />
+            <div class="help-text">Derivative-on-measurement, not required (set to 0).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-persistencePath"><i class="fa fa-save"></i> Persistence path</label>
+            <input type="text" id="node-input-persistencePath" placeholder="/home/nodered/heating_state" title="Directory path only -- no filename. The node creates its own state file inside this directory. Leave blank to disable." />
+            <div class="help-text">Directory path where PI state JSON files are saved.</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-room-loop">
+    <h3>Room-loop</h3>
+    <p>
+        Coordinates per-room PWM timing and publishes a room-scoped tick used by floor loops. Optionally computes a floor return setpoint (Tret_sp) using an embedded PI core and
+        emits heat/cool request signals.
+    </p>
+
+    <h4>Inputs</h4>
+    <ul>
+        <li><b>Global tick</b> -- expects <code>{ ts, periodSec }</code> to synchronize room ticks.</li>
+        <li><b>Room temperature</b> -- numeric (°C) on the configured Troom topic.</li>
+        <li><b>Room setpoint</b> -- numeric (°C) on the configured SP topic.</li>
+        <li><b>Optional refs</b> -- reference temperature/humidity for dewpoint safety (optional topics).</li>
+        <li><b>Force / cooling inputs</b> -- IO topics forwarded to room-scoped topics for floor loops.</li>
+    </ul>
+
+    <h4>Outputs</h4>
+    <ul>
+        <li><b>Room tick</b> -- publishes <code>{ ts, periodSec }</code> on the configured room tick topic after <code>tickDelaySec</code> seconds.</li>
+        <li><b>Floor setpoint (Tret_sp)</b> -- optional: computed by the embedded PI (Dd=0) and published to the configured Floor SP out topic.</li>
+        <li><b>Heat / Cool requests</b> -- boolean/DO outputs emitted on configured topics.</li>
+        <li><b>Presence</b> -- optional startup presence message <code>heating/&lt;roomId&gt;/presence</code> for discovery.</li>
+    </ul>
+
+    <h4>Behavior summary</h4>
+    <ol>
+        <li>On a global tick the node waits <code>tickDelaySec</code> and then publishes the room tick <code>{ ts, periodSec }</code>.</li>
+        <li>If room temperature and setpoint are available the node can compute <code>Tret_sp</code> using the embedded PI (Kp, Ii). The PI runs in Ii-mode with <code>Dd=0</code>.</li>
+        <li>Forward incoming force and cooling IO topics to room-scoped topics consumed by floor loops.</li>
+    </ol>
+
+    <h4>Example messages</h4>
+    <p>Global tick (input):</p>
+    <pre>{ "ts": 1690000000, "periodSec": 300 }</pre>
+
+    <p>Room tick (output):</p>
+    <pre>{ "ts": 1690000300, "periodSec": 300 }</pre>
+
+    <p>Floor setpoint (output):</p>
+    <pre>18.2  // numeric °C</pre>
+
+    <h4>Notes</h4>
+    <ul>
+        <li>PI parameters (Kp, Ii) and clamp limits are configurable in the UI; Dd is unused for heating.</li>
+        <li>Presence emission and forwarding topics help Coordinator and floor loops auto-discover room capabilities.</li>
+        <li>All topics can be autocompleted from the controller configuration in the editor.</li>
+    </ul>
+</script>

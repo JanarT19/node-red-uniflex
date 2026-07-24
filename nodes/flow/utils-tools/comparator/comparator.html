@@ -1,0 +1,543 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-comparator", {
+        category: "uniflex utils",
+        color: "#87CEEB",
+        icon: "font-awesome/fa-balance-scale",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9_-]+$/.test(v) && v.length <= 50;
+                }
+            },
+            operator: { value: ">" }, // ">", "<", "in-range", "out-of-range"
+            inputTopic1: { value: "", required: true },
+            inputComment1: { value: "" },
+            input2Type: { value: "topic" },
+            inputTopic2: { value: "" },
+            inputComment2: { value: "" },
+            inputFixed2: { value: "" },
+            input3Type: { value: "topic" },
+            inputTopic3: { value: "" },
+            inputComment3: { value: "" },
+            inputFixed3: { value: "" },
+            outputTopic: { value: "" },
+            outputComment: { value: "" },
+            hysteresis: { value: 0.0, validate: RED.validators.number() },
+            colorWhen0: { value: "blue" },
+            colorWhen1: { value: "green" },
+            enableSystemLog: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "comparator";
+        },
+        paletteLabel: "comparator",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Operator change handler
+            $("#node-input-operator").on("change", function () {
+                updateOperatorFields();
+                updateTipText();
+            });
+
+            // Input type change handlers
+            $("#node-input-input2Type, #node-input-input3Type").on("change", function () {
+                updateInputFields();
+                updateTipText();
+            });
+
+            function updateOperatorFields() {
+                const operator = $("#node-input-operator").val();
+                if (operator === "in-range" || operator === "out-of-range") {
+                    $(".input3-section").show();
+                    $("#hysteresis-row").hide();
+                } else {
+                    $(".input3-section").hide();
+                    $("#input3-topic-help").hide();
+                    $("#hysteresis-row").show();
+                }
+                updateInputFields();
+            }
+
+            function updateInputFields() {
+                // Input 2
+                const input2Type = $("#node-input-input2Type").val();
+                if (input2Type === "fixed") {
+                    $("#input2-topic-row").hide();
+                    $("#input2-topic-help").hide();
+                    $("#input2-fixed-row").show();
+                } else {
+                    $("#input2-topic-row").show();
+                    $("#input2-topic-help").show();
+                    $("#input2-fixed-row").hide();
+                }
+
+                // Input 3 (only for in-range / out-of-range)
+                const operator = $("#node-input-operator").val();
+                if (operator === "in-range" || operator === "out-of-range") {
+                    const input3Type = $("#node-input-input3Type").val();
+                    if (input3Type === "fixed") {
+                        $("#input3-topic-row").hide();
+                        $("#input3-topic-help").hide();
+                        $("#input3-fixed-row").show();
+                    } else {
+                        $("#input3-topic-row").show();
+                        $("#input3-topic-help").show();
+                        $("#input3-fixed-row").hide();
+                    }
+                }
+
+                // Re-initialize autocomplete for visible topic fields
+                initializeAutocomplete($("#node-input-inputTopic1"));
+                if (input2Type === "topic") {
+                    initializeAutocomplete($("#node-input-inputTopic2"));
+                }
+                if ((operator === "in-range" || operator === "out-of-range") && $("#node-input-input3Type").val() === "topic") {
+                    initializeAutocomplete($("#node-input-inputTopic3"));
+                }
+            }
+
+            function updateTipText() {
+                const operator = $("#node-input-operator").val();
+                const input1 = $("#node-input-inputTopic1").val() || "<not set>";
+                const input2Type = $("#node-input-input2Type").val();
+                const input3Type = $("#node-input-input3Type").val();
+
+                let input2 = input2Type === "fixed" ? ($("#node-input-inputFixed2").val() || "<not set>") : ($("#node-input-inputTopic2").val() || "<not set>");
+
+                let tipText = "";
+                let formula = "";
+                if (operator === "in-range" || operator === "out-of-range") {
+                    let input3 = input3Type === "fixed" ? ($("#node-input-inputFixed3").val() || "<not set>") : ($("#node-input-inputTopic3").val() || "<not set>");
+                    const opSym = operator === "in-range" ? " in " : " out ";
+                    formula = `${input1}${opSym}[${input2}, ${input3}]`;
+                    const opText = operator === "in-range" ? "inside range" : "outside range";
+                    tipText = `Checks if ${input1} is ${opText} [${input2}, ${input3}]. Outputs 1 if true, 0 if false.`;
+                } else {
+                    formula = `${input1} ${operator} ${input2}`;
+                    const hysteresis = $("#node-input-hysteresis").val() || "0.0";
+                    tipText = `Compares ${input1} ${operator} ${input2} (hysteresis: ${hysteresis}). Outputs 1 if true, 0 if false.`;
+                }
+                const output = $("#node-input-outputTopic").val() || "";
+                if (output) {
+                    formula += " \u2192 " + output;
+                } else {
+                    formula += " \u2192 (wire)";
+                }
+
+                $("#node-input-formula").text(formula);
+                $("#node-input-tip-text").text(tipText + (output ? ` Output topic: ${output}.` : ""));
+            }
+
+            $("#node-input-input2Type, #node-input-input3Type, #node-input-inputFixed2, #node-input-inputFixed3, #node-input-inputTopic1, #node-input-inputTopic2, #node-input-inputTopic3, #node-input-outputTopic, #node-input-hysteresis, #node-input-operator").on("input change", updateTipText);
+
+            queryControllerConfig();
+            updateOperatorFields();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    // Initialize autocomplete for all topic fields
+                    initializeAutocomplete($("#node-input-inputTopic1"));
+                    if ($("#node-input-input2Type").val() === "topic") {
+                        initializeAutocomplete($("#node-input-inputTopic2"));
+                    }
+                    const operator = $("#node-input-operator").val();
+                    if ((operator === "in-range" || operator === "out-of-range") && $("#node-input-input3Type").val() === "topic") {
+                        initializeAutocomplete($("#node-input-inputTopic3"));
+                    }
+                    initializeAutocomplete($("#node-input-outputTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            // Shared render: show topic + description (label) like input topic selection
+            function renderTopicItem(ul, item) {
+                const term = this.term.trim();
+                const label = item.label || item.topic || "";
+                let highlightedLabel = label;
+                if (term) {
+                    const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                    highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                }
+                return $("<li></li>").data("ui-autocomplete-item", item).append($("<div></div>").html(highlightedLabel)).appendTo(ul);
+            }
+
+            function initializeAutocomplete(element, onSelect = null) {
+                if (element.data("ui-autocomplete")) {
+                    element.autocomplete("destroy");
+                }
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+                            const matches = selection?.filter((obj) => {
+                                const label = (obj.label || "").toLowerCase();
+                                const topic = (obj.topic || "").toLowerCase();
+                                return label.indexOf(term) > -1 || topic.indexOf(term) > -1;
+                            });
+                            matches.sort((a, b) => {
+                                const topicA = (a.topic || a.label || "").toLowerCase();
+                                const topicB = (b.topic || b.label || "").toLowerCase();
+                                return topicA.localeCompare(topicB);
+                            });
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    });
+                element.autocomplete("instance")._renderItem = renderTopicItem;
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                // Sort by topic (key) alphabetically
+                return result.sort((a, b) => {
+                    const topicA = (a.topic || a.label || "").toLowerCase();
+                    const topicB = (b.topic || b.label || "").toLowerCase();
+                    return topicA.localeCompare(topicB);
+                });
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .comparator-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .comparator-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .comparator-div .form-row div,
+    .comparator-div .form-row input,
+    .comparator-div .form-row select,
+    .comparator-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .comparator-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        font-style: italic;
+        color: #555;
+    }
+
+    .comparator-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .comparator-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .comparator-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .comparator-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .comparator-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    .comparator-div input[type="text"] {
+        user-select: text !important;
+        cursor: text !important;
+    }
+
+    /* Topic + remark on one row, equal width */
+    .comparator-div .form-row-split {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+    }
+
+    .comparator-div .form-row-split .form-cell {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .comparator-div .form-row-split .form-cell label {
+        display: block;
+        width: 100% !important;
+        margin-bottom: 2px;
+    }
+
+    .comparator-div .form-row-split .form-cell input {
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box;
+    }
+
+    .comparator-div .formula-row {
+        margin-top: 4px;
+        margin-bottom: 4px;
+    }
+
+    .comparator-div .formula-display {
+        width: 100%;
+        font-family: Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        color: #333;
+        background: #f0f4f8;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        padding: 6px 8px;
+        min-height: 1.2em;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-comparator">
+    <div class="comparator-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g., comparator1" />
+            <div class="help-text">Unique identifier. Only letters, numbers, underscore, hyphen.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Comparison Operator</b>
+
+        <div class="form-row">
+            <label for="node-input-operator"><i class="fa fa-code"></i> Operator</label>
+            <select id="node-input-operator">
+                <option value=">">Greater than (&gt;)</option>
+                <option value="<">Less than (&lt;)</option>
+                <option value="in-range">In range (input2..input3)</option>
+                <option value="out-of-range">Out of range (input2..input3)</option>
+            </select>
+            <div class="help-text">Input 2 and Input 3 define the range [min, max]. <b>In range</b>: output 1 if value is inside. <b>Out of range</b>: output 1 if value is outside.</div>
+        </div>
+        <div class="form-row formula-row">
+            <div id="node-input-formula" class="formula-display"></div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Input 1 (Topic)</b>
+
+        <div class="form-row form-row-split">
+            <div class="form-cell">
+                <label for="node-input-inputTopic1"><i class="fa fa-signal"></i> Topic</label>
+                <input type="text" id="node-input-inputTopic1" placeholder="e.g., AI1" />
+            </div>
+            <div class="form-cell">
+                <label for="node-input-inputComment1"><i class="fa fa-comment-o"></i> Remark</label>
+                <input type="text" id="node-input-inputComment1" placeholder="e.g., Cabinet temp sensor" />
+            </div>
+        </div>
+        <div class="help-text">Topic with autocomplete. Optional remark (topics can be shortened).</div>
+
+        <div class="form-divider"></div>
+        <b>Input 2</b>
+
+        <div class="form-row">
+            <label for="node-input-input2Type"><i class="fa fa-exchange"></i> Input 2 type</label>
+            <select id="node-input-input2Type">
+                <option value="topic">Topic</option>
+                <option value="fixed">Fixed value</option>
+            </select>
+            <div class="help-text">Select whether input 2 comes from a topic or is a fixed value.</div>
+        </div>
+
+        <div class="form-row form-row-split" id="input2-topic-row">
+            <div class="form-cell">
+                <label for="node-input-inputTopic2"><i class="fa fa-signal"></i> Topic</label>
+                <input type="text" id="node-input-inputTopic2" placeholder="e.g., AI2" />
+            </div>
+            <div class="form-cell">
+                <label for="node-input-inputComment2"><i class="fa fa-comment-o"></i> Remark</label>
+                <input type="text" id="node-input-inputComment2" placeholder="e.g., Setpoint or threshold" />
+            </div>
+        </div>
+        <div class="help-text" id="input2-topic-help">Topic with autocomplete. Optional remark.</div>
+
+        <div class="form-row" id="input2-fixed-row" style="display: none;">
+            <label for="node-input-inputFixed2"><i class="fa fa-hashtag"></i> Input 2 fixed value</label>
+            <input type="number" id="node-input-inputFixed2" step="0.001" placeholder="e.g., 10.0" />
+            <div class="help-text">Fixed value for input 2.</div>
+        </div>
+
+        <div class="form-divider input3-section" style="display: none;"></div>
+        <b class="input3-section" style="display: none;">Input 3 (range bound; with Input 2 defines [min, max])</b>
+
+        <div class="form-row input3-section" style="display: none;">
+            <label for="node-input-input3Type"><i class="fa fa-exchange"></i> Input 3 type</label>
+            <select id="node-input-input3Type">
+                <option value="topic">Topic</option>
+                <option value="fixed">Fixed value</option>
+            </select>
+            <div class="help-text">Select whether input 3 comes from a topic or is a fixed value.</div>
+        </div>
+
+        <div class="form-row form-row-split" id="input3-topic-row" style="display: none;">
+            <div class="form-cell">
+                <label for="node-input-inputTopic3"><i class="fa fa-signal"></i> Topic</label>
+                <input type="text" id="node-input-inputTopic3" placeholder="e.g., AI3" />
+            </div>
+            <div class="form-cell">
+                <label for="node-input-inputComment3"><i class="fa fa-comment-o"></i> Remark</label>
+                <input type="text" id="node-input-inputComment3" placeholder="e.g., Upper bound" />
+            </div>
+        </div>
+        <div class="help-text" id="input3-topic-help" style="display: none;">Topic with autocomplete. Optional remark.</div>
+
+        <div class="form-row" id="input3-fixed-row" style="display: none;">
+            <label for="node-input-inputFixed3"><i class="fa fa-hashtag"></i> Input 3 fixed value</label>
+            <input type="number" id="node-input-inputFixed3" step="0.001" placeholder="e.g., 20.0" />
+            <div class="help-text">Fixed value for input 3.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Output</b>
+
+        <div class="form-row form-row-split">
+            <div class="form-cell">
+                <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Topic</label>
+                <input type="text" id="node-input-outputTopic" placeholder="e.g., COMP_OUT" />
+            </div>
+            <div class="form-cell">
+                <label for="node-input-outputComment"><i class="fa fa-comment-o"></i> Remark</label>
+                <input type="text" id="node-input-outputComment" placeholder="e.g., Cabinet heater enable" />
+            </div>
+        </div>
+        <div class="help-text">Optional output topic. If not set, result is sent via wire. Optional remark.</div>
+
+        <div class="form-divider"></div>
+        <b>Configuration</b>
+
+        <div class="form-row" id="hysteresis-row">
+            <label for="node-input-hysteresis"><i class="fa fa-arrows-h"></i> Hysteresis</label>
+            <input type="number" id="node-input-hysteresis" step="0.001" min="0" />
+            <div class="help-text">Hysteresis value to prevent rapid switching (for &gt; and &lt; operators only).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-colorWhen0"><i class="fa fa-circle"></i> Color when output 0</label>
+            <select id="node-input-colorWhen0">
+                <option value="grey">Grey</option>
+                <option value="blue" selected>Blue</option>
+                <option value="green">Green</option>
+                <option value="yellow">Yellow</option>
+                <option value="red">Red</option>
+            </select>
+            <div class="help-text">Status dot color when comparison result is 0 (false).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-colorWhen1"><i class="fa fa-circle"></i> Color when output 1</label>
+            <select id="node-input-colorWhen1">
+                <option value="grey">Grey</option>
+                <option value="blue">Blue</option>
+                <option value="green" selected>Green</option>
+                <option value="yellow">Yellow</option>
+                <option value="red">Red</option>
+            </select>
+            <div class="help-text">Status dot color when comparison result is 1 (true).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Logging</b>
+
+        <div class="form-row">
+            <label for="node-input-enableSystemLog"><i class="fa fa-file-text-o"></i> Enable system log</label>
+            <input type="checkbox" id="node-input-enableSystemLog" />
+            <div class="help-text">Output log messages to system log (configured in settings.js).</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-comparator">
+    <h3>Comparator</h3>
+    <p>Compares values with selectable operators and optional hysteresis.</p>
+
+    <h4>Input 1</h4>
+    <ul>
+        <li><b>Always a topic:</b> Input 1 always receives value from MQTT topic (with autocomplete showing topic and description).</li>
+    </ul>
+
+    <h4>Input 2 and 3</h4>
+    <p>Each can be configured as either:</p>
+    <ul>
+        <li><b>Topic:</b> Receives value from MQTT topic (with autocomplete)</li>
+        <li><b>Fixed value:</b> Uses a constant numeric value</li>
+    </ul>
+
+    <h4>Operators</h4>
+    <ul>
+        <li><b>&gt; (Greater than):</b> Outputs 1 if input1 > input2, 0 otherwise. Uses hysteresis.</li>
+        <li><b>&lt; (Less than):</b> Outputs 1 if input1 < input2, 0 otherwise. Uses hysteresis.</li>
+        <li><b>In range:</b> Input 2 and Input 3 define the range [min, max]. Outputs 1 if value is inside the range (min ≤ value ≤ max), 0 otherwise.</li>
+        <li><b>Out of range:</b> Input 2 and Input 3 define the range [min, max]. Outputs 1 if value is outside the range (value &lt; min or value &gt; max), 0 otherwise.</li>
+    </ul>
+    <p>For <b>In range</b> and <b>Out of range</b>, the range is always [min(input2, input3), max(input2, input3)], so the order of Input 2 and Input 3 does not matter.</p>
+
+    <h4>Hysteresis</h4>
+    <p>Applies to &gt; and &lt; operators only:</p>
+    <ul>
+        <li>When output is 0: Switches to 1 when condition is met with hysteresis</li>
+        <li>When output is 1: Switches to 0 when condition is not met with hysteresis</li>
+    </ul>
+    <p>Prevents rapid switching when values are close to the threshold.</p>
+
+    <h4>Outputs</h4>
+    <p>Single output with comparison result:</p>
+    <ul>
+        <li>If outputTopic is configured, the result is sent to that topic</li>
+        <li>Otherwise, output is sent via direct wire connection</li>
+    </ul>
+
+    <h4>Status Display</h4>
+    <p>Shows current values and comparison result (values to 2 decimal places). You can set the status dot color for each output state:</p>
+    <ul>
+        <li><b>Color when output 0</b>: e.g. Blue when result is false</li>
+        <li><b>Color when output 1</b>: e.g. Green when result is true</li>
+        <li>Grey when waiting for input values</li>
+    </ul>
+</script>

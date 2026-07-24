@@ -1,0 +1,412 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-security", {
+        category: "uniflex",
+        color: "#ff9853",
+        // Define the default values for the node configuration
+        defaults: {
+            name: { value: "" },
+            topic: { value: "" },
+            controller: { value: "", type: "uniflex-controller", required: true },
+            operationMode: {
+                value: "",
+                validate: function (v) {
+                    return ["check", "auth"].includes(v);
+                }
+            },
+            outputMode: {
+                value: "",
+                validate: function (v) {
+                    return ["status", "passThroughAuth", "passThroughNotAuth"].includes(v);
+                }
+            },
+
+            username: { value: "username" },
+            usernameType: { value: "msg" },
+
+            password: { value: "password" },
+            passwordType: { value: "msg" },
+
+            authorized: { value: "authorized" },
+            authorizedType: { value: "msg" },
+
+            expiration: { value: "expiration" },
+            expirationType: { value: "msg" }
+        },
+        // Define the inputs and outputs of the node
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-lock",
+        label: function () {
+            const operationMode = this.operationMode || "?";
+            return `dashboard security: ${operationMode}`;
+        },
+        paletteLabel: function () {
+            return "dashboard security";
+        },
+        // Update form fields
+        oneditprepare: function () {
+            const node = this;
+            let _controller = {};
+
+            // Convert form elements to typed input
+            $("#node-input-eventId").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-eventIdType")
+            });
+
+            $("#node-input-username").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-usernameType")
+            });
+
+            $("#node-input-password").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-passwordType")
+            });
+
+            $("#node-input-authorized").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-authorizedType")
+            });
+
+            $("#node-input-expiration").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-expirationType")
+            });
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-topic").val(node.topic);
+            $("#node-input-controller").val(node.controller);
+            $("#node-input-operationMode").val(node.operationMode);
+            $("#node-input-outputMode").val(node.outputMode);
+
+            $("#node-input-username").val(node.username);
+            $("#node-input-usernameType").val(node.usernameType);
+
+            $("#node-input-password").val(node.password);
+            $("#node-input-passwordType").val(node.passwordType);
+
+            $("#node-input-authorized").val(node.authorized);
+            $("#node-input-authorizedType").val(node.authorizedType);
+
+            $("#node-input-expiration").val(node.expiration);
+            $("#node-input-expirationType").val(node.expirationType);
+
+            // Define event listeners for form fields
+            $("#node-input-controller").on("change", function () {
+                queryControllerConfig();
+            });
+
+            $("#node-input-operationMode").on("change", function () {
+                updateFormFields();
+                updateTipText();
+            });
+
+            // Get the controller node configuration to populate fields and update helper text
+            function queryControllerConfig() {
+                const nodeId = $("#node-input-controller").val();
+
+                $.getJSON(`uniflex/controller-config?id=${nodeId}`, function (data) {
+                    _controller = data;
+
+                    // Execute functions after successful query
+                    updateFormFields();
+                    updateTipText();
+                })
+                    .fail(function () {
+                        console.error("Failed to get controller configuration!");
+                    })
+                    .always(function () {
+                        updateTipText();
+                    });
+            }
+
+            // Change form elements visibility based on the selected output mode
+            function updateFormFields() {
+                const operationMode = $("#node-input-operationMode").val();
+                const outputMode = $("#node-input-outputMode").val();
+
+                switch (operationMode) {
+                    case "check":
+                        if (!outputMode) {
+                            $("#node-input-outputMode").val("passThroughAuth");
+                            $("#node-input-outputMode").trigger("change"); // Validate the field
+                        }
+
+                        $("#node-input-outputMode").prop("disabled", false);
+
+                        $("#node-input-username").closest(".form-row").hide();
+                        $("#node-input-password").closest(".form-row").hide();
+                        $("#node-input-authorized").closest(".form-row").hide();
+                        $("#node-input-expiration").closest(".form-row").hide();
+
+                        $("#node-input-tip-text-4").hide();
+                        break;
+                    case "auth":
+                        $("#node-input-outputMode").val("status");
+                        $("#node-input-outputMode").prop("disabled", true);
+                        $("#node-input-outputMode").trigger("change");
+
+                        $("#node-input-username").closest(".form-row").show();
+                        $("#node-input-password").closest(".form-row").show();
+                        $("#node-input-authorized").closest(".form-row").show();
+                        $("#node-input-expiration").closest(".form-row").show();
+
+                        $("#node-input-tip-text-4").show();
+                        break;
+                    default:
+                        $("#node-input-username").closest(".form-row").hide();
+                        $("#node-input-password").closest(".form-row").hide();
+                        $("#node-input-authorized").closest(".form-row").hide();
+                        $("#node-input-expiration").closest(".form-row").hide();
+
+                        $("#node-input-tip-text-4").show();
+                        break;
+                }
+            }
+
+            // Update the tip text on input change
+            function updateTipText() {
+                const uniqueId = _controller.uniqueId || "???";
+                const operationMode = $("#node-input-operationMode").val();
+
+                let tipText1;
+                let tipText2;
+                let tipText3;
+                let tipText4 = `Example input 'msg' object:`;
+
+                switch (operationMode) {
+                    case "check":
+                        tipText1 = `This node will check whether the user has access to continue with the flow on controller (${uniqueId}).`;
+                        break;
+                    case "auth":
+                        tipText1 = `This node will send an authentication request to the controller (${uniqueId}).`;
+                        break;
+                    default:
+                        tipText1 = `This node is related to the security of controller (${uniqueId}).`;
+                        break;
+                }
+
+                switch (operationMode) {
+                    case "check":
+                        tipText2 = `Place this node after a dashboard input node to verify the user's access.`;
+                        tipText3 = `Use the 'auth' operation mode to first authenticate the user.`;
+                        break;
+                    case "auth":
+                        tipText2 = `Use the parameters above to send an authentication request.`;
+                        tipText3 = `The authorized payload should be 'true' to authenticate, 'false' to deauthenticate.`;
+                        break;
+                    default:
+                        tipText2 = `Required parameters can differ depending on the selected operation mode.`;
+                        tipText3 = `Please refer to the documentation for more information.`;
+                        break;
+                }
+
+                switch (operationMode) {
+                    case "check":
+                        tipText4 += ``;
+                    case "auth":
+                        tipText4 += `
+{
+    username: "admin",
+    password: "mypassword123",
+    expiration: 1745000000,
+    authorized: true
+}`;
+                        break;
+                    default:
+                        tipText4 += ` { }`;
+                        break;
+                }
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+                $("#node-input-tip-text-4").text(tipText4);
+            }
+        },
+        oneditsave: function () {
+            const node = this;
+
+            node.name = $("#node-input-name").val();
+            node.topic = $("#node-input-topic").val();
+            node.controller = $("#node-input-controller").val();
+            node.operationMode = $("#node-input-operationMode").val();
+            node.outputMode = $("#node-input-outputMode").val();
+
+            node.username = $("#node-input-username").typedInput("value");
+            node.usernameType = $("#node-input-username").typedInput("type");
+
+            node.password = $("#node-input-password").typedInput("value");
+            node.passwordType = $("#node-input-password").typedInput("type");
+
+            node.expiration = $("#node-input-expiration").typedInput("value");
+            node.expirationType = $("#node-input-expiration").typedInput("type");
+
+            node.authorized = $("#node-input-authorized").typedInput("value");
+            node.authorizedType = $("#node-input-authorized").typedInput("type");
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .security-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .security-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .security-div .form-row div,
+    .security-div .form-row input,
+    .security-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .security-div .form-row select,
+    .security-div .red-ui-typedInput-container {
+        width: 66% !important;
+    }
+
+    .security-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        white-space: pre-wrap;
+    }
+
+    .security-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+</style>
+
+<!-- Form fields are defined in the template below -->
+<script type="text/html" data-template-name="uniflex-security">
+    <div class="security-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-topic"><i class="fa fa-comment"></i> Topic</label>
+            <input type="text" id="node-input-topic" placeholder="Topic" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-controller"><i class="fa fa-search"></i> Controller</label>
+            <select id="node-input-controller">
+                <option value="" disabled selected>Select controller...</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-operationMode"><i class="fa fa-cog"></i> Operation mode</label>
+            <select id="node-input-operationMode">
+                <option value="" disabled selected>Select operation mode...</option>
+                <option value="check">Check for authentication</option>
+                <option value="auth">Send authentication request</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputMode"><i class="fa fa-sign-out"></i> Output mode</label>
+            <select id="node-input-outputMode">
+                <option value="" disabled selected>Select output mode...</option>
+                <option value="status">Output authorization status</option>
+                <option value="passThroughAuth">Pass through 'msg' only if authorized</option>
+                <option value="passThroughNotAuth">Pass through 'msg' only if not authorized</option>
+            </select>
+        </div>
+
+        <div class="form-divider"></div>
+
+        <div class="form-tips" id="node-input-tip-text-1" style="margin-bottom: 5px;"></div>
+
+        <div class="form-row">
+            <label for="node-input-username"><i class="fa fa-user"></i> Username</label>
+            <input type="text" id="node-input-username" placeholder="username" />
+            <input type="hidden" id="node-input-usernameType" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-password"><i class="fa fa-asterisk"></i> Password</label>
+            <input type="text" id="node-input-password" placeholder="password" />
+            <input type="hidden" id="node-input-passwordType" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-expiration"><i class="fa fa-clock-o"></i> Expiration</label>
+            <input type="text" id="node-input-expiration" placeholder="expiration" />
+            <input type="hidden" id="node-input-expirationType" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-authorized"><i class="fa fa-database"></i> Authorized</label>
+            <input type="text" id="node-input-authorized" placeholder="authorized" />
+            <input type="hidden" id="node-input-authorizedType" />
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+        <div class="form-tips" id="node-input-tip-text-4" style="white-space: pre-wrap; text-align: left;"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-security">
+    <p>Endpoint to check if the user has authorized some action on the controller.</p>
+    <p>Commonly palaced after some <code>ui-dashboard</code> input node to verify a flow coming from the public dashboard is allowed to contiue.</p>
+
+    <h3>Parameters</h3>
+    <p>NB! The fields below can be shown or hidden depending on the operation mode.</p>
+
+    <dl class="message-properties">
+        <dt class="optional">name <span class="property-type">string</span></dt>
+        <dd>User-friendly name for the node</dd>
+
+        <dt class="optional">topic <span class="property-type">string</span></dt>
+        <dd>The topic of the output message to distinguish it from other messages.</dd>
+
+        <dt>controller <span class="property-type">controller</span></dt>
+        <dd>The source of the data streams on the local network. Localhost (127.0.0.1) for most cases.</dd>
+
+        <dt>operation mode <span class="property-type">string</span></dt>
+        <dd>Specifies the default type of operation performed by the node.</dd>
+
+        <dt>output mode <span class="property-type">string</span></dt>
+        <dd>Specifies the format of the output message.</dd>
+
+        <dt>username <span class="property-type">string</span></dt>
+        <dd>The username for authentication.</dd>
+
+        <dt>password <span class="property-type">string</span></dt>
+        <dd>The password for authentication.</dd>
+
+        <dt class="optional">expiration <span class="property-type">int</span></dt>
+        <dd>The expiration time as a unix timestamp.</dd>
+
+        <dt>authorized <span class="property-type">boolean</span></dt>
+        <dd>Send 'true' to authenticate, 'false' to deauthenticate.</dd>
+    </dl>
+
+    <h3>Inputs</h3>
+    <p>Below is an example of the input message object to initially authenticate.</p>
+
+    <p>
+        <code style="white-space: pre-line;"> { "username": "admin", "password": "****", "expiration": 1733000000, "authorized": true } </code>
+    </p>
+
+    <h3>Output</h3>
+    <dl class="message-properties">
+        <dt>controller <span class="property-type">object</span></dt>
+        <dd>Each output <code>msg</code> includes info about the source of the data, e.g. <code>uniqueId</code>, <code>host</code>, <code>protocol</code>.</dd>
+
+        <dt>payload <span class="property-type">boolean | array</span></dt>
+        <dd><code>true</code> if the data was successfully written to the device, or an <code>array</code> detailing the queried events.</dd>
+
+        <dt>parameters <span class="property-type">object</span></dt>
+        <dd>Contains info about the info used in the request.</dd>
+    </dl>
+
+    <h3>Additional details</h3>
+    <p>Timestamp fields can be specified as Javascript Date objects, or as integers in UNIX time.</p>
+    <p>Any other incoming <code>msg</code> properties will be preserved.</p>
+</script>

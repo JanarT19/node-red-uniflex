@@ -1,0 +1,127 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-state-observer", {
+        category: "uniflex home",
+        color: "#DBEAFE",
+        icon: "font-awesome/fa-area-chart",
+        defaults: {
+            name: { value: "" },
+            roomSpTopic: { value: "" },
+            roomActTopic: { value: "" },
+            flowTopic: { value: "" },
+            dpTopic: { value: "" },
+            openFracTopic: { value: "" },
+            tankTempTopic: { value: "" },
+            returnTempTopic: { value: "" },
+            outTopic: { value: "" }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () { return this.name || "state-observer"; },
+        paletteLabel: "state observer",
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const out = [];
+                const seen = new Set();
+                const controllers = _controllers && Array.isArray(_controllers.controllers) ? _controllers.controllers : [];
+                for (let i = 0; i < controllers.length; i++) {
+                    const c = controllers[i] || {};
+                    const fromFormatted = Array.isArray(c.formattedTopics) ? c.formattedTopics : [];
+                    for (let j = 0; j < fromFormatted.length; j++) {
+                        const item = fromFormatted[j] || {};
+                        const topic = String(item.topic || item.value || "").trim();
+                        if (!topic || seen.has(topic)) continue;
+                        seen.add(topic);
+                        out.push({
+                            label: item.label || topic,
+                            topic: topic
+                        });
+                    }
+                    const services = c.services || {};
+                    Object.keys(services).forEach(function (k) {
+                        if (!k || seen.has(k)) return;
+                        seen.add(k);
+                        out.push({ label: k, topic: k });
+                    });
+                }
+                return out;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = (request.term || "").toLowerCase();
+                        const topics = getTopics();
+                        const matches = topics.filter(function (item) {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function () { return false; },
+                    select: function (event, ui) {
+                        this.value = ui.item.topic || ui.item.value || ui.item.label || "";
+                        return false;
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", "");
+                });
+            }
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                [
+                    "#node-input-roomSpTopic", "#node-input-roomActTopic",
+                    "#node-input-flowTopic", "#node-input-dpTopic",
+                    "#node-input-openFracTopic", "#node-input-tankTempTopic",
+                    "#node-input-returnTempTopic", "#node-input-outTopic"
+                ].forEach((sel) => initializeAutocomplete($(sel)));
+            }).fail(function () {
+                _controllers = {};
+            });
+
+            const labels = $("#dialog-form label[title]");
+            if (!$("#uniflex-help-tooltip-style").length) {
+                $("head").append('<style id="uniflex-help-tooltip-style">.uniflex-help-tooltip{background:#fff8c4 !important;border:1px solid #d4b106 !important;color:#2b2b2b !important;max-width:560px !important;box-shadow:0 2px 6px rgba(0,0,0,.2) !important;padding:8px 10px !important;line-height:1.35 !important;}.uniflex-help-tooltip .ui-tooltip-content{font-size:12px !important;}</style>');
+            }
+            labels.each(function () {
+                if ($(this).data("ui-tooltip")) $(this).tooltip("destroy");
+            });
+            labels.tooltip({
+                track: false,
+                show: { delay: 150 },
+                hide: { delay: 0 },
+                position: { my: "left bottom-10", at: "left top", collision: "flipfit" },
+                classes: { "ui-tooltip": "uniflex-help-tooltip" }
+            });
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-state-observer">
+    <div class="form-row"><label>Name</label><input type="text" id="node-input-name" /></div>
+    <div class="form-row"><label title="Source: average room setpoint topic from your room-setpoint aggregation path (for room error calculation).">Room setpoint topic</label><input type="text" id="node-input-roomSpTopic" /></div>
+    <div class="form-row"><label title="Source: average room actual temperature topic from room sensors/aggregator.">Room actual topic</label><input type="text" id="node-input-roomActTopic" /></div>
+    <div class="form-row"><label title="Source: measured circulation flow topic (for example CircPumpFlow).">Flow topic</label><input type="text" id="node-input-flowTopic" /></div>
+    <div class="form-row"><label title="Source: measured circulation differential pressure topic (for example CircPumpPress), optional.">dP topic</label><input type="text" id="node-input-dpTopic" /></div>
+    <div class="form-row"><label title="Source: loop openness estimate topic (0..1), optional (can be aggregated from floor-loop outputs).">Open fraction topic</label><input type="text" id="node-input-openFracTopic" /></div>
+    <div class="form-row"><label title="Source: tank or onflow temperature topic used for delivered heat proxy.">Tank temp topic</label><input type="text" id="node-input-tankTempTopic" /></div>
+    <div class="form-row"><label title="Source: return temperature topic used for delivered heat proxy.">Return temp topic</label><input type="text" id="node-input-returnTempTopic" /></div>
+    <div class="form-row"><label title="Destination: topic consumed by tank-control 'Estimate object' input.">Observer out topic</label><input type="text" id="node-input-outTopic" placeholder="state/observer" /></div>
+    <p class="form-tips">Output payload fields: `roomErr`, `flow`, `dp`, `openFrac`, `tankTemp`, `retTemp`, `qProxy`, `ts`. Wire this to `tank-control` input `Estimate object`.</p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-state-observer">
+    <p>Combines raw signals into an estimated present-state object for <code>tank-control</code>.</p>
+    <p>Signal format: <b>Purpose</b>, <b>Unit</b>, <b>Source</b>, <b>Destination</b>.</p>
+    <ul>
+        <li><b>Room setpoint topic</b> -- Purpose: room error reference. Unit: degC. Source: average setpoint path. Destination: roomErr estimate.</li>
+        <li><b>Room actual topic</b> -- Purpose: room feedback. Unit: degC. Source: average room measurement path. Destination: roomErr estimate.</li>
+        <li><b>Flow topic</b> -- Purpose: hydraulic delivery measurement. Unit: m3/h. Source: circulation flow service. Destination: flow and qProxy estimate.</li>
+        <li><b>dP topic</b> -- Purpose: hydraulic diagnostic. Unit: pressure unit used in your system. Source: pump pressure service. Destination: observer output.</li>
+        <li><b>Open fraction topic</b> -- Purpose: distribution openness hint. Unit: 0..1. Source: valve openness aggregation. Destination: tank-control flow capping logic.</li>
+        <li><b>Tank temp / Return temp</b> -- Purpose: delivered heat proxy. Unit: degC. Source: tank/onflow and return sensors. Destination: qProxy estimate.</li>
+        <li><b>Observer out topic</b> -- Purpose: estimated state object. Unit: object payload. Source: state-observer computed output. Destination: tank-control estimate input.</li>
+    </ul>
+</script>

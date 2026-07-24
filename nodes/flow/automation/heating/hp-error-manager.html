@@ -1,0 +1,700 @@
+<script type="text/javascript">
+    // Version for cache debugging
+    const HP_ERROR_MANAGER_VERSION = "1.0.2";
+    console.log("uniflex-hp-error-manager node version:", HP_ERROR_MANAGER_VERSION);
+
+    RED.nodes.registerType("uniflex-hp-error-manager", {
+        category: "uniflex home",
+        color: "#FFD3D3",
+        icon: "font-awesome/fa-exclamation-triangle",
+        defaults: {
+            name: { value: "" },
+            // Error detection - 4 error registers (DI type, topic without member)
+            errorTopic1: { value: "", required: true },
+            errorTopic2: { value: "" },
+            errorTopic3: { value: "" },
+            errorTopic4: { value: "" },
+            // Bit exclusions per register (comma-separated bit numbers, e.g., "6,7" or "6")
+            excludeBits1: { value: "6" },
+            excludeBits2: { value: "" },
+            excludeBits3: { value: "" },
+            excludeBits4: { value: "" },
+            // Timing
+            errorDelaySec: { value: 10, validate: RED.validators.number() },
+            // Reset
+            resetTopic: { value: "", required: true },
+            resetPulseSec: { value: 10, validate: RED.validators.number() },
+            minResetIntervalSec: { value: 3600, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        outputLabels: ["Reset signal"],
+        label: function () {
+            return this.name || "heat pump error manager";
+        },
+        paletteLabel: "heat pump error manager",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            function parseExcludeBits(str) {
+                if (!str || str.trim() === "") return [];
+                return str
+                    .split(",")
+                    .map((s) => parseInt(s.trim()))
+                    .filter((n) => !isNaN(n) && n >= 0 && n < 16);
+            }
+
+            function formatExcludeBits(bits) {
+                return bits.length > 0 ? bits.join(",") : "";
+            }
+
+            // Get bit descriptions from controller config for a topic
+            function getBitDescriptions(topicName) {
+                const descriptions = {};
+
+                if (!topicName || topicName.trim() === "") {
+                    return descriptions;
+                }
+
+                // Search through all controllers and their topics - use same method as autocomplete
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    // Look for topics in formattedTopics (same as autocomplete uses)
+                    const topics = controller.formattedTopics || [];
+
+                    for (const topic of topics) {
+                        // Get topic identifier - check topic field (autocomplete uses topic.topic)
+                        const topicId = topic.topic || "";
+                        const topicLabel = topic.label || "";
+
+                        // Match exact topic name or topic with member (e.g., "ESER1W" or "ESER1W.1")
+                        // The topic.topic field should contain the actual topic name like "ESER1W.1"
+                        if (topicId === topicName || topicId.startsWith(topicName + ".")) {
+                            // If topic itself represents a member (e.g., "ESER1W.1", "ESER1W.2")
+                            // Check this FIRST to handle individual member topics
+                            // Note: member numbers start from 1, member 1 = bit 0, member 2 = bit 1, etc.
+                            if (topicId.startsWith(topicName + ".")) {
+                                const memberStr = topicId.substring(topicName.length + 1);
+                                const memberNum = parseInt(memberStr);
+                                // Convert member number to bit: member 1 = bit 0, member 2 = bit 1, etc.
+                                const bit = memberNum - 1;
+                                if (!isNaN(memberNum) && memberNum >= 1 && memberNum <= 16 && bit >= 0 && bit < 16) {
+                                    // Extract description from label - label format: "ESER1W.1: ESerror1 (description)"
+                                    // The label is what shows in autocomplete, so use that
+                                    let desc = topicLabel || topic.label || topic.description || topic.name || "";
+
+                                    // Remove topic name patterns (e.g., "ESER1W.1: " or "ESER1W: ")
+                                    if (desc) {
+                                        // Pattern 1: "ESER1W.1: description" - remove everything up to and including first colon
+                                        if (desc.includes(":")) {
+                                            const colonIndex = desc.indexOf(":");
+                                            if (colonIndex > 0) {
+                                                desc = desc.substring(colonIndex + 1).trim();
+                                            }
+                                        }
+
+                                        // Pattern 2: Also try regex pattern as fallback
+                                        const topicPattern = new RegExp(`^${topicName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\.\\d+)?:\\s*`, "i");
+                                        desc = desc.replace(topicPattern, "").trim();
+
+                                        // Pattern 3: Remove error code prefix like "ESerror1", "ESerror3", etc.
+                                        // Format: "ESerror1 (description)" -> "(description)" or "description"
+                                        const errorCodePattern = /^ESerror\d+\s*\(?/i;
+                                        desc = desc.replace(errorCodePattern, "").trim();
+                                        // Remove leading parenthesis if it's now at the start
+                                        if (desc.startsWith("(")) {
+                                            desc = desc.substring(1);
+                                        }
+                                        // Remove trailing parenthesis if unmatched
+                                        if (desc.endsWith(")") && !desc.includes("(")) {
+                                            desc = desc.substring(0, desc.length - 1).trim();
+                                        }
+                                    }
+
+                                    if (desc && !descriptions[bit]) {
+                                        descriptions[bit] = desc;
+                                        // Debug log for first few bits
+                                        if (bit < 3) {
+                                            console.log(`[v${HP_ERROR_MANAGER_VERSION}] Found bit ${bit} desc for ${topicName}:`, {
+                                                topicId: topicId,
+                                                topicLabel: topicLabel,
+                                                extractedDesc: desc
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+
+                            // If topic has members array
+                            // Note: member numbers start from 1, member 1 = bit 0, member 2 = bit 1, etc.
+                            if (topic.members && Array.isArray(topic.members)) {
+                                for (let i = 0; i < topic.members.length; i++) {
+                                    const member = topic.members[i];
+                                    // Try to get member number from index/name, or use array index + 1
+                                    const memberNum = parseInt(member.index || member.name || i + 1);
+                                    // Convert member number to bit: member 1 = bit 0, member 2 = bit 1, etc.
+                                    const bit = memberNum - 1;
+                                    if (!isNaN(memberNum) && memberNum >= 1 && memberNum <= 16 && bit >= 0 && bit < 16) {
+                                        if (!descriptions[bit]) {
+                                            descriptions[bit] = member.description || member.label || member.name || `Bit ${bit}`;
+                                        }
+                                    }
+                                }
+                            }
+                            // If topic has members object (keyed by member number or bit index)
+                            else if (topic.members && typeof topic.members === "object" && !Array.isArray(topic.members)) {
+                                for (const [key, member] of Object.entries(topic.members)) {
+                                    const memberNum = parseInt(key);
+                                    // If key is member number (1-16), convert to bit; if already bit (0-15), use as-is
+                                    let bit;
+                                    if (memberNum >= 1 && memberNum <= 16) {
+                                        bit = memberNum - 1; // Member number to bit
+                                    } else if (memberNum >= 0 && memberNum < 16) {
+                                        bit = memberNum; // Already a bit index
+                                    } else {
+                                        continue; // Invalid
+                                    }
+                                    if (!descriptions[bit]) {
+                                        descriptions[bit] = member.description || member.label || member.name || `Bit ${bit}`;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Also check raw topics/data structure if available
+                    if (controller.topics && Array.isArray(controller.topics)) {
+                        for (const topic of controller.topics) {
+                            const topicId = topic.topic || topic.name || topic.label || "";
+                            if (topicId === topicName || topicId.startsWith(topicName + ".")) {
+                                // Check individual member topics first
+                                if (topicId.startsWith(topicName + ".")) {
+                                    const memberStr = topicId.substring(topicName.length + 1);
+                                    const memberNum = parseInt(memberStr);
+                                    const bit = memberNum - 1;
+                                    if (!isNaN(memberNum) && memberNum >= 1 && memberNum <= 16 && bit >= 0 && bit < 16) {
+                                        let desc = topic.description || topic.label || topic.name || "";
+
+                                        // Remove topic name patterns (e.g., "ESER1W.1: " or "ESER1W: ")
+                                        if (desc) {
+                                            // Pattern 1: "ESER1W.1: description" - remove everything up to and including first colon
+                                            if (desc.includes(":")) {
+                                                const colonIndex = desc.indexOf(":");
+                                                if (colonIndex > 0) {
+                                                    desc = desc.substring(colonIndex + 1).trim();
+                                                }
+                                            }
+
+                                            // Pattern 2: Also try regex pattern as fallback
+                                            const topicPattern = new RegExp(`^${topicName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\.\\d+)?:\\s*`, "i");
+                                            desc = desc.replace(topicPattern, "").trim();
+
+                                            // Pattern 3: Remove error code prefix like "ESerror1", "ESerror3", etc.
+                                            const errorCodePattern = /^ESerror\d+\s*\(?/i;
+                                            desc = desc.replace(errorCodePattern, "").trim();
+                                            // Remove leading parenthesis if it's now at the start
+                                            if (desc.startsWith("(")) {
+                                                desc = desc.substring(1);
+                                            }
+                                            // Remove trailing parenthesis if unmatched
+                                            if (desc.endsWith(")") && !desc.includes("(")) {
+                                                desc = desc.substring(0, desc.length - 1).trim();
+                                            }
+                                        }
+
+                                        if (desc && !descriptions[bit]) {
+                                            descriptions[bit] = desc;
+                                        }
+                                    }
+                                }
+
+                                if (topic.members) {
+                                    if (Array.isArray(topic.members)) {
+                                        for (let i = 0; i < topic.members.length; i++) {
+                                            const member = topic.members[i];
+                                            const memberNum = parseInt(member.index || member.name || i + 1);
+                                            const bit = memberNum - 1;
+                                            if (!isNaN(memberNum) && memberNum >= 1 && memberNum <= 16 && bit >= 0 && bit < 16) {
+                                                if (!descriptions[bit]) {
+                                                    descriptions[bit] = member.description || member.label || member.name || `Bit ${bit}`;
+                                                }
+                                            }
+                                        }
+                                    } else if (typeof topic.members === "object") {
+                                        for (const [key, member] of Object.entries(topic.members)) {
+                                            const memberNum = parseInt(key);
+                                            let bit;
+                                            if (memberNum >= 1 && memberNum <= 16) {
+                                                bit = memberNum - 1;
+                                            } else if (memberNum >= 0 && memberNum < 16) {
+                                                bit = memberNum;
+                                            } else {
+                                                continue;
+                                            }
+                                            if (!descriptions[bit]) {
+                                                descriptions[bit] = member.description || member.label || member.name || `Bit ${bit}`;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Debug: log if we found descriptions
+                if (Object.keys(descriptions).length > 0) {
+                    console.log(`[v${HP_ERROR_MANAGER_VERSION}] Found bit descriptions for ${topicName}:`, descriptions);
+                } else {
+                    console.log(`[v${HP_ERROR_MANAGER_VERSION}] No bit descriptions found for ${topicName}.`);
+                    console.log(
+                        `[v${HP_ERROR_MANAGER_VERSION}] Available topics:`,
+                        controllers.flatMap((c) =>
+                            (c.formattedTopics || []).map((t) => ({
+                                topic: t.topic || t.name || t.label,
+                                label: t.label,
+                                hasMembers: !!t.members
+                            }))
+                        )
+                    );
+                    // Also log first few matching topics
+                    const matchingTopics = controllers.flatMap((c) =>
+                        (c.formattedTopics || []).filter((t) => {
+                            const topicId = t.topic || t.name || t.label || "";
+                            return topicId === topicName || topicId.startsWith(topicName + ".");
+                        })
+                    );
+                    if (matchingTopics.length > 0) {
+                        console.log(`[v${HP_ERROR_MANAGER_VERSION}] Matching topics (first 5):`, matchingTopics.slice(0, 5));
+                    }
+                }
+
+                return descriptions;
+            }
+
+            function updateBitExclusions(registerNum) {
+                const container = $(`#exclude-bits-reg${registerNum}`);
+                container.empty();
+
+                const excludeBitsStr = $(`#node-input-excludeBits${registerNum}`).val() || "";
+                const excludedBits = parseExcludeBits(excludeBitsStr);
+
+                // Get topic name for this register
+                const topicName = $(`#node-input-errorTopic${registerNum}`).val() || "";
+                console.log(`[v${HP_ERROR_MANAGER_VERSION}] updateBitExclusions register ${registerNum}, topic: ${topicName}`);
+                const bitDescriptions = getBitDescriptions(topicName);
+                console.log(`[v${HP_ERROR_MANAGER_VERSION}] Bit descriptions for register ${registerNum}:`, bitDescriptions);
+
+                for (let bit = 0; bit < 16; bit++) {
+                    const description = bitDescriptions[bit] || `Bit ${bit}`;
+
+                    // Whole row clickable via <label> wrapping the checkbox
+                    const row = $("<label>").addClass("bit-row");
+
+                    const checkbox = $("<input>").attr({
+                        type: "checkbox",
+                        value: bit
+                    });
+
+                    if (excludedBits.includes(bit)) {
+                        checkbox.prop("checked", true);
+                    }
+
+                    const bitNo = $("<span>").addClass("bit-no").text(`${bit}:`);
+                    const bitDesc = $("<span>").addClass("bit-desc").text(description);
+
+                    row.append(checkbox, bitNo, bitDesc);
+                    container.append(row);
+
+                    checkbox.on("change", function () {
+                        const checked = [];
+                        $(`#exclude-bits-reg${registerNum} input[type="checkbox"]:checked`).each(function () {
+                            checked.push(parseInt($(this).val()));
+                        });
+                        checked.sort((a, b) => a - b);
+                        $(`#node-input-excludeBits${registerNum}`).val(formatExcludeBits(checked));
+                        updateTipText();
+                    });
+                }
+            }
+
+            function updateTipText() {
+                const err1 = $("#node-input-errorTopic1").val() || "<not set>";
+                const err2 = $("#node-input-errorTopic2").val() || "<not set>";
+                const err3 = $("#node-input-errorTopic3").val() || "<not set>";
+                const err4 = $("#node-input-errorTopic4").val() || "<not set>";
+                const reset = $("#node-input-resetTopic").val() || "<not set>";
+
+                let tipText = `Monitoring errors: ${err1}`;
+                if (err2) tipText += `, ${err2}`;
+                if (err3) tipText += `, ${err3}`;
+                if (err4) tipText += `, ${err4}`;
+                tipText += `. Reset: ${reset}.`;
+
+                $("#node-input-tip-text-1").text(tipText);
+            }
+
+            $("#node-input-errorTopic1, #node-input-errorTopic2, #node-input-errorTopic3, #node-input-errorTopic4, #node-input-resetTopic").on("input change", updateTipText);
+
+            // Initialize bit exclusion checkboxes for all registers
+            for (let i = 1; i <= 4; i++) {
+                updateBitExclusions(i);
+                $(`#node-input-excludeBits${i}`).on("input", function () {
+                    updateBitExclusions(i);
+                });
+                // Update when topic changes
+                $(`#node-input-errorTopic${i}`).on("change", function () {
+                    updateBitExclusions(i);
+                });
+            }
+
+            queryControllerConfig();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+                    console.log(`[v${HP_ERROR_MANAGER_VERSION}] Controller config loaded:`, {
+                        hasControllers: !!_controllers,
+                        controllersCount: _controllers?.controllers?.length || 0,
+                        firstControllerTopics: _controllers?.controllers?.[0]?.formattedTopics?.length || 0,
+                        sampleTopic: _controllers?.controllers?.[0]?.formattedTopics?.[0]
+                    });
+
+                    initializeAutocomplete($("#node-input-errorTopic1"));
+                    initializeAutocomplete($("#node-input-errorTopic2"));
+                    initializeAutocomplete($("#node-input-errorTopic3"));
+                    initializeAutocomplete($("#node-input-errorTopic4"));
+                    initializeAutocomplete($("#node-input-resetTopic"));
+
+                    // Refresh bit exclusions after config loads
+                    for (let i = 1; i <= 4; i++) {
+                        updateBitExclusions(i);
+                    }
+                }).fail(function () {
+                    console.error(`[v${HP_ERROR_MANAGER_VERSION}] Failed to get topics!`);
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            if (onSelect) onSelect(element, ui.item);
+                            updateTipText();
+
+                            // Update bit exclusions if this is an error topic
+                            const topicId = element.attr("id");
+                            if (topicId) {
+                                const match = topicId.match(/errorTopic(\d)/);
+                                if (match) {
+                                    const regNum = match[1];
+                                    updateBitExclusions(regNum);
+                                }
+                            }
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    if (controller.formattedTopics) {
+                        result.push(...controller.formattedTopics);
+                    }
+                }
+
+                return result;
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .uniflex-hp-error-manager-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .uniflex-hp-error-manager-div .form-row>label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .uniflex-hp-error-manager-div .form-row>div,
+    .uniflex-hp-error-manager-div .form-row>input,
+    .uniflex-hp-error-manager-div .form-row>textarea {
+        max-width: 66% !important;
+    }
+
+    .uniflex-hp-error-manager-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .uniflex-hp-error-manager-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .uniflex-hp-error-manager-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .uniflex-hp-error-manager-div .bit-exclusion-container {
+        max-height: 320px;
+        overflow-y: auto;
+        border: 1px solid #ddd;
+        padding: 6px 8px;
+        margin-top: 5px;
+        background: #f9f9f9;
+        width: 100% !important;
+        max-width: none !important;
+        box-sizing: border-box;
+    }
+
+    /* One bit row: [checkbox] [bit#] [description] */
+    .uniflex-hp-error-manager-div .bit-row {
+        display: grid !important;
+        /* Node-RED editor styles treat labels as left-column items; override hard */
+        float: none !important;
+        clear: both;
+        width: 100% !important;
+        max-width: none !important;
+        box-sizing: border-box;
+        grid-template-columns: 18px 3ch 1fr;
+        column-gap: 10px;
+        align-items: start;
+        padding: 2px 0;
+        margin: 0;
+        cursor: pointer;
+        user-select: none;
+    }
+
+    .uniflex-hp-error-manager-div .bit-row input[type="checkbox"] {
+        margin: 2px 0 0 0;
+        width: 14px;
+        height: 14px;
+        cursor: pointer;
+    }
+
+    .uniflex-hp-error-manager-div .bit-row .bit-no {
+        text-align: right;
+        font-weight: 500;
+        color: #444;
+        line-height: 1.4;
+    }
+
+    .uniflex-hp-error-manager-div .bit-row .bit-desc {
+        line-height: 1.4;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        min-width: 0;
+        color: #444;
+    }
+
+    /* Make Exclude-bits rows full width (no 33/66 split) */
+    .uniflex-hp-error-manager-div .form-row.exclude-bits-row {
+        display: block;
+    }
+
+    .uniflex-hp-error-manager-div .form-row.exclude-bits-row>label {
+        width: auto !important;
+        display: block;
+        margin-bottom: 2px;
+    }
+
+    .uniflex-hp-error-manager-div .form-row.exclude-bits-row>div,
+    .uniflex-hp-error-manager-div .form-row.exclude-bits-row>.help-text {
+        max-width: none !important;
+        width: 100% !important;
+    }
+
+    .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    .uniflex-hp-error-manager-div input[type="text"] {
+        user-select: text !important;
+        cursor: text !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-hp-error-manager">
+    <div class="uniflex-hp-error-manager-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g. hp-error" />
+            <div class="help-text">Name for identification in flows.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Error Registers (DI type - topic without member)</b>
+
+        <div class="form-row">
+            <label for="node-input-errorTopic1"><i class="fa fa-exclamation-circle"></i> Error register 1</label>
+            <input type="text" id="node-input-errorTopic1" placeholder="e.g. ESER1W" />
+            <div class="help-text">Required: DI topic (without member). Combines all bit members (0-15) into 16-bit value.</div>
+        </div>
+        <div class="form-row exclude-bits-row">
+            <label><i class="fa fa-ban"></i> Exclude bits (register 1)</label>
+            <input type="text" id="node-input-excludeBits1" placeholder="e.g. 6" style="display:none;" />
+            <div class="bit-exclusion-container" id="exclude-bits-reg1"></div>
+            <div class="help-text">Check bits to exclude from reset logic for this register.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-errorTopic2"><i class="fa fa-exclamation-circle"></i> Error register 2</label>
+            <input type="text" id="node-input-errorTopic2" placeholder="e.g. ESER2W" />
+            <div class="help-text">Optional: DI topic (without member). Combines all bit members (0-15) into 16-bit value.</div>
+        </div>
+        <div class="form-row exclude-bits-row">
+            <label><i class="fa fa-ban"></i> Exclude bits (register 2)</label>
+            <input type="text" id="node-input-excludeBits2" placeholder="" style="display:none;" />
+            <div class="bit-exclusion-container" id="exclude-bits-reg2"></div>
+            <div class="help-text">Check bits to exclude from reset logic for this register.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-errorTopic3"><i class="fa fa-exclamation-circle"></i> Error register 3</label>
+            <input type="text" id="node-input-errorTopic3" placeholder="e.g. ESER3W" />
+            <div class="help-text">Optional: DI topic (without member). Combines all bit members (0-15) into 16-bit value.</div>
+        </div>
+        <div class="form-row exclude-bits-row">
+            <label><i class="fa fa-ban"></i> Exclude bits (register 3)</label>
+            <input type="text" id="node-input-excludeBits3" placeholder="" style="display:none;" />
+            <div class="bit-exclusion-container" id="exclude-bits-reg3"></div>
+            <div class="help-text">Check bits to exclude from reset logic for this register.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-errorTopic4"><i class="fa fa-exclamation-circle"></i> Error register 4</label>
+            <input type="text" id="node-input-errorTopic4" placeholder="e.g. ESER4W" />
+            <div class="help-text">Optional: DI topic (without member). Combines all bit members (0-15) into 16-bit value.</div>
+        </div>
+        <div class="form-row exclude-bits-row">
+            <label><i class="fa fa-ban"></i> Exclude bits (register 4)</label>
+            <input type="text" id="node-input-excludeBits4" placeholder="" style="display:none;" />
+            <div class="bit-exclusion-container" id="exclude-bits-reg4"></div>
+            <div class="help-text">Check bits to exclude from reset logic for this register.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Timing</b>
+
+        <div class="form-row">
+            <label for="node-input-errorDelaySec"><i class="fa fa-clock-o"></i> Error delay (s)</label>
+            <input type="number" id="node-input-errorDelaySec" min="1" step="1" />
+            <div class="help-text">Delay to double-check error persistence before reset (default: 10s).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Reset</b>
+
+        <div class="form-row">
+            <label for="node-input-resetTopic"><i class="fa fa-power-off"></i> Reset topic</label>
+            <input type="text" id="node-input-resetTopic" placeholder="e.g. ESXS.0" />
+            <div class="help-text">Reset signal topic.member for write-static node. Outputs 1 during reset pulse, 0 otherwise.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-resetPulseSec"><i class="fa fa-clock-o"></i> Reset pulse length (s)</label>
+            <input type="number" id="node-input-resetPulseSec" min="1" step="1" />
+            <div class="help-text">Duration of power break reset pulse (default: 10s).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-minResetIntervalSec"><i class="fa fa-clock-o"></i> Min reset interval (s)</label>
+            <input type="number" id="node-input-minResetIntervalSec" min="1" step="1" />
+            <div class="help-text">Minimum time between reset pulses if error persists (default: 3600s = 1h).</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-hp-error-manager">
+    <h3>HP Error Manager</h3>
+    <p>Detects errors from multiple 16-bit Modbus DI registers and generates power break reset pulses to recover.</p>
+
+    <h4>Error Detection</h4>
+    <ul>
+        <li>Monitors up to 4 error registers (DI type, topic without member, e.g., ESER1W).</li>
+        <li>Combines all bit members (0-15) from each DI topic into a 16-bit value.</li>
+        <li>Each register can have independent bit exclusions (checkboxes with descriptions).</li>
+        <li>If ANY register (after bit exclusion) has error, triggers reset after delay.</li>
+        <li>After error delay, triggers reset if error persists.</li>
+    </ul>
+
+    <h4>Reset Logic</h4>
+    <ul>
+        <li>Outputs reset signal for configured duration (power break).</li>
+        <li>Waits minimum interval before next reset if error doesn't clear.</li>
+        <li>Error delay allows error to remain visible in monitoring as reason for reset.</li>
+    </ul>
+
+    <h4>Status Display</h4>
+    <p>Shows all error codes in hex and time since last reset in hours.</p>
+    <ul>
+        <li><span style="color:green">●</span> Green: No errors</li>
+        <li><span style="color:yellow">●</span> Yellow: Reset active</li>
+        <li><span style="color:red">●</span> Red: Error detected</li>
+    </ul>
+</script>

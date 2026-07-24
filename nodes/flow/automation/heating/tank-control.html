@@ -1,0 +1,372 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-tank-control", {
+        category: "uniflex home",
+        color: "#C7D2FE",
+        icon: "font-awesome/fa-sliders",
+        defaults: {
+            name: { value: "" },
+            qNeedBaseTopic: { value: "" },
+            estTopic: { value: "" },
+            scheduleHpTopic: { value: "" },
+            scheduleGasTopic: { value: "" },
+            testTopic1: { value: "" },
+            testTopic2: { value: "" },
+            testTopic3: { value: "" },
+            forceGasTopic: { value: "" },
+            forceHpTopic: { value: "" },
+            hsewGasTopic: { value: "HSEW.1" },
+            hsewHpTopic: { value: "HSEW.2" },
+            coolRequestTopic: { value: "COOLS.1" },
+            disGasTopic: { value: "" },
+            disHpTopic: { value: "" },
+            gasAvailTopic: { value: "" },
+            hpAvailTopic: { value: "" },
+            enableSystemLog: { value: false },
+            enableEmergencyDualSource: { value: true },
+            emergencyRoomErrThreshold: { value: 2.5, validate: RED.validators.number() },
+            tankTempFailureThreshold: { value: 22, validate: RED.validators.number() },
+            tankTempCriticalThreshold: { value: 20, validate: RED.validators.number() },
+            outQNeedTopic: { value: "" },
+            outTankTargetTopic: { value: "" },
+            outFlowTargetTopic: { value: "" },
+            outGasEnableTopic: { value: "" },
+            outHpEnableTopic: { value: "" },
+            outHewGasTopic: { value: "HEW.1" },
+            outHewHpTopic: { value: "HEW.2" },
+            outSwitchNotifyTopic: { value: "" },
+            outFallbackDiagTopic: { value: "" },
+            roomErrGain: { value: 2.0, validate: RED.validators.number() },
+            testMinQ: { value: 1.0, validate: RED.validators.number() },
+            needOnThreshold: { value: 0.3, validate: RED.validators.number() },
+            needPredHorizonMin: { value: 45, validate: RED.validators.number() },
+            needPredMaxAbsErr: { value: 3.0, validate: RED.validators.number() },
+            roomErrSlopeTauSec: { value: 900, validate: RED.validators.number() },
+            needTuningPreset: { value: "balanced" },
+            needAutotuneMode: { value: "off" },
+            tankBase: { value: 30, validate: RED.validators.number() },
+            qToTankGain: { value: 2.5, validate: RED.validators.number() },
+            tankMin: { value: 30, validate: RED.validators.number() },
+            tankMax: { value: 50, validate: RED.validators.number() },
+            flowMin: { value: 0.3, validate: RED.validators.number() },
+            flowMax: { value: 2.5, validate: RED.validators.number() },
+            qToFlowGain: { value: 0.35, validate: RED.validators.number() },
+            hpMinOnSec: { value: 1800, validate: RED.validators.number() },
+            hpMinOffSec: { value: 1800, validate: RED.validators.number() },
+            schDebounceSec: { value: 30, validate: RED.validators.number() },
+            gasMinOnSec: { value: 600, validate: RED.validators.number() },
+            gasMinOffSec: { value: 600, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () { return this.name || "tank-control"; },
+        paletteLabel: "tank control",
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const out = [];
+                const seen = new Set();
+                const controllers = _controllers && Array.isArray(_controllers.controllers) ? _controllers.controllers : [];
+                for (let i = 0; i < controllers.length; i++) {
+                    const c = controllers[i] || {};
+                    const fromFormatted = Array.isArray(c.formattedTopics) ? c.formattedTopics : [];
+                    for (let j = 0; j < fromFormatted.length; j++) {
+                        const item = fromFormatted[j] || {};
+                        const topic = String(item.topic || item.value || "").trim();
+                        if (!topic || seen.has(topic)) continue;
+                        seen.add(topic);
+                        out.push({
+                            label: item.label || topic,
+                            topic: topic
+                        });
+                    }
+                    const services = c.services || {};
+                    Object.keys(services).forEach(function (k) {
+                        if (!k || seen.has(k)) return;
+                        seen.add(k);
+                        out.push({ label: k, topic: k });
+                    });
+                }
+                return out;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = (request.term || "").toLowerCase();
+                        const topics = getTopics();
+                        const matches = topics.filter(function (item) {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function () { return false; },
+                    select: function (event, ui) {
+                        this.value = ui.item.topic || ui.item.value || ui.item.label || "";
+                        return false;
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", "");
+                });
+            }
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                [
+                    "#node-input-qNeedBaseTopic", "#node-input-estTopic",
+                    "#node-input-scheduleHpTopic", "#node-input-scheduleGasTopic",
+                    "#node-input-testTopic1", "#node-input-testTopic2", "#node-input-testTopic3",
+                    "#node-input-forceGasTopic", "#node-input-forceHpTopic",
+                    "#node-input-hsewGasTopic", "#node-input-hsewHpTopic",
+                    "#node-input-coolRequestTopic",
+                    "#node-input-disGasTopic", "#node-input-disHpTopic",
+                    "#node-input-gasAvailTopic", "#node-input-hpAvailTopic",
+                    "#node-input-outQNeedTopic",
+                    "#node-input-outTankTargetTopic", "#node-input-outFlowTargetTopic",
+                    "#node-input-outGasEnableTopic", "#node-input-outHpEnableTopic",
+                    "#node-input-outHewGasTopic", "#node-input-outHewHpTopic",
+                    "#node-input-outSwitchNotifyTopic",
+                    "#node-input-outFallbackDiagTopic"
+                ].forEach((sel) => initializeAutocomplete($(sel)));
+            }).fail(function () {
+                _controllers = {};
+            });
+
+            const labels = $("#dialog-form label[title]");
+            if (!$("#uniflex-help-tooltip-style").length) {
+                $("head").append('<style id="uniflex-help-tooltip-style">.uniflex-help-tooltip{background:#fff8c4 !important;border:1px solid #d4b106 !important;color:#2b2b2b !important;max-width:560px !important;box-shadow:0 2px 6px rgba(0,0,0,.2) !important;padding:8px 10px !important;line-height:1.35 !important;}.uniflex-help-tooltip .ui-tooltip-content{font-size:12px !important;}</style>');
+            }
+            labels.each(function () {
+                if ($(this).data("ui-tooltip")) $(this).tooltip("destroy");
+            });
+            labels.tooltip({
+                track: false,
+                show: { delay: 150 },
+                hide: { delay: 0 },
+                position: { my: "left bottom-10", at: "left top", collision: "flipfit" },
+                classes: { "ui-tooltip": "uniflex-help-tooltip" }
+            });
+
+            const needPresets = {
+                conservative: { needOnThreshold: 0.6, needPredHorizonMin: 30, needPredMaxAbsErr: 1.0, roomErrSlopeTauSec: 1500 },
+                balanced: { needOnThreshold: 0.4, needPredHorizonMin: 45, needPredMaxAbsErr: 1.5, roomErrSlopeTauSec: 900 },
+                aggressive: { needOnThreshold: 0.25, needPredHorizonMin: 75, needPredMaxAbsErr: 2.0, roomErrSlopeTauSec: 600 }
+            };
+            function toNum(id, defVal) {
+                const n = Number($(id).val());
+                return Number.isFinite(n) ? n : defVal;
+            }
+            function updateNeedGuidance() {
+                const roomErrGain = Math.max(0.1, toNum("#node-input-roomErrGain", 2.0));
+                const clampAbs = Math.max(0.1, toNum("#node-input-needPredMaxAbsErr", 1.5));
+                const threshold = Math.max(0, toNum("#node-input-needOnThreshold", 0.4));
+                const maxPredictiveKw = roomErrGain * clampAbs;
+                const ratio = threshold > 0 ? (maxPredictiveKw / threshold) : 99;
+                const msg = ratio < 1
+                    ? "Predictive branch likely too weak for threshold."
+                    : (ratio < 2 ? "Predictive branch is conservative." : "Predictive branch has good headroom.");
+                $("#node-need-guidance-live").text(
+                    `Live check: roomErrGain*errClamp=${maxPredictiveKw.toFixed(2)}kW, threshold=${threshold.toFixed(2)}kW, ratio=${ratio.toFixed(2)}. ${msg}`
+                );
+            }
+            function applyNeedPreset(key) {
+                if (key === "auto-model") {
+                    const roomErrGain = Math.max(0.2, toNum("#node-input-roomErrGain", 2.0));
+                    const scale = Math.sqrt(2.0 / roomErrGain);
+                    const needOnThreshold = clamp(0.4 * (2.0 / roomErrGain), 0.25, 0.7);
+                    const needPredHorizonMin = Math.round(clamp(45 * scale, 30, 90));
+                    const needPredMaxAbsErr = clamp(1.2 * scale, 0.8, 2.2);
+                    const roomErrSlopeTauSec = Math.round(clamp(900 / Math.max(0.8, Math.min(1.25, 2.0 / roomErrGain)), 600, 1500));
+                    $("#node-input-needOnThreshold").val(Number(needOnThreshold.toFixed(2)));
+                    $("#node-input-needPredHorizonMin").val(needPredHorizonMin);
+                    $("#node-input-needPredMaxAbsErr").val(Number(needPredMaxAbsErr.toFixed(2)));
+                    $("#node-input-roomErrSlopeTauSec").val(roomErrSlopeTauSec);
+                    updateNeedGuidance();
+                    return;
+                }
+                const p = needPresets[key];
+                if (!p) return;
+                $("#node-input-needOnThreshold").val(p.needOnThreshold);
+                $("#node-input-needPredHorizonMin").val(p.needPredHorizonMin);
+                $("#node-input-needPredMaxAbsErr").val(p.needPredMaxAbsErr);
+                $("#node-input-roomErrSlopeTauSec").val(p.roomErrSlopeTauSec);
+                updateNeedGuidance();
+            }
+            function clamp(v, lo, hi) {
+                return Math.max(lo, Math.min(hi, v));
+            }
+            $(document).off("click", ".need-preset-apply").on("click", ".need-preset-apply", function (e) {
+                e.preventDefault();
+                const key = String($(this).data("preset") || "balanced");
+                $("#node-input-needTuningPreset").val(key);
+                applyNeedPreset(key);
+            });
+            $("#node-input-roomErrGain,#node-input-needOnThreshold,#node-input-needPredMaxAbsErr").on("input change", updateNeedGuidance);
+            updateNeedGuidance();
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-tank-control">
+    <div class="form-row"><label>Name</label><input type="text" id="node-input-name" /></div>
+    <h4>Input topics</h4>
+    <div class="form-row"><label title="Source: mpc-house output topic configured in mpc-house as outPowerTopic (current central wish, kW). Put that exact topic here.">Q need base</label><input type="text" id="node-input-qNeedBaseTopic" /></div>
+    <div class="form-row"><label title="Source: state-observer output topic configured in state-observer as Out topic. Put that exact topic here.">Estimate object</label><input type="text" id="node-input-estTopic" /></div>
+    <div class="form-row"><label title="Source: current schedule member for HP from cal2datastream output (usually HENW.1).">Schedule HP now</label><input type="text" id="node-input-scheduleHpTopic" placeholder="HENW.1" /></div>
+    <div class="form-row"><label title="Source: current schedule member for gas from cal2datastream output (usually HENW.2).">Schedule gas now</label><input type="text" id="node-input-scheduleGasTopic" placeholder="HENW.2" /></div>
+    <div class="form-row"><label title="Source: per-collector test flags (TSTW.1/.2/.3). Node aggregates internally with max().">Test .1/.2/.3</label><input type="text" id="node-input-testTopic1" placeholder="TSTW.1" /></div>
+    <div class="form-row"><label></label><input type="text" id="node-input-testTopic2" placeholder="TSTW.2" /></div>
+    <div class="form-row"><label></label><input type="text" id="node-input-testTopic3" placeholder="TSTW.3" /></div>
+    <div class="form-row"><label title="Optional: Override source preference for testing. HSMW.1=1 forces GAS selection (if heating needed), HSMW.2=1 forces HP selection. Does NOT activate heating - use HEW for that. Only affects which source is chosen when schedule/demand calls for heating.">Force gas/hp (source preference)</label><input type="text" id="node-input-forceGasTopic" placeholder="HSMW.1" /></div>
+    <div class="form-row"><label></label><input type="text" id="node-input-forceHpTopic" placeholder="HSMW.2" /></div>
+    <div class="form-row"><label title="Dashboard source enable command. Enables source even when schedule OFF (subject to HSDW lockout and availability). HSEW.1 gas, HSEW.2 HP.">Source enable in (HSEW)</label><input type="text" id="node-input-hsewGasTopic" placeholder="HSEW.1" /></div>
+    <div class="form-row"><label></label><input type="text" id="node-input-hsewHpTopic" placeholder="HSEW.2" /></div>
+    <div class="form-row"><label title="Cooling active signal from hp-control (outCoolModeGlobalTopic, usually COOLS.1). When 1, sets hp_enable even without heat need.">Cooling request in</label><input type="text" id="node-input-coolRequestTopic" placeholder="COOLS.1" /></div>
+    <div class="form-row"><label title="Source: manual disable datastream members (HSDW.1 gas, HSDW.2 HP), 1=force off (overrides test and auto)">Disable gas/hp</label><input type="text" id="node-input-disGasTopic" placeholder="HSDW.1" /></div>
+    <div class="form-row"><label></label><input type="text" id="node-input-disHpTopic" placeholder="HSDW.2" /></div>
+    <div class="form-row"><label title="Optional source problem signals from watchdogs. 0=ok, 1=problem/unavailable. If both fields are empty, tank-control keeps legacy no-switchover behavior.">Source problem gas/hp (optional)</label><input type="text" id="node-input-gasAvailTopic" placeholder="HAVW.1" /></div>
+    <div class="form-row"><label></label><input type="text" id="node-input-hpAvailTopic" placeholder="HAVW.2" /></div>
+    <h4>Output topics</h4>
+    <div class="form-row">
+        <label title="Current heat power demand output (kW). Consumed by pump/floor/setpoint nodes.">Heat demand out</label>
+        <input type="text" id="node-input-outQNeedTopic" placeholder="HQW.1" />
+    </div>
+    <div class="form-tips">`Q_need_now` is a numeric heat-power estimate in <b>kW</b> (not boolean): 0=no heat, higher=more heat.</div>
+    <div class="form-row">
+        <label title="Calculated tank setpoint output (°C). Consumed by hp-control and gas-control.">Tank target out</label>
+        <input type="text" id="node-input-outTankTargetTopic" placeholder="HTGW.1" />
+    </div>
+    <div class="form-tips">Use this as desired tank temperature input for `hp-control` and `gas-control`.</div>
+    <div class="form-row">
+        <label title="Desired circulation flow output (m³/h). Consumed by circulation-control or pump controller.">Flow target out</label>
+        <input type="text" id="node-input-outFlowTargetTopic" placeholder="HQW.2" />
+    </div>
+    <div class="form-tips">Desired circulation flow in m³/h.</div>
+    <div class="form-row">
+        <label title="Destination: gas enable topic used by gas path (for example ISETW.4).">Final gas enable topic</label>
+        <input type="text" id="node-input-outGasEnableTopic" placeholder="example: ISETW.4" />
+    </div>
+    <div class="form-row">
+        <label title="Destination: HP enable topic used by HP path (for example ESSWW.2).">Final HP enable topic</label>
+        <input type="text" id="node-input-outHpEnableTopic" placeholder="example: ESSWW.2" />
+    </div>
+    <div class="form-row">
+        <label title="Actual gas heating status (read-only HEW stream).">HEW gas status out</label>
+        <input type="text" id="node-input-outHewGasTopic" placeholder="HEW.1" />
+    </div>
+    <div class="form-row">
+        <label title="Actual HP heating status (read-only HEW stream).">HEW HP heat status out</label>
+        <input type="text" id="node-input-outHewHpTopic" placeholder="HEW.2" />
+    </div>
+    <div class="form-row">
+        <label title="2-member notify datastream for source-availability switchover. .1=price-preferred source unavailable, .2=fallback source active.">Source notify topic (2 members)</label>
+        <input type="text" id="node-input-outSwitchNotifyTopic" placeholder="example: HSWW" />
+    </div>
+    <div class="form-tips">If configured: <b>.1</b>=preferred source unavailable/failing, <b>.2</b>=fallback source currently active. This is active only when at least one availability topic is configured.</div>
+    <div class="form-row">
+        <label title="3-member fallback diagnostic datastream (all boolean 0/1). Member 1: emergency dual-source active. Member 2: no-schedule fallback. Member 3: source-failure fallback (watchdog).">Fallback diag topic (3 members)</label>
+        <input type="text" id="node-input-outFallbackDiagTopic" placeholder="example: HFBW" />
+    </div>
+    <div class="form-tips">Fallback diagnostics (all boolean 0/1): <b>.1</b>=emergency dual-source active (critical), <b>.2</b>=no-schedule fallback (MPC/calendar issue), <b>.3</b>=source-failure fallback (watchdog detected preferred source unavailable).</div>
+    <h4>Params</h4>
+    <div class="form-row"><label title="Purpose: how strongly room error corrects base power need. Unit: kW/degC. Formula: qNeed = qBase + roomErrGain*roomErr.">Room err gain (kW/degC)</label><input type="number" step="0.1" id="node-input-roomErrGain" /></div>
+    <div class="form-row"><label title="Purpose: minimum forced heat demand during active test. Unit: kW.">Test min Q (kW)</label><input type="number" step="0.1" id="node-input-testMinQ" /></div>
+    <div class="form-row"><label title="Purpose: predictive-demand threshold for source auto-enable when current schedule is OFF. Unit: kW. When schedule is ON, tank-control now follows the plan directly.">Need threshold (kW)</label><input type="number" step="0.1" id="node-input-needOnThreshold" /></div>
+    <div class="form-row"><label title="Purpose: look-ahead horizon for predictive local need using room error trend. Unit: minutes.">Need prediction horizon (min)</label><input type="number" step="1" id="node-input-needPredHorizonMin" /></div>
+    <div class="form-row"><label title="Purpose: safety clamp for predicted room error used by local need. Unit: degC absolute.">Predicted room err clamp (degC)</label><input type="number" step="0.1" id="node-input-needPredMaxAbsErr" /></div>
+    <div class="form-row"><label title="Purpose: smoothing time constant for room-error derivative estimator. Unit: seconds. Larger = slower/less noisy trend.">Room err slope filter tau (s)</label><input type="number" step="1" id="node-input-roomErrSlopeTauSec" /></div>
+    <input type="hidden" id="node-input-needTuningPreset" />
+    <div class="form-row"><label title="Prefill helper for predictive-need parameters. Buttons fill suggested values; all fields stay editable afterwards.">Need prefill table</label>
+        <div style="width: calc(100% - 120px);">
+            <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                <thead>
+                    <tr>
+                        <th style="text-align:left; border-bottom:1px solid #ddd; padding:4px;">Preset</th>
+                        <th style="text-align:right; border-bottom:1px solid #ddd; padding:4px;">Threshold kW</th>
+                        <th style="text-align:right; border-bottom:1px solid #ddd; padding:4px;">Horizon min</th>
+                        <th style="text-align:right; border-bottom:1px solid #ddd; padding:4px;">Err clamp C</th>
+                        <th style="text-align:right; border-bottom:1px solid #ddd; padding:4px;">Slope tau s</th>
+                        <th style="text-align:center; border-bottom:1px solid #ddd; padding:4px;">Apply</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="padding:4px;">Conservative</td><td style="padding:4px; text-align:right;">0.60</td><td style="padding:4px; text-align:right;">30</td><td style="padding:4px; text-align:right;">1.00</td><td style="padding:4px; text-align:right;">1500</td>
+                        <td style="padding:4px; text-align:center;"><a href="#" class="editor-button need-preset-apply" data-preset="conservative">Prefill</a></td>
+                    </tr>
+                    <tr>
+                        <td style="padding:4px;">Balanced</td><td style="padding:4px; text-align:right;">0.40</td><td style="padding:4px; text-align:right;">45</td><td style="padding:4px; text-align:right;">1.50</td><td style="padding:4px; text-align:right;">900</td>
+                        <td style="padding:4px; text-align:center;"><a href="#" class="editor-button need-preset-apply" data-preset="balanced">Prefill</a></td>
+                    </tr>
+                    <tr>
+                        <td style="padding:4px;">Aggressive</td><td style="padding:4px; text-align:right;">0.25</td><td style="padding:4px; text-align:right;">75</td><td style="padding:4px; text-align:right;">2.00</td><td style="padding:4px; text-align:right;">600</td>
+                        <td style="padding:4px; text-align:center;"><a href="#" class="editor-button need-preset-apply" data-preset="aggressive">Prefill</a></td>
+                    </tr>
+                    <tr>
+                        <td style="padding:4px;">Auto (model-seeded)</td><td colspan="4" style="padding:4px;">Derived from current Room err gain</td>
+                        <td style="padding:4px; text-align:center;"><a href="#" class="editor-button need-preset-apply" data-preset="auto-model">Prefill</a></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="form-tips" id="node-need-guidance-live">Live check: ...</div>
+    <div class="form-row"><label title="Need autotune mode for predictive local gate. Off = fixed values. Shadow = logs suggested deltas only. Active = applies small bounded deltas on planner ticks/recalc updates.">Need autotune mode</label>
+        <select id="node-input-needAutotuneMode">
+            <option value="off">Off</option>
+            <option value="shadow">Shadow (suggest only)</option>
+            <option value="active">Active (self-learning)</option>
+        </select>
+    </div>
+    <div class="form-row"><label title="Debounce duration for schedule 1→0 transitions (seconds). Prevents iolayer or NR restart from triggering the min-off hold timer due to a momentary schedule signal dropout. Set to 0 to disable.">Schedule off debounce (s)</label><input type="number" step="1" id="node-input-schDebounceSec" /></div>
+    <div class="form-row"><label title="Safety fallback only: prevent very short HP cycling if planner/wiring glitches. Main dwell logic should be in mpc-house planning.">HP safety min ON hold (s)</label><input type="number" step="1" id="node-input-hpMinOnSec" /></div>
+    <div class="form-row"><label title="Safety fallback only: prevent very short HP cycling if planner/wiring glitches. Main dwell logic should be in mpc-house planning.">HP safety min OFF hold (s)</label><input type="number" step="1" id="node-input-hpMinOffSec" /></div>
+    <h4>Emergency dual-source failsafe</h4>
+    <div class="form-row"><label title="Enable emergency dual-source heating when average room error high AND tank too cold or no schedule available">Enable emergency failsafe</label><input type="checkbox" id="node-input-enableEmergencyDualSource" style="width:auto;vertical-align:middle;" /></div>
+    <div class="form-row"><label title="Average room error threshold for emergency trigger. Default 2.5°C (rooms significantly colder than setpoint).">Room error threshold (°C)</label><input type="number" step="0.1" id="node-input-emergencyRoomErrThreshold" placeholder="2.5" /></div>
+    <div class="form-row"><label title="Tank temp below this with source enabled = heat delivery failure. Default 22°C.">Tank failure threshold (°C)</label><input type="number" step="0.1" id="node-input-tankTempFailureThreshold" placeholder="22" /></div>
+    <div class="form-row"><label title="Tank temp below this (regardless of source state) = critical cold. Default 20°C.">Tank critical threshold (°C)</label><input type="number" step="0.1" id="node-input-tankTempCriticalThreshold" placeholder="20" /></div>
+    <div class="form-tips"><b>Emergency logic:</b> Uses aggregate roomErr from state-observer (no per-room wiring needed). When roomErr > threshold AND (tank < failure threshold with source on, OR tank < critical threshold, OR no schedule) → force both HP and gas ON. Exit when tank >= failure threshold AND roomErr improved (prevents oscillation).</div>
+    <details style="margin:8px 0 10px 0;">
+        <summary><b>Advanced mapping (optional)</b></summary>
+        <div class="form-tips">Use defaults if unsure. If downstream `ESTTW` already clamps safely, tank intent bounds are mostly shaping values, not hard safety.</div>
+        <div class="form-row"><label title="Base tank target intent before demand shaping (degC). Keep default unless you want a different nominal heating level.">Tank base intent (degC)</label><input type="number" step="0.1" id="node-input-tankBase" /></div>
+        <div class="form-row"><label title="Soft lower bound for tank target intent (degC). Downstream clamps may still apply.">Tank min intent (degC)</label><input type="number" step="0.1" id="node-input-tankMin" /></div>
+        <div class="form-row"><label title="Soft upper bound for tank target intent (degC). Downstream clamps may still apply.">Tank max intent (degC)</label><input type="number" step="0.1" id="node-input-tankMax" /></div>
+        <div class="form-row"><label title="Demand-to-tank shaping gain. 0 disables demand effect on tank target (fixed around Tank base).">Demand to tank gain (degC/kW)</label><input type="number" step="0.1" id="node-input-qToTankGain" /></div>
+        <div class="form-row"><label title="Minimum flow target intent">Flow min intent</label><input type="number" step="0.01" id="node-input-flowMin" /></div>
+        <div class="form-row"><label title="Maximum flow target intent">Flow max intent</label><input type="number" step="0.01" id="node-input-flowMax" /></div>
+        <div class="form-row"><label title="Demand-to-flow shaping gain. Set 0 to disable demand-driven flow shaping.">Demand to flow gain ((m3/h)/kW)</label><input type="number" step="0.01" id="node-input-qToFlowGain" /></div>
+        <div class="form-row"><label title="Optional gas hold fallback. Usually not needed when planning is correct.">Gas min ON hold (s)</label><input type="number" step="1" id="node-input-gasMinOnSec" /></div>
+        <div class="form-row"><label title="Optional gas hold fallback. Usually not needed when planning is correct.">Gas min OFF hold (s)</label><input type="number" step="1" id="node-input-gasMinOffSec" /></div>
+    </details>
+    <div class="form-row"><label title="If enabled, tank-control writes detailed internal diagnostics to Node-RED log on each compute/update. State-change logs are always emitted.">Enable system log</label><input type="checkbox" id="node-input-enableSystemLog" style="width:auto;vertical-align:middle;" /></div>
+    <p class="form-tips">Use consistent units: <b>qBase, qNeed, testMinQ, threshold in kW</b>. With this convention the node behavior is physically interpretable.</p>
+    <p class="form-tips">Need logic is now predictive and plan-following: if schedule says ON, tank-control keeps <code>need=1</code>. If schedule says OFF, it uses short-horizon predicted room error (actual + slope*horizon) to decide.</p>
+    <p class="form-tips">Schedule HP/gas now means current slot enable state (for example `HENW.1` / `HENW.2`). Tank target is source setpoint intent (degC). Flow target is pump-side delivery target (m3/h).</p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-tank-control">
+    <p>Single authority tank controller: combines current central wish, schedule, test, and manual force/disable topics.</p>
+    <p>Signal format used in this node help: <b>Purpose</b>, <b>Unit</b>, <b>Source</b>, <b>Destination</b>.</p>
+    <ul>
+        <li><b>Q need base</b> -- Purpose: planner baseline demand. Unit: kW. Source: mpc-house outPowerTopic. Destination: tank-control internal objective.</li>
+        <li><b>Estimate object</b> -- Purpose: current state correction. Unit: object payload. Source: state-observer output. Destination: tank-control correction path.</li>
+        <li><b>Schedule HP/gas now</b> -- Purpose: schedule policy now. Unit: 0/1. Source: HENW.1 / HENW.2. Destination: source enable decision. If either schedule is ON, <code>need</code> follows plan (no local blocking).</li>
+        <li><b>Test .1/.2/.3</b> -- Purpose: test heat request by collector. Unit: 0/1. Source: TSTW members. Destination: test demand aggregation in tank-control.</li>
+        <li><b>Force gas/hp (hold bypass)</b> -- Purpose: optional bits that bypass min ON/OFF hold when 1 (often HSMW on site). Unit: 0/1.</li>
+        <li><b>HEW manual gas/HP</b> -- Purpose: dashboard forced <b>activation</b> (run even when schedule/predictive need would leave source off). Unit: 0/1. Source: e.g. HEW.1 / HEW.2. Respects disable + availability.</li>
+        <li><b>Disable gas/hp</b> -- Purpose: force off. Unit: 0/1. Source: HSDW. Destination: blocks enable for that source.</li>
+        <li><b>Gas/HP problem (optional)</b> -- Purpose: source fault from watchdogs. Unit: 0/1 where 0=ok and 1=problem. Source: gas-watchdog/hp-watchdog. Destination: automatic switchover logic.</li>
+        <li><b>Enable system log</b> -- Purpose: verbose diagnostics toggle. Unit: checkbox 0/1. Source: tank-control config. Destination: Node-RED log only. State-change logs are always emitted.</li>
+        <li><b>Need threshold / prediction horizon / slope tau</b> -- Purpose: predictive local need tuning when schedule is OFF. Unit: kW / min / s. Source: tank-control parameters. Destination: local need decision.</li>
+        <li><b>Need autotune mode</b> -- Purpose: optional self-learning trim of predictive-need parameters. Unit: mode. Source: tank-control parameters. Destination: effective local need tuning (active mode) or recommendation logs (shadow mode) on planner ticks/recalc updates.</li>
+        <li><b>Q need now</b> -- Purpose: unified present heat demand. Unit: kW (not boolean). Source: tank-control computed output (with predictive room-error correction). Destination: downstream controllers.</li>
+        <li><b>Tank target</b> -- Purpose: target tank temperature. Unit: degC. Source: tank-control computed output. Destination: hp/gas setpoint adapters.</li>
+        <li><b>Flow target</b> -- Purpose: circulation delivery target. Unit: m3/h. Source: tank-control computed output. Destination: circulation-control input.</li>
+        <li><b>Enable gas/HP</b> -- Purpose: final source permission. Unit: 0/1. Source: tank-control computed output. Destination: source actuation path.</li>
+        <li><b>Source notify (2 members)</b> -- Purpose: switchover diagnostics when watchdog mode is active. Unit: 0/1 members. Source: tank-control computed output. Destination: alarms/monitoring.</li>
+        <li><b>HP/Gas min ON/OFF hold</b> -- Purpose: prevent short-cycling. Unit: seconds. Source: tank-control parameters. Destination: final enable output gating.</li>
+    </ul>
+</script>

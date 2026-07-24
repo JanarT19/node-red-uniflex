@@ -1,0 +1,450 @@
+<script type="text/javascript">
+    RED.nodes.registerType('uniflex-diagram-creator', {
+        category: "uniflex calendar",
+        paletteLabel: "diagram creator",
+        color: '#a6bbcf',
+        defaults: {
+            name: { value: "" },
+            chartType: { value: "line" },
+            outputPath: { value: "/tmp/diagram.json" },
+            settingsPath: { value: "" },  // If set, generates settings file (e.g., /tmp/diagram.settings.json)
+            rangeMode: { value: "fixed" },
+            rangeAnchorTitle: { value: "" },
+            startOffset: { value: -24 },
+            endOffset: { value: 48 },
+            stepMinutes: { value: 15 },
+            series: { value: [] },
+            timelineSeries: { value: [] },
+            // Chart styling options
+            chartWidth: { value: 1000 },
+            chartHeight: { value: 400 },
+            vAxisTitle: { value: "EUR/MWh" },
+            hAxisFormat: { value: "HH:mm" },
+            legendPosition: { value: "top" },
+            backgroundColor: { value: "#ffffff" },
+            gridlineColor: { value: "#bbbbbb" },
+            gridlineCount: { value: 48 },
+            showCurrentTime: { value: true },
+            currentTimeColor: { value: "#000000" },
+            currentTimeWidth: { value: 2 },
+            enableLogging: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-line-chart",
+        label: function () {
+            return this.name || "diagram-creator";
+        },
+        oneditprepare: function () {
+            const node = this;
+
+            // Chart type toggle
+            function toggleChartType() {
+                const chartType = $("#node-input-chartType").val();
+                const isTimeline = chartType === "timeline";
+                $("#line-series-section").toggle(!isTimeline);
+                $("#timeline-series-section").toggle(isTimeline);
+                $("#step-row").toggle(!isTimeline); // Step only relevant for line charts
+                $("#line-styling-section").toggle(!isTimeline); // Y-axis title only for line charts
+            }
+            $("#node-input-chartType").on("change", toggleChartType);
+
+            function toggleRangeMode() {
+                const mode = $("#node-input-rangeMode").val();
+                const isAnchor = mode === "anchor";
+                $("#node-input-rangeAnchor-row").toggle(isAnchor);
+                $("#node-input-offsets-row, #node-input-endOffset-row").toggle(!isAnchor);
+            }
+            $("#node-input-rangeMode").on("change", toggleRangeMode);
+
+            // Default color palette for series
+            const defaultColors = ["#fabf99", "#83d2f1", "#ff0000", "#0000ff", "#ee8888", "#8888ee", "#88FF88"];
+
+            // Line chart series list
+            $("#node-input-series-container").css('min-width', '450px').editableList({
+                height: 'auto',
+                addItem: function (container, i, opt) {
+                    const series = opt;
+                    const defaultColor = defaultColors[i % defaultColors.length];
+
+                    container.css({
+                        overflow: 'hidden',
+                        whiteSpace: 'nowrap',
+                        display: 'flex',
+                        alignItems: 'center'
+                    });
+
+                    const row = $('<div/>').css({
+                        display: 'flex',
+                        alignItems: 'center',
+                        width: '100%',
+                        gap: '5px'
+                    }).appendTo(container);
+
+                    $('<span/>').text('Title:').css('width', '35px').appendTo(row);
+                    const titleInput = $('<input/>', {
+                        type: 'text',
+                        class: 'series-title',
+                        placeholder: 'e.g., elering'
+                    }).css('width', '120px').val(series.title || '').appendTo(row);
+
+                    $('<span/>').text('Label:').css('width', '40px', 'margin-left', '10px').appendTo(row);
+                    const labelInput = $('<input/>', {
+                        type: 'text',
+                        class: 'series-label',
+                        placeholder: 'e.g., ElSpot'
+                    }).css('width', '150px').val(series.label || '').appendTo(row);
+
+                    $('<span/>').text('Type:').css('width', '30px', 'margin-left', '5px').appendTo(row);
+                    const typeSelect = $('<select/>', { class: 'series-type' }).css('width', '80px')
+                        .append($('<option/>', { value: 'price' }).text('Price'))
+                        .append($('<option/>', { value: 'temperature' }).text('Temp'))
+                        .val(series.type || 'price').appendTo(row);
+
+                    $('<span/>').text('Color:').css('width', '35px', 'margin-left', '5px').appendTo(row);
+                    const colorInput = $('<input/>', {
+                        type: 'text',
+                        class: 'series-color'
+                    }).css('width', '70px').val(series.color || defaultColor).appendTo(row);
+
+                    $('<span/>').text('Width:').css('width', '35px', 'margin-left', '5px').appendTo(row);
+                    const lineWidthInput = $('<input/>', {
+                        type: 'number',
+                        class: 'series-lineWidth',
+                        min: '1',
+                        max: '20'
+                    }).css('width', '40px').val(series.lineWidth || 2).appendTo(row);
+
+                    $('<span/>').text('Opacity:').css('width', '45px', 'margin-left', '5px').appendTo(row);
+                    const opacityInput = $('<input/>', {
+                        type: 'number',
+                        class: 'series-opacity',
+                        min: '0',
+                        max: '1',
+                        step: '0.05'
+                    }).css('width', '50px').val(series.opacity !== undefined ? series.opacity : 0).appendTo(row);
+
+                    container.data('title-input', titleInput);
+                    container.data('label-input', labelInput);
+                    container.data('type-input', typeSelect);
+                    container.data('color-input', colorInput);
+                    container.data('lineWidth-input', lineWidthInput);
+                    container.data('opacity-input', opacityInput);
+                },
+                removable: true,
+                sortable: true
+            });
+
+            // Timeline series list - default colors for HP (red) and Gas (blue)
+            const timelineDefaultColors = ["#ff0000", "#0000ff", "#00aa00", "#ff9900", "#990099"];
+
+            $("#node-input-timeline-series-container").css('min-width', '450px').editableList({
+                height: 'auto',
+                addItem: function (container, i, opt) {
+                    const series = opt;
+                    const defaultColor = timelineDefaultColors[i % timelineDefaultColors.length];
+
+                    container.css({
+                        overflow: 'hidden',
+                        whiteSpace: 'nowrap',
+                        display: 'flex',
+                        alignItems: 'center'
+                    });
+
+                    const row = $('<div/>').css({
+                        display: 'flex',
+                        alignItems: 'center',
+                        width: '100%',
+                        gap: '5px'
+                    }).appendTo(container);
+
+                    $('<span/>').text('Calendar:').css('width', '60px').appendTo(row);
+                    const titleInput = $('<input/>', {
+                        type: 'text',
+                        class: 'timeline-title',
+                        placeholder: 'e.g., hp_ena'
+                    }).css('width', '120px').val(series.title || '').appendTo(row);
+
+                    $('<span/>').text('Row label:').css('width', '65px', 'margin-left', '10px').appendTo(row);
+                    const rowLabelInput = $('<input/>', {
+                        type: 'text',
+                        class: 'timeline-rowLabel',
+                        placeholder: 'e.g., HeatPump'
+                    }).css('width', '120px').val(series.rowLabel || '').appendTo(row);
+
+                    $('<span/>').text('Color:').css('width', '40px', 'margin-left', '10px').appendTo(row);
+                    const styleInput = $('<input/>', {
+                        type: 'text',
+                        class: 'timeline-style',
+                        placeholder: '#ff0000'
+                    }).css('width', '80px').val(series.style || defaultColor).appendTo(row);
+
+                    container.data('title-input', titleInput);
+                    container.data('rowLabel-input', rowLabelInput);
+                    container.data('style-input', styleInput);
+                },
+                removable: true,
+                sortable: true
+            });
+
+            // Load existing series
+            if (node.series && Array.isArray(node.series)) {
+                node.series.forEach(s => {
+                    $("#node-input-series-container").editableList('addItem', s);
+                });
+            }
+
+            // Load existing timeline series
+            if (node.timelineSeries && Array.isArray(node.timelineSeries)) {
+                node.timelineSeries.forEach(s => {
+                    $("#node-input-timeline-series-container").editableList('addItem', s);
+                });
+            }
+
+            // Initialize visibility
+            toggleRangeMode();
+            toggleChartType();
+        },
+        oneditsave: function () {
+            const node = this;
+
+            // Save line chart series
+            const series = [];
+            $("#node-input-series-container").editableList('items').each(function () {
+                const titleInput = $(this).data('title-input');
+                const labelInput = $(this).data('label-input');
+                const typeInput = $(this).data('type-input');
+                const colorInput = $(this).data('color-input');
+                const lineWidthInput = $(this).data('lineWidth-input');
+                const opacityInput = $(this).data('opacity-input');
+
+                const title = titleInput.val().trim();
+                const label = labelInput.val().trim();
+                const type = (typeInput && typeInput.val()) || 'price';
+                const color = colorInput ? colorInput.val().trim() : '';
+                const lineWidth = lineWidthInput ? parseInt(lineWidthInput.val()) : null;
+                const opacity = opacityInput ? parseFloat(opacityInput.val()) : 0;
+
+                if (title) {
+                    series.push({
+                        title: title,
+                        label: label || title,
+                        type: type,
+                        color: color || null,
+                        lineWidth: isNaN(lineWidth) ? null : lineWidth,
+                        opacity: isNaN(opacity) ? 0 : opacity
+                    });
+                }
+            });
+            node.series = series;
+
+            // Save timeline series
+            const timelineSeries = [];
+            $("#node-input-timeline-series-container").editableList('items').each(function () {
+                const titleInput = $(this).data('title-input');
+                const rowLabelInput = $(this).data('rowLabel-input');
+                const styleInput = $(this).data('style-input');
+
+                const title = titleInput.val().trim();
+                const rowLabel = rowLabelInput.val().trim();
+                const style = styleInput.val().trim();
+
+                if (title) {
+                    timelineSeries.push({
+                        title: title,
+                        rowLabel: rowLabel || title,
+                        style: style || null
+                    });
+                }
+            });
+            node.timelineSeries = timelineSeries;
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-diagram-creator">
+    <div class="diagram-creator-div">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+
+    <h4>Chart Type</h4>
+    <div class="form-row">
+        <label for="node-input-chartType" style="width: 110px;">Chart type</label>
+        <select id="node-input-chartType" style="width: 150px;">
+            <option value="line">Line chart (prices)</option>
+            <option value="timeline">Timeline (on/off events)</option>
+        </select>
+    </div>
+
+    <h4>Output</h4>
+    <div class="form-row">
+        <label for="node-input-outputPath" style="width: 110px;">Output file</label>
+        <input type="text" id="node-input-outputPath" placeholder="/tmp/diagram.json" style="width: 60%;">
+        <span class="help-block">Full path where JSON will be written</span>
+    </div>
+
+    <h4>Time Range</h4>
+    <div class="form-row">
+        <label for="node-input-rangeMode" style="width: 110px;">Range mode</label>
+        <select id="node-input-rangeMode" style="width: 120px;">
+            <option value="fixed">Fixed offsets</option>
+            <option value="anchor">48h from electricity latest</option>
+        </select>
+        <span class="help-block">Anchor: 48h ending at 01:00 of day containing latest datum (00:45→01:00)</span>
+    </div>
+    <div class="form-row" id="node-input-rangeAnchor-row">
+        <label for="node-input-rangeAnchorTitle" style="width: 110px;">Anchor series</label>
+        <input type="text" id="node-input-rangeAnchorTitle" placeholder="e.g., electricity.spot" style="width: 180px;">
+        <span class="help-block">Electricity spot series (trigger diagram after price fetch)</span>
+    </div>
+    <div class="form-row" id="node-input-offsets-row">
+        <label for="node-input-startOffset" style="width: 110px;">Start offset</label>
+        <input type="number" id="node-input-startOffset" min="-168" max="0" value="-24" style="width: 70px;">
+        <span style="margin-left: 5px;">hours from now (negative = past)</span>
+        <span class="help-block">e.g., -24 = start 24 hours ago</span>
+    </div>
+    <div class="form-row" id="node-input-endOffset-row">
+        <label for="node-input-endOffset" style="width: 110px;">End offset</label>
+        <input type="number" id="node-input-endOffset" min="0" max="168" value="48" style="width: 70px;">
+        <span style="margin-left: 5px;">hours from now (positive = future)</span>
+        <span class="help-block">e.g., 48 = end 48 hours from now</span>
+    </div>
+    <div class="form-row" id="step-row">
+        <label for="node-input-stepMinutes" style="width: 110px;">Time step</label>
+        <input type="number" id="node-input-stepMinutes" min="1" max="60" value="15" style="width: 70px;">
+        <span style="margin-left: 5px;">minutes</span>
+        <span class="help-block">Resolution of diagram data points</span>
+    </div>
+
+    <div id="line-series-section">
+        <h4>Data Series (Line Chart)</h4>
+        <div class="form-row">
+            <label style="width: 110px;">Calendar series</label>
+            <ol id="node-input-series-container"></ol>
+            <span class="help-block">Add calendar series (e.g. electricity.spot, heat_price.electricity). Type: price = cents/MWh→EUR/MWh for chart; temperature = as-is.</span>
+        </div>
+    </div>
+
+    <div id="timeline-series-section" style="display: none;">
+        <h4>Event Series (Timeline)</h4>
+        <div class="form-row">
+            <label style="width: 110px;">Calendar events</label>
+            <ol id="node-input-timeline-series-container"></ol>
+            <span class="help-block">Add calendar event series (e.g. hp_ena, gas_ena, SaunaPreheat). Events with start/end times are displayed as bars.</span>
+        </div>
+    </div>
+
+    <h4>Chart Styling</h4>
+    <div class="form-row">
+        <label for="node-input-settingsPath"><i class="fa fa-cog"></i> Settings file</label>
+        <input type="text" id="node-input-settingsPath" placeholder="e.g., /root/pyapp/webui/prices.settings.json">
+        <span class="help-block">If set, generates a settings.json file for chart styling. Leave empty to skip.</span>
+    </div>
+    <div class="form-row">
+        <label>Chart size</label>
+        <span>Width:</span>
+        <input type="number" id="node-input-chartWidth" style="width: 70px;" min="200" max="2000"> px
+        <span style="margin-left: 15px;">Height:</span>
+        <input type="number" id="node-input-chartHeight" style="width: 70px;" min="100" max="1000"> px
+    </div>
+    <div class="form-row" id="line-styling-section">
+        <label for="node-input-vAxisTitle">Y-axis title</label>
+        <input type="text" id="node-input-vAxisTitle" style="width: 150px;">
+        <span style="margin-left: 15px;">X format:</span>
+        <input type="text" id="node-input-hAxisFormat" style="width: 80px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-legendPosition">Legend</label>
+        <select id="node-input-legendPosition" style="width: 100px;">
+            <option value="top">Top</option>
+            <option value="bottom">Bottom</option>
+            <option value="right">Right</option>
+            <option value="none">None</option>
+        </select>
+        <span style="margin-left: 15px;">Background:</span>
+        <input type="text" id="node-input-backgroundColor" style="width: 80px;">
+        <span style="margin-left: 15px;">Gridlines:</span>
+        <input type="text" id="node-input-gridlineColor" style="width: 80px;">
+        <span style="margin-left: 15px;">Count:</span>
+        <input type="number" id="node-input-gridlineCount" style="width: 60px;" min="1" max="500">
+    </div>
+    <div class="form-row" id="currenttime-section">
+        <label style="width: auto;">
+            <input type="checkbox" id="node-input-showCurrentTime" style="width: 20px; margin-right: 5px;">
+            Show current time marker
+        </label>
+        <span style="margin-left: 15px;">Color:</span>
+        <input type="text" id="node-input-currentTimeColor" style="width: 80px;">
+        <span style="margin-left: 15px;">Width:</span>
+        <input type="number" id="node-input-currentTimeWidth" style="width: 50px;" min="1" max="10">
+    </div>
+
+    <h4>Logging</h4>
+    <div class="form-row">
+        <label for="node-input-enableLogging" style="width: 110px;">Enable logging</label>
+        <input type="checkbox" id="node-input-enableLogging" style="width: auto; vertical-align: top;">
+    </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-diagram-creator">
+    <p>Generates chart data from the local <b>sql-calendar</b> database (prices, events, forecasts) and outputs JSON compatible with the Google Charts JavaScript library for web visualization.</p>
+
+    <h3>Inputs</h3>
+    <p>Trigger message (from inject node or scheduler) to generate the diagram. Do <b>not</b> wire this node's output to sql-calendar (it sends status only, no msg.mode).</p>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">object</span></dt>
+        <dd>Status information about the generated diagram (path, row count, time range)</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>This node queries the <b>local sql-calendar HTTP API</b> (not Google Calendar!) to fetch time-series data (electricity prices, heat prices, temperature forecasts) or events (HP/gas schedules). It then formats the data for the <b>Google Charts JavaScript library</b> which renders interactive charts in the browser.</p>
+    <p>The node:</p>
+    <ul>
+        <li>Queries the sql-calendar API for multiple series over a time range</li>
+        <li>Generates data points at fixed intervals (step)</li>
+        <li>For each timestamp, finds the most recent value in each series</li>
+        <li>Writes JSON file compatible with Google Charts DataTable format</li>
+    </ul>
+
+    <h4>Output Format</h4>
+    <p>The generated JSON has this structure:</p>
+    <pre>[
+  [
+    {"type": "datetime", "label": "Aeg"},
+    {"type": "string", "role": "annotation"},
+    {"label": "SeriesName1", "type": "number"},
+    {"label": "SeriesName2", "type": "number"},
+    ...
+  ],
+  ["2026-02-03T01:00:00", null, 106.69, 55.47, ...],
+  ["2026-02-03T01:15:00", null, 106.69, 55.47, ...],
+  ...
+]</pre>
+
+    <h4>Configuration</h4>
+    <ul>
+        <li><b>Range mode:</b> <i>Fixed</i> uses start/end offsets from now. <i>48h from electricity latest</i> finds the latest datum in the anchor series, rounds end to 01:00 of that day (00:45→01:00), and shows the preceding 48h. Trigger diagram after price fetching.</li>
+        <li><b>Time step:</b> Resolution for data points (e.g., 15 minutes)</li>
+        <li><b>Series:</b> Calendar series to query (order matters for output columns). Each series can have color and line width.</li>
+    </ul>
+
+    <h4>Settings File</h4>
+    <p>If a <b>Settings file</b> path is configured, the node generates a settings JSON file for the chart renderer. This file contains Google Charts options:</p>
+    <ul>
+        <li><b>Line chart:</b> width, height, chartArea, vAxis, hAxis, legend, series (lineWidth), colors</li>
+        <li><b>Timeline:</b> width, height, timeline (rowLabelStyle, barLabelStyle), hAxis format, colors</li>
+    </ul>
+    <p>The settings file is regenerated on each trigger, so all chart styling can be controlled from Node-RED without filesystem access.</p>
+
+    <h3>References</h3>
+    <ul>
+        <li><b>Data source:</b> Local sql-calendar HTTP API at localhost:80/calendar (NOT Google Calendar)</li>
+        <li><b>Output format:</b> Google Charts DataTable JSON (for the Google Charts JS visualization library)</li>
+        <li><a href="https://developers.google.com/chart" target="_blank">Google Charts documentation</a></li>
+    </ul>
+</script>

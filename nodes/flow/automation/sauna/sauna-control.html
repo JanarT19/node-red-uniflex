@@ -1,0 +1,275 @@
+<script type="text/html" data-template-name="uniflex-sauna-control">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="sauna" />
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-tickMs"><i class="fa fa-clock-o"></i> Tick interval (ms)</label>
+        <input type="number" id="node-input-tickMs" min="200" step="100" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-lidDetectionWindow"><i class="fa fa-hourglass-half"></i> Lid open detection window (s)</label>
+        <input type="number" id="node-input-lidDetectionWindow" min="10" step="5" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-lidSpeedThreshold"><i class="fa fa-tachometer"></i> Lid open detection speed (degC/s)</label>
+        <input type="number" id="node-input-lidSpeedThreshold" step="0.01" min="0.03" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-lidTempThreshold"><i class="fa fa-thermometer-empty"></i> Lid open detection temperature (degC)</label>
+        <input type="number" id="node-input-lidTempThreshold" step="1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-historyFilePath"><i class="fa fa-file-text-o"></i> Heater switching history file</label>
+        <input type="text" id="node-input-historyFilePath" placeholder="/path/to/history.log" />
+        <div class="help-text">Optional filepath to log all heater state changes (ON/OFF) with timestamps and reasoning. Leave empty to disable file logging.</div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-enableLogging"><i class="fa fa-file-text-o"></i> Enable logging</label>
+        <input type="checkbox" id="node-input-enableLogging" checked />
+        <div class="help-text">Log status changes, heater switches, and events to Node-RED logs (INFO/WARN/ERROR level)</div>
+    </div>
+
+    <hr />
+    <b>Display units</b>
+    <div class="form-row">
+        <label for="node-input-tempDisplayUnit"><i class="fa fa-thermometer-half"></i> Temperature unit</label>
+        <select id="node-input-tempDisplayUnit">
+            <option value="dC">deci-Celsius (dC)</option>
+            <option value="C">Celsius (degC)</option>
+        </select>
+        <div class="help-text">Unit for temperature values sent to display. Internal logic always uses dC.</div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-humidityDisplayUnit"><i class="fa fa-tint"></i> Humidity unit</label>
+        <select id="node-input-humidityDisplayUnit">
+            <option value="d%">deci-percent (d%)</option>
+            <option value="%">percent (%)</option>
+        </select>
+        <div class="help-text">Unit for humidity values sent to display. Internal logic always uses d%.</div>
+    </div>
+
+    <hr />
+    <b>Inputs</b>
+    <div class="form-row">
+        <label for="node-input-buttonTopic"><i class="fa fa-toggle-on"></i> Button topic</label>
+        <input type="text" id="node-input-buttonTopic" placeholder="SABS.1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-visitNeedTopic"><i class="fa fa-hand-o-up"></i> Visit need topic</label>
+        <input type="text" id="node-input-visitNeedTopic" placeholder="SAKW.2" />
+        <div class="help-text">Physical button active = visiting need (SAKW.2 level signal, logged on change).</div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-preheatCalendarTopic"><i class="fa fa-calendar"></i> Calendar preheat topic</label>
+        <input type="text" id="node-input-preheatCalendarTopic" placeholder="SAKW.3" />
+        <div class="help-text">Calendar-driven preheat request (read-only fallback when force/disable are inactive).</div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-preheatForceTopic"><i class="fa fa-plug"></i> Preheat force topic</label>
+        <input type="text" id="node-input-preheatForceTopic" placeholder="SAKW.4" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-preheatDisableTopic"><i class="fa fa-ban"></i> Preheat disable topic</label>
+        <input type="text" id="node-input-preheatDisableTopic" placeholder="SAKW.5" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-upperTempTopic"><i class="fa fa-thermometer-full"></i> Upper temp topic</label>
+        <input type="text" id="node-input-upperTempTopic" placeholder="SATW.2" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-lowerTempTopic"><i class="fa fa-thermometer-half"></i> Lower temp topic</label>
+        <input type="text" id="node-input-lowerTempTopic" placeholder="SATW.1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-highLimitTopic"><i class="fa fa-thermometer"></i> High limit topic</label>
+        <input type="text" id="node-input-highLimitTopic" placeholder="SATW.3" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-shellTempTopic"><i class="fa fa-fire"></i> Heater shell temp topic</label>
+        <input type="text" id="node-input-shellTempTopic" placeholder="SATKW.1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-shellMaxTopic"><i class="fa fa-fire-extinguisher"></i> Max shell temperature topic</label>
+        <input type="text" id="node-input-shellMaxTopic" placeholder="SATKW.3" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-humidityTopTopic"><i class="fa fa-tint"></i> Humidity top topic</label>
+        <input type="text" id="node-input-humidityTopTopic" placeholder="SANW.1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-humidityBottomTopic"><i class="fa fa-tint"></i> Humidity bottom topic</label>
+        <input type="text" id="node-input-humidityBottomTopic" placeholder="SANW.2" />
+    </div>
+
+    <hr />
+    <b>Outputs</b>
+    <div class="form-row">
+        <label for="node-input-heaterTopic"><i class="fa fa-bolt"></i> Heater state topic</label>
+        <input type="text" id="node-input-heaterTopic" placeholder="SAKW.1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-visitTopic"><i class="fa fa-sign-in"></i> Visiting state topic</label>
+        <input type="text" id="node-input-visitTopic" placeholder="SAKW.2" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-displayTopic"><i class="fa fa-bars"></i> Display topic</label>
+        <input type="text" id="node-input-displayTopic" placeholder="SADW" />
+        <div class="help-text">Publishes <code>[led, topRow, bottomRow]</code> array to the three-member display datastream.</div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-sauna-control">
+    <p>
+        <b>sauna-control</b> migrates the legacy Python sauna heating logic into Node-RED. The node listens to button, temperature, humidity and calendar inputs (all via
+        <code>datastream.member</code> topics or calendar node responses), enforces the visit/preheat state machine, and publishes heater, visit and display commands back through the IO layer.
+    </p>
+    <p>
+        <b>Calendar Integration:</b> Use the <code>sql-calendar</code> node in "check" mode with title="sauna_preheat" to query calendar events. Connect the calendar node output to the calendar input topic configured in this node. The calendar node should be triggered periodically (e.g., every 40 seconds via inject/timer).
+    </p>
+    <p>
+        Inputs and outputs are configurable via dropdowns backed by <code>uniflex/controller-config</code>, with manual entry available for inter-node topics. Temperatures must
+        be in deci-degrees Celsius (dC) and discrete flags in 0/1 format, matching the existing IO conventions.
+    </p>
+    <p>Important behaviour:</p>
+    <ul>
+        <li>Button falling edge toggles visiting mode when allowed.</li>
+        <li>Lid-open detection mirrors the Python speed/temperature check and auto-clears after the configured timeout.</li>
+        <li>Preheat honouring requires the preheat allow input to be asserted; safety checks stop heating on high sauna temperature or shell-room delta &gt; 90 dC.</li>
+        <li>
+            Writes <code>[led, topRow, bottomRow]</code> array to the configured display topic: every tick while heating is active, otherwise on the temperature&lt;-&gt;humidity swap
+            (which occurs every fourth tick) or when the LED pattern changes.
+        </li>
+        <li>
+            Preheat control honours forced/disabled bits (SAKW.4/5) with priority: forced &gt; disabled &gt; calendar. Total preheat runtime is capped to 1&nbsp;hour per rolling
+            24&nbsp;hours.
+        </li>
+        <li>All significant transitions are logged with <code>node.log</code>/<code>node.warn</code> to integrate with <code>node-red-log</code>.</li>
+        <li>
+            The heater output topic naturally loops back through the IO layer as input, providing feedback. Unauthorized heater ON states (when neither visit nor preheat is active)
+            trigger a 10&nbsp;s grace period followed by automatic shutdown with error logging.
+        </li>
+    </ul>
+</script>
+
+<script type="text/javascript">
+    (function () {
+        const TOPIC_FIELDS = [
+            "#node-input-buttonTopic",
+            "#node-input-visitNeedTopic",
+            "#node-input-preheatCalendarTopic",
+            "#node-input-preheatForceTopic",
+            "#node-input-preheatDisableTopic",
+            "#node-input-upperTempTopic",
+            "#node-input-lowerTempTopic",
+            "#node-input-highLimitTopic",
+            "#node-input-shellTempTopic",
+            "#node-input-shellMaxTopic",
+            "#node-input-humidityTopTopic",
+            "#node-input-humidityBottomTopic",
+            "#node-input-heaterTopic",
+            "#node-input-displayTopic",
+            "#node-input-visitTopic",
+            "#node-input-preheatCalendarTopic"
+        ];
+
+        let topicOptions = [];
+
+        function createAutocomplete($field) {
+            $field
+                .autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = (request.term || "").toLowerCase();
+                        const filtered = topicOptions.filter((item) => item.label.toLowerCase().includes(term));
+                        response(filtered.map((item) => ({ label: item.label, value: item.value })));
+                    },
+                    focus: function (event, ui) {
+                        // Don't change field value on focus - keep the topic value
+                        event.preventDefault();
+                    },
+                    select: function (event, ui) {
+                        event.preventDefault();
+                        $field.val(ui.item.value);
+                    }
+                })
+                .on("focus", function () {
+                    $(this).autocomplete("search", $(this).val() || "");
+                });
+
+            const widget = $field.autocomplete("instance");
+            if (widget) {
+                widget._renderItem = function (ul, item) {
+                    return $("<li></li>").append(`<div>${item.label}</div>`).appendTo(ul);
+                };
+            }
+        }
+
+        function gatherTopics(data) {
+            const items = [];
+            const controllers = data?.controllers || [];
+            controllers.forEach((controller) => {
+                (controller.formattedTopics || []).forEach((entry) => {
+                    if (entry && entry.topic && entry.label) {
+                        items.push({ label: entry.label, value: entry.topic });
+                    }
+                });
+            });
+            items.sort((a, b) => a.label.localeCompare(b.label));
+            return items;
+        }
+
+        RED.nodes.registerType("uniflex-sauna-control", {
+            category: "uniflex home",
+            color: "#FCE5CD",
+            defaults: {
+                name: { value: "" },
+                tickMs: { value: 1000, validate: RED.validators.number() },
+                lidDetectionWindow: { value: 120, validate: RED.validators.number() },
+                lidSpeedThreshold: { value: 0.3, validate: RED.validators.number() },
+                lidTempThreshold: { value: 37, validate: RED.validators.number() },
+                historyFilePath: { value: "" },
+                enableLogging: { value: true },
+                tempDisplayUnit: { value: "dC" },
+                humidityDisplayUnit: { value: "d%" },
+                buttonTopic: { value: "", required: true },
+                visitNeedTopic: { value: "" },
+                preheatForceTopic: { value: "" },
+                preheatDisableTopic: { value: "" },
+                upperTempTopic: { value: "", required: true },
+                lowerTempTopic: { value: "", required: true },
+                highLimitTopic: { value: "", required: true },
+                shellTempTopic: { value: "", required: true },
+                shellMaxTopic: { value: "", required: true },
+                humidityTopTopic: { value: "" },
+                humidityBottomTopic: { value: "" },
+                heaterTopic: { value: "", required: true },
+                displayTopic: { value: "", required: true },
+                visitTopic: { value: "", required: true },
+                preheatCalendarTopic: { value: "" }
+            },
+            inputs: 1,
+            outputs: 1,
+            icon: "font-awesome/fa-fire",
+            label: function () {
+                return this.name || "sauna control";
+            },
+            paletteLabel: "sauna control",
+            oneditprepare: function () {
+                const $fields = TOPIC_FIELDS.map((sel) => $(sel));
+
+                topicOptions.splice(0, topicOptions.length);
+
+                $fields.forEach(($field) => createAutocomplete($field));
+
+                $.getJSON("uniflex/controller-config", (data) => {
+                    const updated = gatherTopics(data);
+                    topicOptions.splice(0, topicOptions.length, ...updated);
+                }).fail(() => {
+                    topicOptions.splice(0, topicOptions.length);
+                });
+            }
+        });
+    })();
+</script>

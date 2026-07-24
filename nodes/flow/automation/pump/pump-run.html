@@ -1,0 +1,441 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-pump", {
+        category: "uniflex water",
+        color: "#87CEEB",
+        icon: "font-awesome/fa-gear",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9_-]+$/.test(v) && v.length <= 50;
+                }
+            },
+            pumpCmdInputTopic: { value: "" }, // Input topic for commands from level controller
+            pumpCmdTopic: { value: "", required: true },
+            feedbackType: { value: "discrete", required: true },
+            pumpFeedbackTopic: { value: "" }, // Optional - required only if feedbackType=discrete
+            pumpCurrentTopic: { value: "" },  // Optional - required only if feedbackType=current
+            currentLoLimit: { value: 1.0, validate: RED.validators.number() }, // Lower threshold for current mode
+            fuseOFFTopic: { value: "" },
+            pumpErrorTopic: { value: "" },
+            noRunTopic: { value: "" },
+            overcurrentTopic: { value: "" },
+            resetTopic: { value: "" },
+            runtimeTopic: { value: "" },
+            runtimeFilePath: { value: "" }, // Optional - defaults to {userDir}/pump-runtime/{node.id}.json
+            enableSystemLog: { value: false },
+            errorDelaySec: {
+                value: 1.0,
+                validate: function (v) {
+                    const num = Number(v);
+                    const startDelay = Number($("#node-input-startDelaySec").val());
+                    if (isNaN(num) || num < 0.1 || num > 60) return false;
+                    // errorDelay must be >= startDelay
+                    if (!isNaN(startDelay) && num < startDelay) return false;
+                    return true;
+                }
+            },
+            startDelaySec: {
+                value: 1.0,
+                validate: function (v) {
+                    const num = Number(v);
+                    if (isNaN(num) || num < 0.1 || num > 300) return false;
+                    // Trigger re-validation of errorDelay when startDelay changes
+                    const errorDelay = Number($("#node-input-errorDelaySec").val());
+                    if (!isNaN(errorDelay) && errorDelay < num) {
+                        // Will cause errorDelay validation to fail
+                        $("#node-input-errorDelaySec").change();
+                    }
+                    return true;
+                }
+            },
+            retryIntervalSec: {
+                value: 5.0,
+                validate: function (v) {
+                    const num = Number(v);
+                    return !isNaN(num) && num >= 0.5 && num <= 60;
+                }
+            }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "pump";
+        },
+        paletteLabel: "pump",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Feedback type change handler
+            $("#node-input-feedbackType").on("change", function () {
+                updateFeedbackFields();
+            });
+
+            function updateFeedbackFields() {
+                const feedbackType = $("#node-input-feedbackType").val();
+
+                if (feedbackType === "discrete") {
+                    $("#feedback-discrete-row").show();
+                    $("#feedback-current-row").hide();
+                    $("#feedback-current-limit-row").hide();
+                } else {
+                    $("#feedback-discrete-row").hide();
+                    $("#feedback-current-row").show();
+                    $("#feedback-current-limit-row").show();
+                }
+            }
+
+            function updateTipText() {
+                const feedbackType = $("#node-input-feedbackType").val();
+                const pumpCmdInput = $("#node-input-pumpCmdInputTopic").val() || "<direct wire>";
+                const pumpCmd = $("#node-input-pumpCmdTopic").val() || "<not set>";
+
+                let tipText = `Pump receives commands from ${pumpCmdInput}`;
+                if (feedbackType === "discrete") {
+                    tipText += `, feedback [feedback, relay], and outputs to ${pumpCmd}.`;
+                } else {
+                    tipText += `, current [actual, hiLimit] (A), and outputs to ${pumpCmd}.`;
+                }
+
+                $("#node-input-tip-text").text(tipText);
+            }
+
+            $("#node-input-feedbackType, #node-input-pumpCmdTopic, #node-input-pumpCmdInputTopic").on("input change", updateTipText);
+
+            queryControllerConfig();
+            updateFeedbackFields();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-pumpCmdInputTopic"));
+                    initializeAutocomplete($("#node-input-pumpCmdTopic"));
+                    initializeAutocomplete($("#node-input-pumpFeedbackTopic"));
+                    initializeAutocomplete($("#node-input-pumpCurrentTopic"));
+                    initializeAutocomplete($("#node-input-fuseOFFTopic"));
+                    initializeAutocomplete($("#node-input-pumpErrorTopic"));
+                    initializeAutocomplete($("#node-input-noRunTopic"));
+                    initializeAutocomplete($("#node-input-overcurrentTopic"));
+                    initializeAutocomplete($("#node-input-resetTopic"));
+                    initializeAutocomplete($("#node-input-runtimeTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            // Ensure matches are sorted by topic
+                            matches.sort((a, b) => {
+                                const topicA = (a.topic || a.label || "").toLowerCase();
+                                const topicB = (b.topic || b.label || "").toLowerCase();
+                                return topicA.localeCompare(topicB);
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                // Sort by topic (key) alphabetically
+                return result.sort((a, b) => {
+                    const topicA = (a.topic || a.label || "").toLowerCase();
+                    const topicB = (b.topic || b.label || "").toLowerCase();
+                    return topicA.localeCompare(topicB);
+                });
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .uniflex-pump-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .uniflex-pump-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .uniflex-pump-div .form-row div,
+    .uniflex-pump-div .form-row input,
+    .uniflex-pump-div .form-row select,
+    .uniflex-pump-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .uniflex-pump-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .uniflex-pump-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .uniflex-pump-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .uniflex-pump-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .uniflex-pump-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .uniflex-pump-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    .uniflex-pump-div input[type="text"] {
+        user-select: text !important;
+        cursor: text !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-pump">
+    <div class="uniflex-pump-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g., pump1" />
+            <div class="help-text">Unique identifier. Only letters, numbers, underscore, hyphen.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Command Input</b>
+        <div class="form-row">
+            <label for="node-input-pumpCmdInputTopic"><i class="fa fa-sign-in"></i> Command input topic</label>
+            <input type="text" id="node-input-pumpCmdInputTopic" placeholder="e.g., pump1/cmd" />
+            <div class="help-text">Input topic for commands from level controller (matches level controller's "Pump Command Topics"). If not set, accepts <code>msg.cmd</code> from direct wire connection.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Command Output</b>
+
+        <div class="form-row">
+            <label for="node-input-pumpCmdTopic"><i class="fa fa-power-off"></i> Pump command</label>
+            <input type="text" id="node-input-pumpCmdTopic" placeholder="e.g. PR1W" />
+            <div class="help-text">Output topic for command (0=stop, 1=start) to iolayer.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Feedback Configuration</b>
+
+        <div class="form-row">
+            <label for="node-input-feedbackType"><i class="fa fa-exchange"></i> Feedback type</label>
+            <select id="node-input-feedbackType">
+                <option value="discrete">Discrete (DI feedback)</option>
+                <option value="current">Current sensor (AI)</option>
+            </select>
+            <div class="help-text">Select feedback method: discrete contact or current measurement. You should select DI if total current of pumps is measured (or not measured at all).</div>
+        </div>
+
+        <div class="form-row" id="feedback-discrete-row">
+            <label for="node-input-pumpFeedbackTopic"><i class="fa fa-check-circle"></i> Feedback DI</label>
+            <input type="text" id="node-input-pumpFeedbackTopic" placeholder="e.g. PR1W" />
+            <div class="help-text">Input: [feedback, relay] from iolayer (discrete mode).</div>
+        </div>
+
+        <div class="form-row" id="feedback-current-row">
+            <label for="node-input-pumpCurrentTopic"><i class="fa fa-bolt"></i> Current sensor</label>
+            <input type="text" id="node-input-pumpCurrentTopic" placeholder="e.g. AI_PUMP1" />
+            <div class="help-text">Input: [actual, hiLimit] in A (current mode). loLimit configured below.</div>
+        </div>
+
+        <div class="form-row" id="feedback-current-limit-row">
+            <label for="node-input-currentLoLimit"><i class="fa fa-arrow-down"></i> Current lo limit (A)</label>
+            <input type="number" id="node-input-currentLoLimit" step="0.1" min="0.1" />
+            <div class="help-text">Lower threshold in Amperes. Pump running when actual > loLimit.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Error Inputs/Outputs</b>
+
+        <div class="form-row">
+            <label for="node-input-fuseOFFTopic"><i class="fa fa-exclamation-triangle"></i> Fuse OFF</label>
+            <input type="text" id="node-input-fuseOFFTopic" placeholder="e.g. F1S" />
+            <div class="help-text">Optional input: 0=OK, 1=overcurrent fuse tripped.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-pumpErrorTopic"><i class="fa fa-exclamation-circle"></i> Pump error</label>
+            <input type="text" id="node-input-pumpErrorTopic" placeholder="e.g. P1_ERR" />
+            <div class="help-text">Output topic for combined error flag (OR of all errors).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-noRunTopic"><i class="fa fa-times-circle"></i> No run</label>
+            <input type="text" id="node-input-noRunTopic" placeholder="e.g. P1_NORUN" />
+            <div class="help-text">Output topic for no feedback/current after start (optional).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-overcurrentTopic"><i class="fa fa-bolt"></i> Overcurrent</label>
+            <input type="text" id="node-input-overcurrentTopic" placeholder="e.g. P1_OC" />
+            <div class="help-text">Output topic for latched overcurrent error (optional, for level controller swap logic).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-resetTopic"><i class="fa fa-refresh"></i> Reset</label>
+            <input type="text" id="node-input-resetTopic" placeholder="e.g. P1_RESET" />
+            <div class="help-text">Optional input: resets latched overcurrent error.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-runtimeTopic"><i class="fa fa-clock-o"></i> Runtime</label>
+            <input type="text" id="node-input-runtimeTopic" placeholder="e.g. P1_RUNTIME" />
+            <div class="help-text">Output topic for accumulated runtime in hours (optional).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-runtimeFilePath"><i class="fa fa-file"></i> Runtime file path</label>
+            <input type="text" id="node-input-runtimeFilePath" placeholder="Leave empty for default" />
+            <div class="help-text">Full file path (e.g. <code>/path/to/pump2.json</code>) or directory (e.g. <code>/home/nodered/logs</code>). If directory, file is <code>{node.id}.json</code> in that folder. Leave empty for default: <code>{userDir}/pump-runtime/{node.id}.json</code>. Directory is created if missing.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Timing</b>
+
+        <div class="form-row">
+            <label for="node-input-startDelaySec"><i class="fa fa-clock-o"></i> Start delay (s)</label>
+            <input type="number" id="node-input-startDelaySec" step="0.1" min="0.1" max="300" />
+            <div class="help-text">Time to wait for feedback after start. Inrush current ignored during this window. Range: 0.1-300s.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-errorDelaySec"><i class="fa fa-clock-o"></i> Error delay (s)</label>
+            <input type="number" id="node-input-errorDelaySec" step="0.1" min="0.1" max="60" />
+            <div class="help-text">Delay before feedback mismatch error. Must be ≥ start delay. Range: 0.1-60s.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-retryIntervalSec"><i class="fa fa-refresh"></i> Retry interval (s)</label>
+            <input type="number" id="node-input-retryIntervalSec" step="0.1" min="0.5" max="60" />
+            <div class="help-text">Interval for retrying commands when feedback doesn't match command. Range: 0.5-60s.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Logging</b>
+
+        <div class="form-row">
+            <label for="node-input-enableSystemLog"><i class="fa fa-file-text-o"></i> Enable system log</label>
+            <input type="checkbox" id="node-input-enableSystemLog" />
+            <div class="help-text">Output log messages to system log (configured in settings.js).</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-pump">
+    <h3>Pump Instance</h3>
+    <p>Manages individual pump with feedback monitoring, error detection, and runtime tracking.</p>
+
+    <h4>Inputs</h4>
+    <ul>
+        <li><b>Command</b> -- From level controller via configured input topic, or direct wire connection.
+            <ul>
+                <li>If <b>Command input topic</b> configured: receives <code>msg.payload = 0/1</code> on that topic</li>
+                <li>If not configured: accepts <code>msg.cmd = 0/1</code> from direct wire connection</li>
+                <li>Values: <code>0</code> = stop, <code>1</code> = start</li>
+            </ul>
+        </li>
+        <li><b>Feedback (discrete mode)</b> -- [feedback, relay] from iolayer DI.</li>
+        <li><b>Current (current mode)</b> -- [actual, hiLimit] in Amperes. loLimit configured in node.</li>
+        <li><b>Fuse OFF</b> -- Optional: 0=OK, 1=overcurrent fuse tripped.</li>
+        <li><b>Reset</b> -- Optional: clears latched overcurrent error.</li>
+    </ul>
+
+    <h4>Outputs</h4>
+    <p>Single output with different message types based on topic:</p>
+    <ul>
+        <li><b>Command</b> -- topic = pumpCmdTopic, payload = 0/1 (to iolayer)</li>
+        <li><b>Error</b> -- topic = pumpErrorTopic, payload = 0/1 (combined error flag)</li>
+        <li><b>No run</b> -- topic = noRunTopic, payload = 0/1 (optional)</li>
+        <li><b>Runtime</b> -- topic = runtimeTopic, payload = hours (optional)</li>
+    </ul>
+    <p>Route messages using Switch node or filter by topic as needed.</p>
+
+    <h4>Feedback Modes</h4>
+    <p><b>Discrete Mode:</b> Uses contactor auxiliary contact [feedback, relay].</p>
+    <p><b>Current Mode:</b> Uses current sensor [actual, hiLimit]. loLimit configured in node settings. Running when actual > loLimit.</p>
+
+    <h4>Error Detection</h4>
+    <ul>
+        <li><b>Feedback mismatch</b> -- feedback ≠ relay after errorDelaySec (discrete mode).</li>
+        <li><b>No run</b> -- No feedback/current within startDelaySec after start command.</li>
+        <li><b>Overcurrent</b> -- actual > hiLimit AFTER startDelaySec (LATCHED, requires manual reset). Inrush current during startup is ignored.</li>
+        <li><b>Fuse tripped</b> -- External fuse OFF input = 1.</li>
+    </ul>
+
+    <h4>Status Display</h4>
+    <p>Shows pump state, current/feedback, runtime, and active errors.</p>
+    <ul>
+        <li><span style="color:green">●</span> Green: Pump running</li>
+        <li><span style="color:grey">●</span> Grey: Pump stopped</li>
+        <li><span style="color:red">●</span> Red: Error condition</li>
+        <li><span style="color:orange">●</span> Orange: Starting (waiting for feedback)</li>
+    </ul>
+</script>

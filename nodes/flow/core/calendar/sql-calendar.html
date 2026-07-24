@@ -1,0 +1,577 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-sql-calendar", {
+        category: "uniflex",
+        color: "#6ab7ff",
+        // Define the default values for the node configuration
+        defaults: {
+            name: { value: "" },
+            topic: { value: "" },
+            controller: { value: "", type: "uniflex-controller", required: true },
+            operationMode: {
+                value: "",
+                validate: function (v) {
+                    return ["auto", "check", "create", "read", "update", "delete"].includes(v);
+                }
+            },
+            showAdvanced: { value: false },
+
+            eventId: { value: "eventId" },
+            eventIdType: { value: "msg" },
+
+            title: { value: "title" },
+            titleType: { value: "msg" },
+
+            value: { value: "value" },
+            valueType: { value: "msg" },
+
+            timestamp: { value: "timestamp" },
+            timestampType: { value: "msg" },
+
+            start: { value: "start" },
+            startType: { value: "msg" },
+
+            end: { value: "end" },
+            endType: { value: "msg" }
+        },
+        // Define the inputs and outputs of the node
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-database",
+        label: function () {
+            const operationMode = this.operationMode || "?";
+            return `sql calendar: ${operationMode}`;
+        },
+        paletteLabel: function () {
+            return "sql calendar";
+        },
+        // Update form fields
+        oneditprepare: function () {
+            const node = this;
+            let _controller = {};
+
+            // Convert form elements to typed input
+            $("#node-input-eventId").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-eventIdType")
+            });
+
+            $("#node-input-title").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-titleType")
+            });
+
+            $("#node-input-value").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-valueType")
+            });
+
+            $("#node-input-timestamp").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-timestampType")
+            });
+
+            $("#node-input-start").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-startType")
+            });
+
+            $("#node-input-end").typedInput({
+                types: ["msg", "flow", "global"],
+                typeField: $("#node-input-endType")
+            });
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-topic").val(node.topic);
+            $("#node-input-controller").val(node.controller);
+            $("#node-input-operationMode").val(node.operationMode);
+
+            $("#node-input-eventId").val(node.eventId);
+            $("#node-input-eventIdType").val(node.eventIdType);
+
+            $("#node-input-title").val(node.title);
+            $("#node-input-titleType").val(node.titleType);
+
+            $("#node-input-value").val(node.value);
+            $("#node-input-valueType").val(node.valueType);
+
+            $("#node-input-timestamp").val(node.timestamp);
+            $("#node-input-timestampType").val(node.timestampType);
+
+            $("#node-input-start").val(node.start);
+            $("#node-input-startType").val(node.startType);
+
+            $("#node-input-end").val(node.end);
+            $("#node-input-endType").val(node.endType);
+
+            // Define event listeners for form fields
+            $("#node-input-controller").on("change", function () {
+                queryControllerConfig();
+            });
+
+            $("#node-input-operationMode").on("change", function () {
+                updateFormFields();
+                updateTipText();
+            });
+
+            $("#node-input-showAdvanced").on("change", function () {
+                updateFormFields();
+            });
+
+            // Initialize form state
+            updateFormFields();
+            updateTipText();
+
+            // Get the controller node configuration to populate fields and update helper text
+            function queryControllerConfig() {
+                const nodeId = $("#node-input-controller").val();
+
+                $.getJSON(`uniflex/controller-config?id=${nodeId}`, function (data) {
+                    _controller = data;
+
+                    // Execute functions after successful query
+                    updateFormFields();
+                    updateTipText();
+                })
+                    .fail(function () {
+                        console.error("Failed to get controller configuration!");
+                    })
+                    .always(function () {
+                        updateTipText();
+                    });
+            }
+
+            // Change form elements visibility based on the selected output mode
+            function updateFormFields() {
+                const operationMode = $("#node-input-operationMode").val();
+                const showAdvanced = $("#node-input-showAdvanced").is(":checked");
+
+                // Hide all parameter fields initially
+                $("#node-input-eventId").closest(".form-row").hide();
+                $("#node-input-title").closest(".form-row").hide();
+                $("#node-input-title").next(".form-tips").hide();
+                $("#node-input-value").closest(".form-row").hide();
+                $("#node-input-timestamp").closest(".form-row").hide();
+                $("#node-input-start").closest(".form-row").hide();
+                $("#node-input-end").closest(".form-row").hide();
+
+                // Show/hide the advanced checkbox and parameter section
+                if (operationMode) {
+                    $(".advanced-checkbox-row").show();
+
+                    if (showAdvanced) {
+                        $(".parameters-section").show();
+
+                        // Show relevant fields based on operation mode
+                        switch (operationMode) {
+                            case "check":
+                                $("#node-input-title").closest(".form-row").show();
+                                $("#node-input-title").next(".form-tips").show();
+                                break;
+                            case "read":
+                                $("#node-input-title").closest(".form-row").show();
+                                $("#node-input-title").next(".form-tips").show();
+                                $("#node-input-start").closest(".form-row").show();
+                                $("#node-input-end").closest(".form-row").show();
+                                break;
+                            case "create":
+                                $("#node-input-title").closest(".form-row").show();
+                                $("#node-input-title").next(".form-tips").show();
+                                $("#node-input-value").closest(".form-row").show();
+                                $("#node-input-start").closest(".form-row").show();
+                                $("#node-input-end").closest(".form-row").show();
+                                break;
+                            case "update":
+                                $("#node-input-eventId").closest(".form-row").show();
+                                $("#node-input-title").closest(".form-row").show();
+                                $("#node-input-title").next(".form-tips").show();
+                                $("#node-input-value").closest(".form-row").show();
+                                $("#node-input-timestamp").closest(".form-row").show();
+                                break;
+                            case "delete":
+                                $("#node-input-eventId").closest(".form-row").show();
+                                $("#node-input-title").closest(".form-row").show();
+                                $("#node-input-title").next(".form-tips").show();
+                                $("#node-input-start").closest(".form-row").show();
+                                $("#node-input-end").closest(".form-row").show();
+                                break;
+                        }
+                    } else {
+                        $(".parameters-section").hide();
+                    }
+                } else {
+                    $(".advanced-checkbox-row").hide();
+                    $(".parameters-section").hide();
+                }
+            }
+
+            // Update the tip text on input change
+            function updateTipText() {
+                const uniqueId = _controller.uniqueId || "???";
+                const operationMode = $("#node-input-operationMode").val();
+
+                let tipText1;
+                let tipText2;
+                let tipText3;
+                let tipText4 = `Example input 'msg' object:`;
+
+                switch (operationMode) {
+                    case "check":
+                        tipText1 = `This node will check for ongoing calendar events of controller (${uniqueId}).`;
+                        break;
+                    case "read":
+                        tipText1 = `This node will query the calendar entries of controller (${uniqueId}).`;
+                        break;
+                    case "create":
+                        tipText1 = `This node will add a new event to the calendar of controller (${uniqueId}).`;
+                        break;
+                    case "update":
+                        tipText1 = `This node will update an existing event in the calendar of controller (${uniqueId}).`;
+                        break;
+                    case "delete":
+                        tipText1 = `This node will delete an existing event(s) from the calendar of controller (${uniqueId}).`;
+                        break;
+                    default:
+                        tipText1 = `This node is related to the calendar of controller (${uniqueId}).`;
+                        break;
+                }
+
+                switch (operationMode) {
+                    case "check":
+                        tipText2 = `Use the parameters above to filter specific events.`;
+                        tipText3 = `By default, will return the most current ongoing event.`;
+                        break;
+                    case "read":
+                        tipText2 = `Use the parameters above to filter specific events or ranges.`;
+                        tipText3 = `By default, will return the previous and next 7 days of events.`;
+                        break;
+                    case "create":
+                        tipText2 = `All parameters are required, excluding the end timestamp.`;
+                        tipText3 = `If it is not provided, the event will last until the next event in series.`;
+                        break;
+                    case "update":
+                        tipText2 = `Updating a calendar event requires the event's id. `;
+                        tipText3 = `Other parameters will be overwritten with the new values.`;
+                        break;
+                    case "delete":
+                        tipText2 = `Deleting an event requires an id or a combination of title and timestamps.`;
+                        tipText3 = `If multiple events match the criteria, all will be deleted.`;
+                        break;
+                    default:
+                        tipText2 = `Required parameters can differ depending on the selected operation mode.`;
+                        tipText3 = `Please refer to the documentation for more information.`;
+                        break;
+                }
+
+                switch (operationMode) {
+                    case "check":
+                        tipText4 += `
+{
+    "title": "My event"
+}`;
+                    case "read":
+                        tipText4 += `
+{
+    "title": "My event",
+    "start": 1733000000,
+    "end": 1735000000
+}`;
+                        break;
+                    case "create":
+                        tipText4 += `
+{
+    "title": "My event",
+    "value": 100,
+    "start": 1733000000,
+    "end": 1735000000
+}`;
+                        break;
+                    case "update":
+                        tipText4 += `
+{
+    "eventId": -1,
+    "title": "My event",
+    "value": 100,
+    "timestamp": 1733000000
+}`;
+                        break;
+                    case "delete":
+                        tipText4 += `
+{
+    "eventId": -1,
+    "title": "My event",
+    "start": 1733000000,
+    "end": 1735000000
+}`;
+                        break;
+                    default:
+                        tipText4 += ` { }`;
+                        break;
+                }
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+                $("#node-input-tip-text-4").text(tipText4);
+            }
+        },
+        oneditsave: function () {
+            const node = this;
+
+            node.name = $("#node-input-name").val();
+            node.topic = $("#node-input-topic").val();
+            node.controller = $("#node-input-controller").val();
+            node.operationMode = $("#node-input-operationMode").val();
+            node.showAdvanced = $("#node-input-showAdvanced").is(":checked");
+
+            node.eventId = $("#node-input-eventId").typedInput("value");
+            node.eventIdType = $("#node-input-eventId").typedInput("type");
+
+            node.title = $("#node-input-title").typedInput("value");
+            node.titleType = $("#node-input-title").typedInput("type");
+
+            node.value = $("#node-input-value").typedInput("value");
+            node.valueType = $("#node-input-value").typedInput("type");
+
+            node.timestamp = $("#node-input-timestamp").typedInput("value");
+            node.timestampType = $("#node-input-timestamp").typedInput("type");
+
+            node.start = $("#node-input-start").typedInput("value");
+            node.startType = $("#node-input-start").typedInput("type");
+
+            node.end = $("#node-input-end").typedInput("value");
+            node.endType = $("#node-input-end").typedInput("type");
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .sql-calendar-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .sql-calendar-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .sql-calendar-div .form-row div,
+    .sql-calendar-div .form-row input,
+    .sql-calendar-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .sql-calendar-div .form-row select,
+    .sql-calendar-div .red-ui-typedInput-container {
+        width: 66% !important;
+    }
+
+    .sql-calendar-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        white-space: pre-wrap;
+    }
+
+    .sql-calendar-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+</style>
+
+<!-- Form fields are defined in the template below -->
+<script type="text/html" data-template-name="uniflex-sql-calendar">
+    <div class="sql-calendar-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        
+        <div class="form-row">
+            <label for="node-input-topic"><i class="fa fa-comment"></i> Output topic</label>
+            <input type="text" id="node-input-topic" placeholder="Leave empty to preserve incoming topic" />
+        </div>
+        <div class="form-tips" style="text-align: left; margin-bottom: 10px; font-size: 0.85em; color: #666;">
+            <strong>Topic routing:</strong> Responses use <code>msg.topic</code> from incoming message (if present), otherwise use this configured topic.
+            <br><strong>For scheduler integration:</strong> Leave empty and ensure incoming messages have <code>msg.topic</code> set.
+        </div>
+        
+        <div class="form-row">
+            <label for="node-input-controller"><i class="fa fa-database"></i> Controller</label>
+            <select id="node-input-controller">
+                <option value="" disabled selected>Select controller...</option>
+            </select>
+        </div>
+        
+        <div class="form-row">
+            <label for="node-input-operationMode"><i class="fa fa-cog"></i> Operation mode</label>
+            <select id="node-input-operationMode">
+                <option value="" disabled selected>Select operation mode...</option>
+                <option value="auto">Auto (requires msg.mode)</option>
+                <option value="check">Check for ongoing events</option>
+                <option value="read">Read existing events</option>
+                <option value="create">Create new event</option>
+                <option value="update">Update existing event</option>
+                <option value="delete">Delete existing event</option>
+            </select>
+        </div>
+        <div class="form-tips" style="text-align: left; margin-bottom: 10px; font-size: 0.85em; color: #666;">
+            <b>Dynamic mode:</b> Any mode can be overridden per message using <code>msg.mode</code>.<br>
+            <b>Example:</b> <code>msg.mode = "delete"</code> will delete regardless of configured mode.<br>
+            <b>Auto mode:</b> Requires <code>msg.mode</code> in every message (prevents accidental operations).
+        </div>
+
+        <hr style="margin: 12px 0;">
+
+        <div class="form-tips" id="node-input-tip-text-1" style="margin-bottom: 8px; background-color: #f0f0f0; padding: 6px; text-align: left; font-size: 0.9em;"></div>
+
+        <div class="form-row advanced-checkbox-row" style="display: none;">
+            <label for="node-input-showAdvanced" style="width: auto !important;">
+                <input type="checkbox" id="node-input-showAdvanced" style="display: inline-block; width: auto; vertical-align: middle; margin: 0 5px 0 0;">
+                Advanced: Customize message properties
+            </label>
+        </div>
+
+        <div class="parameters-section" style="display: none;">
+            <div class="form-tips" style="background-color: #e8f4f8; padding: 6px; margin-bottom: 12px; text-align: left; font-size: 0.85em;">
+                <b>Parameters:</b> Enter the property name from the incoming message.<br>
+                <b>Example:</b> If incoming message is <code>msg.title = "sauna_preheat"</code>, enter <code>title</code> in the field below (not <code>msg.title</code>).
+            </div>
+
+            <div class="form-row">
+                <label for="node-input-title"><i class="fa fa-tag"></i> Title</label>
+                <input type="text" id="node-input-title" placeholder="title" />
+                <input type="hidden" id="node-input-titleType" />
+            </div>
+            <div class="form-tips" style="text-align: left; font-size: 0.85em; margin-bottom: 8px; color: #666;">
+                Calendar series name (e.g., "sauna_preheat", "elering"). Enter property name like <code>title</code> to read from <code>msg.title</code>.
+            </div>
+            
+            <div class="form-row">
+                <label for="node-input-value"><i class="fa fa-list-ol"></i> Value</label>
+                <input type="text" id="node-input-value" placeholder="value" />
+                <input type="hidden" id="node-input-valueType" />
+            </div>
+            
+            <div class="form-row">
+                <label for="node-input-timestamp"><i class="fa fa-clock-o"></i> Timestamp</label>
+                <input type="text" id="node-input-timestamp" placeholder="timestamp" />
+                <input type="hidden" id="node-input-timestampType" />
+            </div>
+            
+            <div class="form-row">
+                <label for="node-input-start"><i class="fa fa-play"></i> Start</label>
+                <input type="text" id="node-input-start" placeholder="start" />
+                <input type="hidden" id="node-input-startType" />
+            </div>
+            
+            <div class="form-row">
+                <label for="node-input-end"><i class="fa fa-stop"></i> End</label>
+                <input type="text" id="node-input-end" placeholder="end" />
+                <input type="hidden" id="node-input-endType" />
+            </div>
+
+            <div class="form-row">
+                <label for="node-input-eventId"><i class="fa fa-hashtag"></i> Event ID</label>
+                <input type="text" id="node-input-eventId" placeholder="eventId" />
+                <input type="hidden" id="node-input-eventIdType" />
+            </div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-2" style="text-align: left; margin: 8px 0 4px 0; font-size: 0.9em;"></div>
+        <div class="form-tips" id="node-input-tip-text-3" style="text-align: left; margin-bottom: 8px; font-size: 0.9em;"></div>
+        
+        <div class="form-tips" id="node-input-tip-text-4" style="white-space: pre-wrap; text-align: left; background-color: #f8f9fa; padding: 8px; font-family: monospace; font-size: 0.85em; border: 1px solid #ddd; border-radius: 3px;"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-sql-calendar">
+    <p><b>SQL Calendar</b> - Manage calendar events in controller database.</p>
+    
+    <h3>Operation Modes</h3>
+    
+    <h4>check</h4>
+    <p>Check if event is currently active.</p>
+    <p><b>Input:</b> <code>{ title: "sauna_preheat" }</code></p>
+    <p><b>Output:</b> <code>{ value: 1, success: true }</code> or <code>false</code></p>
+    
+    <h4>read</h4>
+    <p>Query events in time range.</p>
+    <p><b>Input:</b> <code>{ title: "elering", start: 1733000000, end: 1733086400 }</code></p>
+    <p><b>Output:</b> <code>{ data: [{timestamp, value}, ...], success: true }</code></p>
+    
+    <h4>create</h4>
+    <p>Add new event.</p>
+    <p><b>Input:</b> <code>{ title: "sauna_preheat", timestamp: 1733000000, value: 1, duration: 7200 }</code></p>
+    <p><b>Output:</b> <code>{ success: true }</code></p>
+    
+    <h4>update</h4>
+    <p>Modify existing event.</p>
+    <p><b>Input:</b> <code>{ eventId: 123, title: "sauna_preheat", timestamp: 1733000000, value: 0 }</code></p>
+    
+    <h4>delete</h4>
+    <p>Remove event(s).</p>
+    <p><b>Input:</b> <code>{ eventId: 123 }</code> or <code>{ title: "sauna_preheat", start: 1733000000, end: 1733086400 }</code></p>
+    <p><b>Output:</b> <code>{ deleted: 3, success: true }</code></p>
+    
+    <h3>Parameter Configuration</h3>
+    <p>Each parameter field has a dropdown (msg/flow/global):</p>
+    <ul>
+        <li><b>msg</b> - reads from incoming message property</li>
+        <li><b>flow/global</b> - reads from context</li>
+    </ul>
+    
+    <p><b>Example:</b> Set field to <code>msg.title</code> (default), then send message:</p>
+    <pre>{ title: "sauna_preheat" }</pre>
+    <p>Node reads <code>msg.title</code> value which is <code>"sauna_preheat"</code>.</p>
+    
+    <p><b>Static value:</b> Change dropdown to string type, enter direct value like <code>"sauna_preheat"</code>.</p>
+    
+    <h3>Common Patterns</h3>
+    
+    <h4>Pattern 1: Check active event (periodic)</h4>
+    <pre>[inject: 60s] → [sql-calendar: check] → [mqtt]</pre>
+    
+    <h4>Pattern 2: Read-process-write (scheduler)</h4>
+    <pre>[scheduler] ↔ [sql-calendar: read]
+            ↔ [sql-calendar: write]</pre>
+    
+    <h4>Pattern 3: Delete then create</h4>
+    <pre>[trigger] → [sql-calendar: delete old]
+           → [sql-calendar: create new]</pre>
+    
+    <h3>Message Format</h3>
+    <p><b>Input:</b> Parameters in <code>msg.payload</code> or direct <code>msg</code> properties</p>
+    <p><b>Output:</b> Result in <code>msg.payload</code></p>
+    
+    <h3>Topic Routing</h3>
+    <p><b>Response topic priority:</b></p>
+    <ol>
+        <li><strong>First choice:</strong> Use <code>msg.topic</code> from incoming message (if present)</li>
+        <li><strong>Fallback:</strong> Use configured "Output topic" field (if not empty)</li>
+        <li><strong>Last resort:</strong> No topic (if both are empty)</li>
+    </ol>
+    
+    <p><b>For scheduler integration:</b></p>
+    <ul>
+        <li><strong>Recommended:</strong> Leave "Output topic" empty and ensure scheduler sends <code>msg.topic</code></li>
+        <li>This preserves the routing topic for bidirectional communication</li>
+        <li>Scheduler and calendar communicate via matching topics</li>
+    </ul>
+    
+    <p><b>Example:</b></p>
+    <pre>Scheduler sends: { topic: "sauna_calendar", mode: "read", ... }
+Calendar responds: { topic: "sauna_calendar", payload: [...] }
+Scheduler receives response via topic matching</pre>
+    
+    <p><b>For standalone use:</b> Set "Output topic" to route responses to a specific topic (e.g., "calendar/response").</p>
+    
+    <h3>Tips</h3>
+    <ul>
+        <li>Use <code>msg.mode</code> to override operation mode dynamically</li>
+        <li>Timestamps: Unix seconds or Date objects (auto-converted)</li>
+        <li><code>duration</code> parameter: creates end timestamp (start + duration)</li>
+        <li>Bidirectional wiring: use same topic for request/response</li>
+    </ul>
+</script>

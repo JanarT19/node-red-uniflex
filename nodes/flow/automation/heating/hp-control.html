@@ -1,0 +1,307 @@
+<script type="text/javascript">
+    function optionalNumber(v) {
+        return v === "" || v === null || v === undefined || RED.validators.number()(v);
+    }
+
+    RED.nodes.registerType("uniflex-hp-control", {
+        category: "uniflex home",
+        color: "#D3F0FF",
+        icon: "font-awesome/fa-bolt",
+        defaults: {
+            name: { value: "" },
+            tankTempTopic: { value: "" },
+            tankSetpointTopic: { value: "" },
+            targetTopic: { value: "" },
+            deltaT_base: { value: 4.0, validate: RED.validators.number() },
+            deltaT_slope: { value: 0.3, validate: RED.validators.number() },
+            enableCmdTopic: { value: "" },
+            hcmwForceHeatTopic: { value: "HCMW.1" },
+            hcmwForceCoolTopic: { value: "HCMW.2" },
+            spMin: { value: 28, validate: RED.validators.number() },
+            spMax: { value: 51, validate: RED.validators.number() },
+            spMinTopic: { value: "" },  // Deprecated, kept for backward compatibility
+            spMaxTopic: { value: "" },  // Deprecated, kept for backward compatibility
+            logLevel: { value: "basic" },
+            lookAheadSec: { value: 120, validate: RED.validators.number() },
+            derivWindowSec: { value: 60, validate: RED.validators.number() },
+            minSpread: { value: 3, validate: RED.validators.number() },
+            persistencePath: { value: "/home/nodered/heating_state" },
+            autoEnableCooling: { value: false },
+            coolingRequiredTopic: { value: "heating/coolingRequired" },
+            spotPriceTopic: { value: "PRENW.3" },
+            coolPriceLimit: { value: 50, validate: RED.validators.number() },
+            coolSpUpper: { value: 17, validate: RED.validators.number() },
+            coolSpLower: { value: 14, validate: RED.validators.number() },
+            outHeatEnableTopic: { value: "" },
+            outCoolEnableTopic: { value: "" },
+            outLowModeTopic: { value: "" },
+            outHeatSp1Topic: { value: "" },
+            outHeatSp2Topic: { value: "" },
+            outCoolSp1Topic: { value: "" },
+            outCoolSp2Topic: { value: "" },
+            outCoolModeGlobalTopic: { value: "" },
+            outHewCoolTopic: { value: "HEW.3" },
+            outAirCoolEnableTopic: { value: "" },
+            tankActualTopic: { value: "ESTTW.1" },
+            compSpeedTopic: { value: "ESCSV.1" },
+            avgValveOpenTopic: { value: "HVAVV.1" },
+            valveGateThresholdPct: { value: 5.0, validate: optionalNumber },
+            valveGateChargeBypassDeg: { value: 0.5, validate: optionalNumber },
+            valveGateChargeMinKwh: { value: 2.0, validate: optionalNumber },
+            gasEnableTopic: { value: "ISETW.4" },
+            outErrorKey: { value: "ESMSW" },
+            bumpTempBias: { value: 2.0, validate: RED.validators.number() },
+        },
+        inputs: 1,
+        outputs: 1,
+        outputLabels: ["HP commands"],
+        label: function () {
+            return this.name || "hp control";
+        },
+        paletteLabel: "hp control",
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (let i = 0; i < controllers.length; i++) {
+                    result.push.apply(result, controllers[i].formattedTopics || []);
+                }
+                return result;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = (request.term || "").toLowerCase();
+                        const topics = getTopics();
+                        const matches = topics.filter(function (item) {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function () { return false; },
+                    select: function (event, ui) {
+                        this.value = ui.item.topic || ui.item.value || ui.item.label || "";
+                        return false;
+                    }
+                });
+            }
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                [
+                    "#node-input-tankTempTopic", "#node-input-tankSetpointTopic", "#node-input-targetTopic",
+                    "#node-input-enableCmdTopic",
+                    "#node-input-hcmwForceHeatTopic", "#node-input-hcmwForceCoolTopic",
+                    "#node-input-coolingRequiredTopic", "#node-input-spotPriceTopic",
+                    "#node-input-outHeatEnableTopic", "#node-input-outCoolEnableTopic", "#node-input-outLowModeTopic",
+                    "#node-input-outHeatSp1Topic", "#node-input-outHeatSp2Topic",
+                    "#node-input-outCoolSp1Topic", "#node-input-outCoolSp2Topic",
+                    "#node-input-outCoolModeGlobalTopic", "#node-input-outHewCoolTopic", "#node-input-outAirCoolEnableTopic",
+                    "#node-input-tankActualTopic", "#node-input-compSpeedTopic",
+                    "#node-input-avgValveOpenTopic", "#node-input-gasEnableTopic"
+                ].forEach(function (selector) { initializeAutocomplete($(selector)); });
+            }).fail(function () {
+                _controllers = {};
+            });
+
+            const labels = $("#dialog-form label[title]");
+            if (!$("#uniflex-help-tooltip-style").length) {
+                $("head").append('<style id="uniflex-help-tooltip-style">.uniflex-help-tooltip{background:#fff8c4 !important;border:1px solid #d4b106 !important;color:#2b2b2b !important;max-width:560px !important;box-shadow:0 2px 6px rgba(0,0,0,.2) !important;padding:8px 10px !important;line-height:1.35 !important;}.uniflex-help-tooltip .ui-tooltip-content{font-size:12px !important;}</style>');
+            }
+            labels.each(function () {
+                if ($(this).data("ui-tooltip")) $(this).tooltip("destroy");
+            });
+            labels.tooltip({
+                track: false,
+                show: { delay: 150 },
+                hide: { delay: 0 },
+                position: { my: "left bottom-10", at: "left top", collision: "flipfit" },
+                classes: { "ui-tooltip": "uniflex-help-tooltip" }
+            });
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-hp-control">
+    <div class="form-row"><label>Name</label><input type="text" id="node-input-name" /></div>
+    <b>Inputs</b>
+    <div class="form-row"><label title="Measured tank temperature (middle sensor). Source: ESTTW.1 (tank middle sensor datastream).">Tank temp in</label><input type="text" id="node-input-tankTempTopic" placeholder="ESTTW.1" /></div>
+    <div class="form-row"><label title="Tank setpoint from tank-control (reactive, based on current Q_need). Used as fallback when mpc-house tank setpoint not available.">Tank target in</label><input type="text" id="node-input-targetTopic" placeholder="from tank-control (fallback)" /></div>
+    <div class="form-row"><label title="Predictive tank setpoint from mpc-house (T_supply_curve, based on heating curve and 12h max power forecast). HIGHEST PRIORITY input for HP setpoint calculation. Must match mpc-house's 'Supply target (out)' topic -- e.g. heating/mpc/supplyTarget.">Tank setpoint in</label><input type="text" id="node-input-tankSetpointTopic" placeholder="from mpc-house" /></div>
+    <hr />
+    <b>Heat Exchanger ΔT (Tank → HP setpoint)</b>
+    <div style="background:#f0f8ff; padding:8px; margin:8px 0; font-size:12px;">
+        HP setpoint = Tank setpoint + ΔT, where ΔT = base + slope × P_max (power needed)
+    </div>
+    <div class="form-row" style="display:flex; align-items:center; gap:20px;">
+        <div style="flex:1;">
+            <label title="Base temperature offset (°C) between tank and HP setpoint at zero load. Accounts for heat exchanger efficiency. Default: 4.0°C.">ΔT base (°C)</label>
+            <input type="number" id="node-input-deltaT_base" placeholder="4.0" min="0" max="10" step="0.5" style="width:80px;" />
+        </div>
+        <div style="flex:1;">
+            <label title="Additional °C per kW of power needed. Higher power → steeper temperature gradient across heat exchanger. Default: 0.3 °C/kW.">ΔT slope (°C/kW)</label>
+            <input type="number" id="node-input-deltaT_slope" placeholder="0.3" min="0" max="1" step="0.05" style="width:80px;" />
+        </div>
+    </div>
+    <div style="background:#fffae0; padding:8px; margin:8px 0; font-size:11px;">
+        Example: Tank=30°C, P_max=10kW → ΔT=4.0+0.3×10=7.0°C → HP setpoint=37°C
+    </div>
+    <div class="form-row"><label title="Purpose: main HEATING run command. Unit: 0/1. Source: tank-control enable output. Destination: ESSWW.2 (heating) unless cooling mode active.">Enable heating in</label><input type="text" id="node-input-enableCmdTopic" placeholder="from tank-control" /></div>
+    <hr />
+    <b>Heat/cool mode (HCMW)</b>
+    <div style="background:#f0f8ff; padding:8px; margin:8px 0; font-size:12px;">
+        Web UI force heat/cool flags (mutex in iolayer). Auto mode when both off.
+        Forced cooling (HCMW.2) overrides auto temp/price gates. Source lockout: HSDW.
+    </div>
+    <div class="form-row"><label title="HCMW.1: forced heating, no cooling. Overrides auto-cooling.">Force heat in</label><input type="text" id="node-input-hcmwForceHeatTopic" placeholder="HCMW.1" /></div>
+    <div class="form-row"><label title="HCMW.2: forced cooling, no heating. Overrides auto temp/price.">Force cool in</label><input type="text" id="node-input-hcmwForceCoolTopic" placeholder="HCMW.2" /></div>
+    <div class="form-row"><label title="Purpose: absolute MINIMUM HP setpoint limit. Protects against setpoint going too low. Both SP1 (upper) and SP2 (lower) will be clamped above this value."><i class="fa fa-thermometer-empty"></i> SP min clamp (°C)</label><input type="number" id="node-input-spMin" placeholder="28" style="width:80px;" /></div>
+    <div class="form-row"><label title="Purpose: absolute MAXIMUM HP setpoint limit. Protects against setpoint going too high. SP1 (upper) will be clamped below this value."><i class="fa fa-thermometer-full"></i> SP max clamp (°C)</label><input type="number" id="node-input-spMax" placeholder="51" style="width:80px;" /></div>
+    <hr />
+    <b>Auto-cooling actuation</b>
+    <div style="background:#f0f8ff; padding:8px; margin:8px 0; font-size:12px;">
+        Decision is in <b>room-overheat-checker</b> (per-room excess + price + FOW).
+        This node runs HP cooling when <code>heating/coolingRequired</code> is 1.
+        Forced HCMW.2: manual ForceOpenValve; auto FOW idle.
+    </div>
+    <div class="form-row">
+        <label title="Follow coolingRequired from room-overheat-checker.">Enable auto-cooling</label>
+        <input type="checkbox" id="node-input-autoEnableCooling" style="width:auto;" />
+    </div>
+    <div class="form-row"><label title="0/1 from room-overheat-checker when any hot room and price OK.">Cooling required in</label><input type="text" id="node-input-coolingRequiredTopic" placeholder="heating/coolingRequired" /></div>
+    <div class="form-row"><label title="Spot price for air coil gate (EUR/MWh).">Spot price in</label><input type="text" id="node-input-spotPriceTopic" placeholder="PRENW.3" /></div>
+    <div class="form-row">
+        <label title="Air coil enabled when spot below this (EUR/MWh).">Air cool price limit</label>
+        <input type="number" id="node-input-coolPriceLimit" placeholder="50" min="0" step="5" style="width:80px;" />
+    </div>
+    <div class="form-row" style="display:flex; align-items:center; gap:20px;">
+        <div style="flex:1;">
+            <label title="Fixed upper cooling setpoint (degC). ESTTW.4.">Cool SP upper (C)</label>
+            <input type="number" id="node-input-coolSpUpper" placeholder="17" min="10" max="25" step="1" style="width:80px;" />
+        </div>
+        <div style="flex:1;">
+            <label title="Fixed lower cooling setpoint (degC). ESTTW.5.">Cool SP lower (C)</label>
+            <input type="number" id="node-input-coolSpLower" placeholder="14" min="10" max="25" step="1" style="width:80px;" />
+        </div>
+    </div>
+    <hr />
+    <details style="margin:8px 0;">
+        <summary><b>HP Monitoring</b></summary>
+        <div style="background:#fff0f0; padding:8px; margin:8px 0; font-size:12px;">
+            Monitors HP status and writes 5 individual bits to ESMSW members:<br/>
+            • ESMSW.1: HP compressor stalled after bump<br/>
+            • ESMSW.2: Bump operation active<br/>
+            • ESMSW.3: Dual source (HP+gas both active)<br/>
+            • ESMSW.4: No heat (tank cold >10min while needed)<br/>
+            • ESMSW.5: Reserved
+        </div>
+        <div class="form-row">
+            <label title="Tank actual temperature input for bump monitoring. Source: ESTTW.1 (HP tank sensor).">Tank actual in</label>
+            <input type="text" id="node-input-tankActualTopic" placeholder="ESTTW.1" />
+        </div>
+        <div class="form-row">
+            <label title="Compressor speed input for stall detection. Source: ESCSV.1 (Hz, 0=stopped).">Comp speed in</label>
+            <input type="text" id="node-input-compSpeedTopic" placeholder="ESCSV.1" />
+        </div>
+        <div class="form-row">
+            <label title="Average valve openness input for heat demand detection. Source: HVAVV.1 (0-100%). Heat needed when >30%.">Avg valve open in</label>
+            <input type="text" id="node-input-avgValveOpenTopic" placeholder="HVAVV.1" />
+        </div>
+        <div class="form-row">
+            <label title="HP gate: suppress heating when avg valve openness is below this threshold (no room demands heat). HP re-enables at threshold+2%. Set 0 to disable. Default: 5%.">Valve gate (%)</label>
+            <input type="number" id="node-input-valveGateThresholdPct" placeholder="5" min="0" max="30" step="0.5" style="width:80px;" />
+        </div>
+        <div class="form-row" style="display:flex; align-items:center; gap:20px;">
+            <div style="flex:1;">
+                <label title="Minimum chargeAdj (degrees C) from MPC to bypass the valve gate for price pre-charging. chargeAdj is positive when current electricity is cheaper than average. Default: 0.5 C.">Gate bypass charge (C)</label>
+                <input type="number" id="node-input-valveGateChargeBypassDeg" placeholder="0.5" min="0" max="5" step="0.1" style="width:80px;" />
+            </div>
+            <div style="flex:1;">
+                <label title="Minimum planned HP heat energy remaining in MPC horizon (kWh) required to bypass the valve gate. Prevents single tiny slots from triggering bypass. Default: 2.0 kWh.">Gate bypass min (kWh)</label>
+                <input type="number" id="node-input-valveGateChargeMinKwh" placeholder="2.0" min="0" max="20" step="0.5" style="width:80px;" />
+            </div>
+        </div>
+        <div class="form-row">
+            <label title="Gas boiler heat request input for dual-source detection. Source: ISETW.4 (0/1). Gas active when ISETW.2=1 AND ISETW.4=1.">Gas heat request in</label>
+            <input type="text" id="node-input-gasEnableTopic" placeholder="ISETW.4" />
+        </div>
+        <div class="form-row" style="display:flex; align-items:center; gap:20px;">
+            <div style="flex:1;">
+                <label title="If tank stays this many °C below the lower HP setpoint (SP2) while HP is ON and compressor speed=0, the stall watchdog starts a 10-min countdown. After 10 min: 1 bump attempt, then ESMSW.1 error if still stalled. Default: 2°C.">Stall dead-band (°C)</label>
+                <input type="number" id="node-input-bumpTempBias" placeholder="2.0" min="0" max="10" step="0.5" style="width:80px;" />
+            </div>
+            <div style="flex:1;">
+                <label title="Error bitfield datastream KEY (not member). Node writes to ESMSW.1 through ESMSW.5 automatically.">Error bits key</label>
+                <input type="text" id="node-input-outErrorKey" placeholder="ESMSW" style="width:120px;" />
+            </div>
+        </div>
+    </details>
+    <hr />
+    <b>Persistence and tuning</b>
+    <div class="form-row">
+        <label title="Directory path for saving persistent state (setpoints, duty history). Directory only -- no filename. The node creates its own file (hp-control-{name}.json) inside this directory. Leave empty to disable persistence.">Persistence path</label>
+        <input type="text" id="node-input-persistencePath" placeholder="/home/nodered/heating_state" style="width:70%;" />
+    </div>
+    <div class="form-row">
+        <label title="Fixed temperature gap between SP1 and SP2 for both heating and cooling. Heating: SP2 clamped to [lo,hi], SP1 = SP2 + spread. Cooling: SP1 clamped to [lo,hi], SP2 = SP1 - spread. Default: 3°C.">Setpoint spread (°C)</label>
+        <input type="number" id="node-input-minSpread" placeholder="3" min="1" step="0.5" style="width:80px;" />
+    </div>
+    <div class="form-row">
+        <label title="Sliding window for tank temperature derivative (dT/dt). Collects samples over this period and computes a linear regression slope. Longer = smoother, shorter = more responsive. Default: 60s.">Deriv window (s)</label>
+        <input type="number" id="node-input-derivWindowSec" placeholder="60" min="10" step="10" style="width:80px;" />
+    </div>
+    <div class="form-row">
+        <label title="Prediction horizon for derivative-based early low-mode switching. The node tracks dTank/dt and switches to low mode early when the predicted error (extrapolated this many seconds ahead) drops below the low-mode threshold. Set to 0 to disable anticipation. Default: 120s.">Look-ahead (s)</label>
+        <input type="number" id="node-input-lookAheadSec" placeholder="120" min="0" step="10" style="width:80px;" />
+    </div>
+    <hr />
+    <b>Logging</b>
+    <div class="form-row">
+        <label title="Off: no logging. Basic: state changes, duty checks, SP writes. Verbose: full per-compute diagnostics.">Log level</label>
+        <select id="node-input-logLevel" style="width:120px;">
+            <option value="off">Off</option>
+            <option value="basic">Basic</option>
+            <option value="verbose">Verbose</option>
+        </select>
+    </div>
+    <hr />
+    <b>HP Control Topics (read/write)</b>
+    <div class="form-row"><label title="HP cooling enable (read/write). Unit: 0/1. hp-control writes commands and reads back actual state via read node. Destination: ESSWW.1.">HP cooling</label><input type="text" id="node-input-outCoolEnableTopic" placeholder="ESSWW.1" /></div>
+    <div class="form-row"><label title="HP heating enable (read/write). Unit: 0/1. hp-control writes commands and reads back actual state via read node. Destination: ESSWW.2.">HP heating</label><input type="text" id="node-input-outHeatEnableTopic" placeholder="ESSWW.2" /></div>
+    <div class="form-row"><label title="HP low/high mode (read/write, common to heating/cooling). Unit: 0/1. hp-control writes commands and reads back actual state via read node. Destination: ESSWW.3.">HP low mode</label><input type="text" id="node-input-outLowModeTopic" placeholder="ESSWW.3" /></div>
+    <div class="form-row"><label title="Heating setpoint 1 (read/write). Unit: degC. hp-control writes desired value, reads back actual HP value via read node (Modbus). Destination: ESTTW.2.">Heat SP1</label><input type="text" id="node-input-outHeatSp1Topic" placeholder="ESTTW.2" /></div>
+    <div class="form-row"><label title="Heating setpoint 2 (read/write). Unit: degC. hp-control writes desired value, reads back actual HP value via read node (Modbus). Destination: ESTTW.3.">Heat SP2</label><input type="text" id="node-input-outHeatSp2Topic" placeholder="ESTTW.3" /></div>
+    <div class="form-row"><label title="Cooling setpoint 1 (read/write). Unit: degC. hp-control writes desired value, reads back actual HP value via read node (Modbus). Destination: ESTTW.4.">Cool SP1</label><input type="text" id="node-input-outCoolSp1Topic" placeholder="ESTTW.4" /></div>
+    <div class="form-row"><label title="Cooling setpoint 2 (read/write). Unit: degC. hp-control writes desired value, reads back actual HP value via read node (Modbus). Destination: ESTTW.5.">Cool SP2</label><input type="text" id="node-input-outCoolSp2Topic" placeholder="ESTTW.5" /></div>
+    <div class="form-row"><label title="Purpose: global cooling mode flag. Unit: 0/1. Source: hp-control. Destination: COOLS.1 (tells floor valves to invert open/close logic).">Cool mode global out</label><input type="text" id="node-input-outCoolModeGlobalTopic" placeholder="COOLS.1" /></div>
+    <div class="form-row"><label title="Purpose: HP cooling active status. Unit: 0/1. Destination: HEW.3 (read-only status stream).">HEW cool status out</label><input type="text" id="node-input-outHewCoolTopic" placeholder="HEW.3" /></div>
+    <div class="form-row"><label title="Purpose: air handler cooling coil valve enable. Unit: 0/1. Source: hp-control. Destination: HK5S.1 (opens when cooling active and price allows).">Air cool enable out</label><input type="text" id="node-input-outAirCoolEnableTopic" placeholder="HK5S.1" /></div>
+    <p class="form-tips"><b>Supply target</b> from mpc-house adjusts <b>heating</b> SP only (ESTTW.2/.3). <b>Cooling</b> SP (ESTTW.4/.5) uses fixed values from UI config.</p>
+    <p class="form-tips"><b>Setpoint spread</b> is a fixed gap used by both heating and cooling pairs. Heating: SP2 is clamped to [lo,hi], SP1 = SP2 + spread (unclamped). Cooling: SP1 is clamped to [lo,hi], SP2 = SP1 - spread (unclamped).</p>
+    <p class="form-tips">Heating setpoints are <b>self-tuning</b> based on low-mode duty cycle during active heating. When 6h of actual heating time accumulates, the node checks the duty (time in low mode / time heating): if <12.5% or >87.5%, adjusts ±2°C; if <25% or >75%, adjusts ±1°C. Target: keep duty in 25-75% range for optimal efficiency. Idle periods (no heat demand or high price) are excluded from the duty calculation.</p>
+    <p class="form-tips">Low mode provides PWM-like power modulation via error-threshold hysteresis (on below 0.4°C, off above 1.0°C). The duty cycle (% time in low mode during heating) is monitored to self-tune setpoints.</p>
+    <p class="form-tips"><b>Persistence</b> saves learned setpoints and transition history to disk, so the system continues seamlessly after restart with no waiting period.</p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-hp-control">
+    <p>HP adapter node. Single authority for all HP register writes (ESSWW enables, ESTTW setpoints, low mode).</p>
+    <p>Receives <b>supply target</b> from mpc-house (heating-curve-based) and writes HP setpoints. <b>Self-tunes setpoints</b> after 6h of actual heating time based on low-mode duty cycle (ESSWW.3 / ESSWW.2) to maintain optimal efficiency (25-75% duty range). Idle periods are excluded from duty calculation.</p>
+    <p><b>Auto-cooling</b>: When enabled and HCMW is in auto mode (no forced heat/cool), activates cooling based on house temperature and electricity spot price with hysteresis. Forced HCMW flags override auto.</p>
+    <ul>
+        <li><b>Tank temp in</b> -- Measured tank temperature (degC). Source: ESTTW.1. For error calculation and derivative tracking.</li>
+        <li><b>Target in</b> -- Heating target setpoint (degC). Source: tank-control HTSW.2. Used for heating error.</li>
+        <li><b>Supply target in</b> -- MPC heating curve target (degC). Source: mpc-house. Basis for heating SP1 = supplyTarget + bias.</li>
+        <li><b>Enable heating in</b> -- Run command (0/1). Source: tank-control. Routes to ESSWW.2 (heat) or ESSWW.1 (cool).</li>
+        <li><b>Safety block in</b> -- Emergency stop (0/1). Source: safety-interlock node. Disables all outputs when active.</li>
+        <li><b>SP min/max clamp in</b> -- Dynamic limits (degC). Source: HTSW.3/.4. Clamps heating SP2 and cooling SP1.</li>
+        <li><b>Heat SP1/SP2 out</b> -- Heating setpoints (degC). Destination: ESTTW.2/.3. SP2 clamped, SP1 = SP2 + spread (3°C default).</li>
+        <li><b>Cool SP1/SP2 out</b> -- Cooling setpoints (degC). Destination: ESTTW.4/.5. Fixed values (17/14°C default) from UI config.</li>
+        <li><b>Cool mode global out</b> -- Cooling mode flag (0/1). Destination: COOLS.1. Tells floor valves to invert logic.</li>
+        <li><b>Air cool enable out</b> -- Air handler valve (0/1). Destination: HK5S.1. Opens during cooling when price allows.</li>
+        <li><b>HP low mode out</b> -- 0/1. Activates when error or predicted error drops below 0.4°C, deactivates above 1.0°C.</li>
+    </ul>
+</script>

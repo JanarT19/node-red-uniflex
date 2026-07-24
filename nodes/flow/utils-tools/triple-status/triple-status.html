@@ -1,0 +1,175 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-triple-status", {
+        category: "uniflex utils",
+        color: "#E2D96E",
+        icon: function () {
+            const L = (this.iconLetter || "A").toUpperCase().slice(0, 1);
+            return `icons/letter-${L}.svg`; // served from this node's ./icons/
+        },
+        inputs: 1,
+        outputs: 0,
+        align: "left",
+        defaults: {
+            name: { value: "" },
+            // topics (empty means disabled)
+            tItem1: { value: "" },
+            tItem2: { value: "" },
+            tItem3: { value: "" },
+            // precision & width
+            pItem1: { value: 1 },
+            pItem2: { value: 1 },
+            pItem3: { value: 0 },
+            wItem1: { value: 6 },
+            wItem2: { value: 6 },
+            wItem3: { value: 4 },
+            // status prefix
+            prefixSpaces: { value: 2 },
+            prefixText: { value: "" },
+            // icon letter
+            iconLetter: { value: "A" },
+            // debug
+            debugLog: { value: false }
+        },
+        label: function () {
+            const raw = this.name || "item1  item2  item3";
+            return raw.replace(/ /g, "\u00A0"); // keep multiple spaces
+        },
+        paletteLabel: "triple status",
+        labelStyle: function () {
+            return "node_label_italic";
+        },
+
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (let i = 0; i < controllers.length; i++) {
+                    result.push.apply(result, controllers[i].formattedTopics || []);
+                }
+                return result;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const selection = getTopics();
+                        const matches = selection ? selection.filter(function (obj) {
+                            return (obj.label || "").toLowerCase().indexOf(term) > -1;
+                        }) : [];
+                        response(matches);
+                    },
+                    focus: function (event, ui) {
+                        event.preventDefault();
+                    },
+                    select: function (event, ui) {
+                        event.preventDefault();
+                        element.val(ui.item.topic || ui.item.value);
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", element.val() || "");
+                });
+                element.autocomplete("instance")._renderItem = function (ul, item) {
+                    const term = (this.term || "").trim();
+                    const label = item.label || item.value || "";
+                    let highlightedLabel = label;
+                    if (term) {
+                        const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                        highlightedLabel = label.replace(regex, "<strong style=\"color:#e65; font-weight:bold\">$1</strong>");
+                    }
+                    return $("<li></li>").data("ui-autocomplete-item", item).append("<div>" + highlightedLabel + "</div>").appendTo(ul);
+                };
+            }
+            $.getJSON("uniflex/controller-config").done(function (data) {
+                _controllers = data;
+                initializeAutocomplete($("#node-input-tItem1"));
+                initializeAutocomplete($("#node-input-tItem2"));
+                initializeAutocomplete($("#node-input-tItem3"));
+            }).fail(function () {
+                _controllers = {};
+            });
+        }
+    });
+</script>
+
+<style>
+    .ts-grid {
+        display: grid;
+        grid-template-columns: 90px 160px 80px 80px;
+        gap: 6px 10px;
+        align-items: center;
+    }
+
+    .ts-grid .h {
+        font-weight: 600;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-triple-status">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="item1  item2  item3" />
+    </div>
+
+    <div class="form-row ts-grid">
+        <div></div>
+        <div class="h">topic</div>
+        <div class="h">precision</div>
+        <div class="h">width</div>
+
+        <label for="node-input-tItem1">Item 1</label>
+        <input type="text" id="node-input-tItem1" placeholder="(empty=disabled)" />
+        <input type="number" id="node-input-pItem1" min="0" max="6" />
+        <input type="number" id="node-input-wItem1" min="2" max="12" />
+
+        <label for="node-input-tItem2">Item 2</label>
+        <input type="text" id="node-input-tItem2" placeholder="(empty=disabled)" />
+        <input type="number" id="node-input-pItem2" min="0" max="6" />
+        <input type="number" id="node-input-wItem2" min="2" max="12" />
+
+        <label for="node-input-tItem3">Item 3</label>
+        <input type="text" id="node-input-tItem3" placeholder="(empty=disabled)" />
+        <input type="number" id="node-input-pItem3" min="0" max="6" />
+        <input type="number" id="node-input-wItem3" min="2" max="12" />
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-prefixSpaces">Left pad (figure-spaces)</label>
+        <input type="number" id="node-input-prefixSpaces" min="0" max="20" style="width:80px" />
+        <label for="node-input-prefixText" style="margin-left:10px">Prefix text</label>
+        <input type="text" id="node-input-prefixText" placeholder="(optional)" />
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-iconLetter">Icon letter</label>
+        <input type="text" id="node-input-iconLetter" maxlength="1" style="width:60px" placeholder="A" />
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-debugLog"><i class="fa fa-bug"></i> Debug logging</label>
+        <input type="checkbox" id="node-input-debugLog" style="width:auto" />
+        <span style="margin-left:10px;color:#666;font-size:90%">Log all received messages</span>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-triple-status">
+    <p>Status-only display of up to three numeric values under the node. No wire outputs.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>Must exactly match one configured item topic (item1 / item2 / item3). Empty topic fields are disabled.</dd>
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Value stored for that item and shown in status (precision/width per item).</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>None</dt>
+        <dd><code>outputs: 0</code>. Display only via <code>node.status</code>.</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>Unmatched topics are ignored. Matching topics flash status green briefly even if the value is unchanged. Disabled items show <code>--</code>. Optional prefix spaces/text and icon letter (<code>icons/letter-&lt;L&gt;.svg</code>). Enable debug logging to log each matched update.</p>
+</script>

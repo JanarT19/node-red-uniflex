@@ -1,0 +1,392 @@
+<script type="text/javascript">
+    // uniflex-mpc-room UI version 2.0.0-redesigned (tick-driven with adaptive bias)
+    console.log("*** uniflex-mpc-room UI loaded: VERSION 2.0.0-redesigned ***");
+
+    RED.nodes.registerType("uniflex-mpc-room", {
+        category: "uniflex home",
+        color: "#C7E9C0",
+        icon: "font-awesome/fa-home",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    if (!v || typeof v !== "string") return true;
+                    if (/[\s#+\x00-\x1F\x7F]/.test(v)) {
+                        return false;
+                    }
+                    return true;
+                }
+            },
+            // Timing
+            globalTickTopic: { value: "heating/tick", required: true },
+            tickDelaySec: { value: 0, validate: RED.validators.number() },
+            roomTickTopic: { value: "" }, // Default computed from name if empty
+
+            // Input topics
+            tRoomTopic: { value: "", required: true },
+            spRoomTopic: { value: "", required: true },
+            tOutTopic: { value: "" },
+            tsupplyTopic: { value: "" },
+            tReturnTopics: { value: "" }, // Comma-separated
+
+            // Output topics
+            tfSetOutTopic: { value: "", required: true },
+            roomLoadEstOutTopic: { value: "" },
+
+            // Room parameters
+            floorArea: { value: 0, validate: RED.validators.number() },
+
+            // Heating curve
+            Tref: { value: 0, validate: RED.validators.number() },
+            hcOffset: { value: 26, validate: RED.validators.number() },
+            hcSlope: { value: 0.2, validate: RED.validators.number() },
+            k_e: { value: 0.5, validate: RED.validators.number() },
+            Tf_min: { value: 23, validate: RED.validators.number() },
+            Tf_max: { value: 29, validate: RED.validators.number() },
+
+            // Comfort bands
+            band_low: { value: 0.2, validate: RED.validators.number() },
+            band_high: { value: 0.4, validate: RED.validators.number() },
+
+            // Adaptive bias
+            enableAdaptiveBias: { value: true },
+            biasLearningRate: { value: 0.0001, validate: RED.validators.number() },
+            biasClamp: { value: 1.0, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "mpc room";
+        },
+        paletteLabel: "mpc room",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            function updateTipText() {
+                const delay = $("#node-input-tickDelaySec").val() || "0";
+                const roomName = $("#node-input-name").val() || "unknown";
+                const tfSetOut = $("#node-input-tfSetOutTopic").val() || "<not set>";
+                const roomTickOut = $("#node-input-roomTickTopic").val() || `heating/${roomName}/tick`;
+
+                const tipText1 = `On global tick, this node will publish ${roomTickOut} after ${delay}s delay.`;
+                const tipText2 = `Floor setpoint (${tfSetOut}) calculated from heating curve + room error + adaptive bias.`;
+                const tipText3 = `Floor loops subscribe to ${roomTickOut} for synchronized control.`;
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+            }
+
+            $("#node-input-tickDelaySec, #node-input-name, #node-input-tfSetOutTopic, #node-input-roomTickTopic").on(
+                "input change",
+                updateTipText
+            );
+
+            queryControllerConfig();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-tRoomTopic"));
+                    initializeAutocomplete($("#node-input-spRoomTopic"));
+                    initializeAutocomplete($("#node-input-tOutTopic"));
+                    initializeAutocomplete($("#node-input-tsupplyTopic"));
+                    initializeAutocomplete($("#node-input-tReturnTopics"));
+                    initializeAutocomplete($("#node-input-tfSetOutTopic"));
+                    initializeAutocomplete($("#node-input-roomLoadEstOutTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                return result;
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .mpc-room-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .mpc-room-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .mpc-room-div .form-row input,
+    .mpc-room-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .mpc-room-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        font-size: 0.9em;
+        color: #666;
+        margin: 5px 0;
+    }
+
+    .mpc-room-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 2px;
+        margin-bottom: 6px;
+    }
+
+    .mpc-room-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 10px 0;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-mpc-room">
+    <div class="mpc-room-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g. M2_air" />
+            <div class="help-text">Room identifier (no spaces or special chars). Used for tick topic: heating/{name}/tick</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Timing</b>
+
+        <div class="form-row">
+            <label for="node-input-globalTickTopic"><i class="fa fa-clock-o"></i> Global tick</label>
+            <input type="text" id="node-input-globalTickTopic" placeholder="heating/tick" />
+            <div class="help-text">Global tick topic (triggers computation).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-tickDelaySec"><i class="fa fa-hourglass-half"></i> Tick delay (s)</label>
+            <input type="number" id="node-input-tickDelaySec" step="0.1" />
+            <div class="help-text">Delay before publishing room tick (stagger rooms: 0, 0.5, 1.0, ...).</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-roomTickTopic"><i class="fa fa-share-square-o"></i> Room tick output</label>
+            <input type="text" id="node-input-roomTickTopic" placeholder="heating/{name}/tick (auto)" />
+            <div class="help-text">Topic published for floor loops to sync on. Leave empty for auto: heating/{name}/tick</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Input Topics</b>
+
+        <div class="form-row">
+            <label for="node-input-tRoomTopic"><i class="fa fa-thermometer-half"></i> Room temperature</label>
+            <input type="text" id="node-input-tRoomTopic" placeholder="e.g. TKW.2" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-spRoomTopic"><i class="fa fa-bullseye"></i> Room setpoint</label>
+            <input type="text" id="node-input-spRoomTopic" placeholder="e.g. TKW.1" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-tOutTopic"><i class="fa fa-cloud"></i> Outdoor temp</label>
+            <input type="text" id="node-input-tOutTopic" placeholder="e.g. Tout (optional)" />
+            <div class="help-text">Optional: for heating curve weather compensation.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-tsupplyTopic"><i class="fa fa-tint"></i> Supply temp</label>
+            <input type="text" id="node-input-tsupplyTopic" placeholder="e.g. THAW.4 (optional)" />
+            <div class="help-text">Optional: for room load estimation.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-tReturnTopics"><i class="fa fa-exchange"></i> Return temps</label>
+            <input type="text" id="node-input-tReturnTopics" placeholder="e.g. TRW.4, TRW.5 (comma-separated)" />
+            <div class="help-text">Optional: floor loop return temps for adaptive bias learning.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Output Topics</b>
+
+        <div class="form-row">
+            <label for="node-input-tfSetOutTopic"><i class="fa fa-tachometer"></i> Floor setpoint</label>
+            <input type="text" id="node-input-tfSetOutTopic" placeholder="e.g. TKW.4" />
+            <div class="help-text">Floor temperature setpoint for all loops in this room.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-roomLoadEstOutTopic"><i class="fa fa-fire"></i> Room load est</label>
+            <input type="text" id="node-input-roomLoadEstOutTopic" placeholder="e.g. TKW.5 (optional)" />
+            <div class="help-text">
+                Optional output: publish coarse load estimate (kW) for monitoring. When mpc-house supports Total room load: create datastreams per room (this out), sum them (e.g. arithmetics node), and feed the sum into mpc-house Total room load (in).
+            </div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Room Parameters</b>
+
+        <div class="form-row">
+            <label for="node-input-floorArea"><i class="fa fa-th"></i> Floor area (m²)</label>
+            <input type="number" id="node-input-floorArea" step="0.1" style="width:80px;" />
+            <div class="help-text">Heated floor area in m². Used to improve load estimation (typical: 80-100 W/m² output).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Heating Curve</b>
+
+        <div class="form-row">
+            <label for="node-input-Tref"><i class="fa fa-thermometer-quarter"></i> T_ref (°C)</label>
+            <input type="number" id="node-input-Tref" step="0.1" style="width:80px;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-hcOffset"><i class="fa fa-line-chart"></i> a (°C)</label>
+            <input type="number" id="node-input-hcOffset" step="0.1" style="width:80px;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-hcSlope"><i class="fa fa-line-chart"></i> b</label>
+            <input type="number" id="node-input-hcSlope" step="0.01" style="width:80px;" />
+        </div>
+        <div class="form-tips">Heating curve: Tf_base = a + b × (T_ref - T_out)</div>
+
+        <div class="form-row">
+            <label for="node-input-k_e"><i class="fa fa-sliders"></i> k_e</label>
+            <input type="number" id="node-input-k_e" step="0.1" style="width:80px;" />
+        </div>
+        <div class="form-tips">Floor setpoint adjustment: Tf_set = Tf_base + k_e × (Tset - Ti) + bias</div>
+
+        <div class="form-row">
+            <label for="node-input-Tf_min"><i class="fa fa-angle-down"></i> Tf min (°C)</label>
+            <input type="number" id="node-input-Tf_min" step="0.1" style="width:80px;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-Tf_max"><i class="fa fa-angle-up"></i> Tf max (°C)</label>
+            <input type="number" id="node-input-Tf_max" step="0.1" style="width:80px;" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Comfort Bands</b>
+
+        <div class="form-row">
+            <label for="node-input-band_low"><i class="fa fa-compress"></i> Band low (°C)</label>
+            <input type="number" id="node-input-band_low" step="0.1" style="width:80px;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-band_high"><i class="fa fa-expand"></i> Band high (°C)</label>
+            <input type="number" id="node-input-band_high" step="0.1" style="width:80px;" />
+        </div>
+        <div class="form-tips">Reserved for future use (not currently used for demand).</div>
+
+        <div class="form-divider"></div>
+        <b>Adaptive Bias</b>
+
+        <div class="form-row">
+            <label for="node-input-enableAdaptiveBias"><i class="fa fa-magic"></i> Enable bias</label>
+            <input type="checkbox" id="node-input-enableAdaptiveBias" />
+            <div class="help-text">Learn floor setpoint offset from persistent room error.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-biasLearningRate"><i class="fa fa-graduation-cap"></i> Learning rate</label>
+            <input type="number" id="node-input-biasLearningRate" step="0.00001" style="width:80px;" />
+            <div class="help-text">How fast to learn (typical: 0.0001). Higher = faster adaptation.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-biasClamp"><i class="fa fa-arrows-h"></i> Bias clamp (°C)</label>
+            <input type="number" id="node-input-biasClamp" step="0.1" style="width:80px;" />
+            <div class="help-text">Max bias magnitude (typical: 1.0°C).</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-mpc-room">
+    <p><b>MPC Room Layer (Redesigned):</b> Tick-driven floor setpoint generation with adaptive bias and load estimation.</p>
+
+    <h3>Key Features</h3>
+    <ul>
+        <li><b>Tick-synchronized:</b> Only computes/publishes on global tick (not reactive)</li>
+        <li><b>Adaptive bias learning:</b> Learns floor setpoint offset from persistent room error</li>
+        <li><b>Floor temp feedback:</b> Uses loop return temps for learning and safety</li>
+        <li><b>Room load estimation:</b> Optional coarse estimate for analytics</li>
+    </ul>
+
+    <h3>Outputs</h3>
+    <ul>
+        <li><b>Floor setpoint</b> (°C): Tf_set for all loops in this room</li>
+        <li><b>Room tick</b>: heating/{name}/tick for floor loop synchronization</li>
+        <li><b>Room load estimate</b> (kW, optional): Coarse power estimate for monitoring/charting (always shown in status if inputs available)</li>
+    </ul>
+
+    <h3>Room Load Estimate</h3>
+    <p><b>Purpose:</b> Continuous coarse estimate of room heating power for:</p>
+    <ul>
+        <li>Monitoring/charting which rooms consume more energy</li>
+        <li>Analytics and validation (compare room estimates vs. whole-house meter)</li>
+        <li>Future use in more sophisticated MPC weighting</li>
+    </ul>
+    <p><b>Not used by mpc-house:</b> The house-level MPC relies on its internal 2nd-order thermal model for demand prediction, not per-room load estimates.</p>
+    <p><b>Calculation:</b> Q ≈ n_loops × 0.1 kg/s × 4.18 kJ/(kg·K) × (Tsupply - avg(Treturn)) [kW]</p>
+    <p><b>Floor area:</b> If configured, used to clamp max load to ~120 W/m² (realistic floor heating limit).</p>
+    <p><b>Status display:</b> Always shown (e.g., "Q=2.1kW") if supply and return temps available, regardless of whether output topic is configured.</p>
+
+    <h3>Floor Setpoint Calculation</h3>
+    <ol>
+        <li><b>Base from heating curve:</b> Tf_base = a + b × (Tref - Tout)</li>
+        <li><b>Trim from room error:</b> Tf_trim = k_e × (Tset - Ti)</li>
+        <li><b>Adaptive bias:</b> Learned offset (±1°C) from persistent error</li>
+        <li><b>Clamped:</b> Tf_min ≤ Tf_set ≤ Tf_max</li>
+    </ol>
+
+    <h3>Adaptive Bias Learning</h3>
+    <p>Slowly adjusts floor setpoint when room consistently over/under temp:</p>
+    <ul>
+        <li>Only learns when room error is small (0.1-2.0°C) and persistent</li>
+        <li>Does not learn when saturated at Tf_min/Tf_max</li>
+        <li>Clamped to ±biasClamp (default 1.0°C)</li>
+        <li>Visible in node status when |bias| > 0.01°C</li>
+    </ul>
+
+    <h3>Integration</h3>
+    <p>Wire floor loops to subscribe to <code>heating/{roomName}/tick</code> for synchronized valve control.</p>
+</script>

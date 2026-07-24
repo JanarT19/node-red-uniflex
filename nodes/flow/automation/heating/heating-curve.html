@@ -1,0 +1,260 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-heating-curve", {
+        category: "uniflex home",
+        color: "#FFE4B5",
+        icon: "font-awesome/fa-line-chart",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9_-]+$/.test(v) && v.length <= 50;
+                }
+            },
+            inputTopic: { value: "", required: true },
+            outputTopic: { value: "", required: true },
+            inputLow: { value: -15, validate: RED.validators.number() },
+            inputHigh: { value: 15, validate: RED.validators.number() },
+            outputLow: { value: 25, validate: RED.validators.number() },
+            outputHigh: { value: 55, validate: RED.validators.number() },
+            outputInt: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "heating curve";
+        },
+        paletteLabel: "heating curve",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            function updateTipText() {
+                const inT = $("#node-input-inputTopic").val() || "<not set>";
+                const outT = $("#node-input-outputTopic").val() || "<not set>";
+                const inLo = Number($("#node-input-inputLow").val());
+                const inHi = Number($("#node-input-inputHigh").val());
+                const outLo = Number($("#node-input-outputLow").val());
+                const outHi = Number($("#node-input-outputHigh").val());
+                $("#node-input-tip-text").text(
+                    `(${inT}) [${inLo}, ${inHi}] → [${outLo}, ${outHi}] (${outT}). Output clamped to range.`
+                );
+            }
+
+            $("#node-input-inputTopic, #node-input-outputTopic, #node-input-inputLow, #node-input-inputHigh, #node-input-outputLow, #node-input-outputHigh").on(
+                "input change",
+                updateTipText
+            );
+
+            queryControllerConfig();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON("uniflex/controller-config", function (data) {
+                    _controllers = data;
+                    initializeAutocomplete($("#node-input-inputTopic"));
+                    initializeAutocomplete($("#node-input-outputTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element) {
+                if (element.data("ui-autocomplete")) {
+                    element.autocomplete("destroy");
+                }
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = (request.term || "").toLowerCase();
+                            const selection = getTopics();
+                            const matches = selection.filter(function (obj) {
+                                const l = (obj.label || "").toLowerCase();
+                                const t = (obj.topic || "").toLowerCase();
+                                return l.indexOf(term) > -1 || t.indexOf(term) > -1;
+                            });
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic || ui.item.label);
+                            updateTipText();
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    });
+                element.autocomplete("instance")._renderItem = function (ul, item) {
+                    const term = (this.term || "").trim();
+                    const label = item.label || item.topic || "";
+                    let html = label;
+                    if (term) {
+                        const re = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                        html = label.replace(re, "<strong style='color:#e65; font-weight:bold'>$1</strong>");
+                    }
+                    return $("<li></li>").data("ui-autocomplete-item", item).append($("<div></div>").html(html)).appendTo(ul);
+                };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers && _controllers.controllers ? _controllers.controllers : [];
+                controllers.forEach(function (c) {
+                    if (c.formattedTopics) result.push.apply(result, c.formattedTopics);
+                });
+                return result.sort(function (a, b) {
+                    const ta = (a.topic || a.label || "").toLowerCase();
+                    const tb = (b.topic || b.label || "").toLowerCase();
+                    return ta.localeCompare(tb);
+                });
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .heating-curve-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .heating-curve-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .heating-curve-div .form-row div,
+    .heating-curve-div .form-row input,
+    .heating-curve-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .heating-curve-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        font-style: italic;
+        color: #555;
+    }
+
+    .heating-curve-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .heating-curve-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .heating-curve-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+    }
+
+    .heating-curve-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .heating-curve-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    .heating-curve-div input[type="text"] {
+        user-select: text !important;
+        cursor: text !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-heating-curve">
+    <div class="heating-curve-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g. heating-curve-1" />
+            <div class="help-text">Unique identifier. Only letters, numbers, underscore, hyphen.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Topics</b>
+
+        <div class="form-row">
+            <label for="node-input-inputTopic"><i class="fa fa-sign-in"></i> Input topic</label>
+            <input type="text" id="node-input-inputTopic" placeholder="e.g. outdoor temp" />
+            <div class="help-text">Topic providing the input value (e.g. outdoor temperature). Autocomplete available.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="e.g. flow setpoint" />
+            <div class="help-text">Topic for the interpolated output value (e.g. flow temperature setpoint). Autocomplete available.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Input range (two values)</b>
+
+        <div class="form-row">
+            <label for="node-input-inputLow"><i class="fa fa-arrow-down"></i> Input low</label>
+            <input type="number" id="node-input-inputLow" step="any" />
+            <div class="help-text">Lower bound of input range. Input values below this map to output low.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-inputHigh"><i class="fa fa-arrow-up"></i> Input high</label>
+            <input type="number" id="node-input-inputHigh" step="any" />
+            <div class="help-text">Upper bound of input range. Input values above this map to output high.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Output range (two values)</b>
+
+        <div class="form-row">
+            <label for="node-input-outputLow"><i class="fa fa-arrow-down"></i> Output low</label>
+            <input type="number" id="node-input-outputLow" step="any" />
+            <div class="help-text">Lower bound of output. Output is clamped to [output low, output high] even if input goes outside input range.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputHigh"><i class="fa fa-arrow-up"></i> Output high</label>
+            <input type="number" id="node-input-outputHigh" step="any" />
+            <div class="help-text">Upper bound of output. Output never exceeds this.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputInt"><i class="fa fa-hashtag"></i> Output as integer</label>
+            <input type="checkbox" id="node-input-outputInt" style="display:inline-block; width:auto; vertical-align:middle;" />
+            <div class="help-text">When checked, output payload is rounded with Math.round().</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-heating-curve">
+    <h3>Heating curve</h3>
+    <p>Linear interpolation from one input topic to one output topic using two values for input and two for output.</p>
+
+    <h4>Setup</h4>
+    <ul>
+        <li><b>Input topic</b>: Source of the input value (e.g. outdoor temperature).</li>
+        <li><b>Output topic</b>: Where the interpolated value is sent (e.g. flow setpoint).</li>
+        <li><b>Input low / Input high</b>: Input range. Values below low are treated as low; above high, as high.</li>
+        <li><b>Output low / Output high</b>: Output range. Result is clamped to this interval even when input is outside the input range.</li>
+    </ul>
+
+    <h4>Interpolation</h4>
+    <p>Output = output_low + (input - input_low) / (input_high - input_low) × (output_high - output_low), then clamped to [output_low, output_high].</p>
+
+    <h4>Status</h4>
+    <ul>
+        <li>Shows current input and output values.</li>
+        <li><span style="color:green">●</span> Green: output is strictly inside (output_low, output_high).</li>
+        <li><span style="color:yellow">●</span> Yellow: output is on the lower or upper limit (clamped).</li>
+    </ul>
+</script>

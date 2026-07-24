@@ -1,0 +1,609 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-idu-gateway-monitor", {
+        category: "uniflex cooling",
+        color: "#A8D8EA",
+        icon: "font-awesome/fa-server",
+        defaults: {
+            name: { value: "" },
+            gatewayHost: { value: "192.168.2.200", required: true },
+            pathSuffix: { value: "888", required: true },
+            pollSec: { value: 120, validate: RED.validators.number() },
+            timeoutMs: { value: 15000, validate: RED.validators.number() },
+            enableDebug: { value: false },
+            mapRows: { value: [] }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            const n = (this.mapRows || []).length;
+            if (this.name) {
+                return this.name;
+            }
+            return n ? `idu gateway (${n})` : "idu gateway";
+        },
+        paletteLabel: "idu gateway",
+
+        oneditprepare: function () {
+            const node = this;
+            let _streamTopics = [];
+            let _stateRefreshTimer = null;
+            const _stateTimerKey = "iduGwState_" + (node.id || "new");
+
+            function clearStateRefreshTimer() {
+                if (_stateRefreshTimer) {
+                    clearInterval(_stateRefreshTimer);
+                    _stateRefreshTimer = null;
+                }
+                if (window._iduGwStateTimers && window._iduGwStateTimers[_stateTimerKey]) {
+                    clearInterval(window._iduGwStateTimers[_stateTimerKey]);
+                    delete window._iduGwStateTimers[_stateTimerKey];
+                }
+            }
+
+            function stateLabel(v) {
+                if (v === null || v === undefined) {
+                    return "offl";
+                }
+                if (v === 1) {
+                    return "ON";
+                }
+                return "idle";
+            }
+
+            function applyStateClass($el, v) {
+                $el.removeClass("idu-st-offl idu-st-idle idu-st-on idu-st-unknown");
+                if (v === null || v === undefined) {
+                    $el.addClass("idu-st-offl");
+                } else if (v === 1) {
+                    $el.addClass("idu-st-on");
+                } else {
+                    $el.addClass("idu-st-idle");
+                }
+            }
+
+            function formatPollTs(ts) {
+                if (!ts) {
+                    return "";
+                }
+                const d = new Date(ts);
+                const pad = function (n) {
+                    return n < 10 ? "0" + n : String(n);
+                };
+                return pad(d.getDate()) + "." + pad(d.getMonth() + 1) + "." + d.getFullYear()
+                    + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+            }
+
+            function applyRowState($row, byIdu) {
+                const idu = parseInt($row.find(".node-input-idu").val(), 10);
+                const $st = $row.find(".node-input-state");
+                if (!$st.length) {
+                    return;
+                }
+                if (!Number.isFinite(idu)) {
+                    $st.text("--");
+                    $st.removeClass("idu-st-offl idu-st-idle idu-st-on").addClass("idu-st-unknown");
+                    return;
+                }
+                const key = String(idu);
+                if (!Object.prototype.hasOwnProperty.call(byIdu, key)) {
+                    $st.text("--");
+                    $st.removeClass("idu-st-offl idu-st-idle idu-st-on").addClass("idu-st-unknown");
+                    return;
+                }
+                const v = byIdu[key];
+                $st.text(stateLabel(v));
+                applyStateClass($st, v);
+            }
+
+            function applyPollState(data) {
+                const byIdu = {};
+                if (data && data.statesByIdu && typeof data.statesByIdu === "object") {
+                    Object.keys(data.statesByIdu).forEach(function (k) {
+                        byIdu[String(k)] = data.statesByIdu[k];
+                    });
+                }
+                if (data && Array.isArray(data.rows)) {
+                    data.rows.forEach(function (r) {
+                        byIdu[String(r.idu)] = r.v;
+                    });
+                }
+
+                const $items = $("#idu-map-container").editableList("items");
+                if ($items && $items.length) {
+                    $items.each(function () {
+                        applyRowState($(this), byIdu);
+                    });
+                } else {
+                    $("#idu-map-container .idu-map-list").each(function () {
+                        applyRowState($(this), byIdu);
+                    });
+                }
+
+                let sumText = "waiting for poll...";
+                if (data && data.summary && data.summary.text) {
+                    sumText = data.summary.text;
+                    if (data.ts) {
+                        sumText += " @ " + formatPollTs(data.ts);
+                    }
+                } else if (data && data.ts) {
+                    sumText = "last poll @ " + formatPollTs(data.ts);
+                }
+                $("#idu-poll-summary").text(sumText);
+            }
+
+            function refreshPollState() {
+                if (!node.id) {
+                    $("#idu-poll-summary").text("deploy node to see live state");
+                    return;
+                }
+                $.getJSON("uniflex/idu-gateway-monitor/" + node.id + "/state")
+                    .done(applyPollState)
+                    .fail(function () {
+                        $("#idu-poll-summary").text("state unavailable (node not deployed?)");
+                    });
+            }
+
+            function startStateRefreshTimer() {
+                clearStateRefreshTimer();
+                refreshPollState();
+                _stateRefreshTimer = setInterval(refreshPollState, 30000);
+                window._iduGwStateTimers = window._iduGwStateTimers || {};
+                window._iduGwStateTimers[_stateTimerKey] = _stateRefreshTimer;
+            }
+
+            function unsubscribeComms() {
+                window._iduGwCommsSubs = window._iduGwCommsSubs || {};
+                const subId = window._iduGwCommsSubs[_stateTimerKey];
+                if (subId && RED.comms && typeof RED.comms.unsubscribe === "function") {
+                    RED.comms.unsubscribe(subId);
+                }
+                delete window._iduGwCommsSubs[_stateTimerKey];
+            }
+
+            function subscribeComms() {
+                unsubscribeComms();
+                if (!node.id || !RED.comms || typeof RED.comms.subscribe !== "function") {
+                    return;
+                }
+                const eventId = "idu-gateway-monitor-state-" + node.id;
+                const subId = RED.comms.subscribe("notification/runtime-event", function (topic, msg) {
+                    if (msg && msg.id === eventId && msg.payload) {
+                        applyPollState(msg.payload);
+                    }
+                });
+                window._iduGwCommsSubs = window._iduGwCommsSubs || {};
+                window._iduGwCommsSubs[_stateTimerKey] = subId;
+            }
+
+            // Editor-only prefill for perton (not used at runtime unless saved in node config).
+            const PERTON_IDU_MAP_SEED = [
+                { idu: 1, flat: null, zone: "kohvik", stream: null, memberBase: 0 },
+                { idu: 2, flat: null, zone: "kohvik", stream: null, memberBase: 0 },
+                { idu: 3, flat: 209, zone: "liv", stream: "CAS209W", memberBase: 1 },
+                { idu: 4, flat: 208, zone: "liv", stream: "CAS208W", memberBase: 1 },
+                { idu: 5, flat: 207, zone: "liv", stream: "CAS207W", memberBase: 1 },
+                { idu: 6, flat: 206, zone: "liv", stream: "CAS206W", memberBase: 1 },
+                { idu: 7, flat: 312, zone: "liv", stream: "CBS312W", memberBase: 1 },
+                { idu: 8, flat: 312, zone: "bed", stream: "CBS312W", memberBase: 7 },
+                { idu: 9, flat: 311, zone: "liv", stream: "CAS311W", memberBase: 1 },
+                { idu: 10, flat: 310, zone: "liv", stream: "CAS310W", memberBase: 1 },
+                { idu: 11, flat: 309, zone: "liv", stream: "CAS309W", memberBase: 1 },
+                { idu: 12, flat: 308, zone: "liv", stream: "CAS308W", memberBase: 1 },
+                { idu: 13, flat: 307, zone: "liv", stream: "CAS307W", memberBase: 1 },
+                { idu: 14, flat: 306, zone: "liv", stream: "CAS306W", memberBase: 1 },
+                { idu: 15, flat: 412, zone: "liv", stream: "CBS412W", memberBase: 1 },
+                { idu: 16, flat: 412, zone: "bed", stream: "CBS412W", memberBase: 7 },
+                { idu: 17, flat: 411, zone: "liv", stream: "CAS411W", memberBase: 1 },
+                { idu: 18, flat: 410, zone: "liv", stream: "CAS410W", memberBase: 1 },
+                { idu: 19, flat: 409, zone: "liv", stream: "CAS409W", memberBase: 1 },
+                { idu: 20, flat: 408, zone: "liv", stream: "CAS408W", memberBase: 1 },
+                { idu: 21, flat: 407, zone: "liv", stream: "CAS407W", memberBase: 1 },
+                { idu: 22, flat: 406, zone: "liv", stream: "CAS406W", memberBase: 1 },
+                { idu: 23, flat: 512, zone: "liv", stream: "CBS512W", memberBase: 1 },
+                { idu: 24, flat: 512, zone: "bed", stream: "CBS512W", memberBase: 7 },
+                { idu: 25, flat: 511, zone: "liv", stream: "CAS511W", memberBase: 1 },
+                { idu: 26, flat: 510, zone: "liv", stream: "CAS510W", memberBase: 1 },
+                { idu: 27, flat: 509, zone: "liv", stream: "CAS509W", memberBase: 1 },
+                { idu: 28, flat: 508, zone: "liv", stream: "CAS508W", memberBase: 1 },
+                { idu: 29, flat: 507, zone: "liv", stream: "CAS507W", memberBase: 1 },
+                { idu: 30, flat: 506, zone: "liv", stream: "CAS506W", memberBase: 1 },
+                { idu: 31, flat: 612, zone: "liv", stream: "CBS612W", memberBase: 1 },
+                { idu: 32, flat: 612, zone: "bed", stream: "CBS612W", memberBase: 7 },
+                { idu: 33, flat: 611, zone: "liv", stream: "CAS611W", memberBase: 1 },
+                { idu: 34, flat: 610, zone: "liv", stream: "CAS610W", memberBase: 1 },
+                { idu: 35, flat: 609, zone: "liv", stream: "CAS609W", memberBase: 1 },
+                { idu: 36, flat: 608, zone: "liv", stream: "CAS608W", memberBase: 1 },
+                { idu: 37, flat: 607, zone: "liv", stream: "CAS607W", memberBase: 1 },
+                { idu: 38, flat: 606, zone: "liv", stream: "CAS606W", memberBase: 1 },
+                { idu: 39, flat: 712, zone: "liv", stream: "CBS712W", memberBase: 1 },
+                { idu: 40, flat: 712, zone: "bed", stream: "CBS712W", memberBase: 7 },
+                { idu: 41, flat: 711, zone: "liv", stream: "CAS711W", memberBase: 1 },
+                { idu: 42, flat: 710, zone: "liv", stream: "CAS710W", memberBase: 1 },
+                { idu: 43, flat: 709, zone: "liv", stream: "CAS709W", memberBase: 1 },
+                { idu: 44, flat: 708, zone: "liv", stream: "CAS708W", memberBase: 1 },
+                { idu: 45, flat: 707, zone: "liv", stream: "CAS707W", memberBase: 1 },
+                { idu: 46, flat: 706, zone: "liv", stream: "CAS706W", memberBase: 1 },
+                { idu: 47, flat: 812, zone: "liv", stream: "CBS812W", memberBase: 1 },
+                { idu: 48, flat: 812, zone: "bed", stream: "CBS812W", memberBase: 7 },
+                { idu: 49, flat: 811, zone: "liv", stream: "CAS811W", memberBase: 1 },
+                { idu: 50, flat: 810, zone: "liv", stream: "CAS810W", memberBase: 1 },
+                { idu: 51, flat: 809, zone: "liv", stream: "CAS809W", memberBase: 1 },
+                { idu: 52, flat: 808, zone: "liv", stream: "CAS808W", memberBase: 1 },
+                { idu: 53, flat: 807, zone: "liv", stream: "CAS807W", memberBase: 1 },
+                { idu: 54, flat: 806, zone: "liv", stream: "CAS806W", memberBase: 1 }
+            ];
+
+            const savedRows = node.mapRows || [];
+
+            function cloneSeed(rows) {
+                return rows.map(function (r) {
+                    return {
+                        idu: r.idu,
+                        flat: r.flat,
+                        zone: r.zone,
+                        stream: r.stream,
+                        memberBase: r.memberBase
+                    };
+                });
+            }
+
+            function buildStreamTopicList(data) {
+                const keys = new Set();
+                const controllers = (data && data.controllers) ? data.controllers : (data ? [data] : []);
+                controllers.forEach(function (ctrl) {
+                    const services = ctrl.filteredServices || ctrl.services || {};
+                    Object.keys(services).forEach(function (key) {
+                        if (/^(CAS|CBS)/.test(key)) {
+                            keys.add(key);
+                        }
+                    });
+                    (ctrl.formattedTopics || []).forEach(function (item) {
+                        const topic = String(item.topic || item.value || item.label || "").trim();
+                        const key = topic.split(".")[0];
+                        if (/^(CAS|CBS)/.test(key)) {
+                            keys.add(key);
+                        }
+                    });
+                });
+                return Array.from(keys).sort();
+            }
+
+            function initStreamAutocomplete(el) {
+                el.autocomplete({
+                    minLength: 0,
+                    source: function (req, res) {
+                        const term = (req.term || "").toLowerCase();
+                        const matches = _streamTopics.filter(function (key) {
+                            return key.toLowerCase().indexOf(term) >= 0;
+                        });
+                        res(matches.map(function (key) {
+                            return { label: key, value: key };
+                        }));
+                    },
+                    focus: function (e) {
+                        e.preventDefault();
+                    },
+                    select: function (e, ui) {
+                        e.preventDefault();
+                        el.val(ui.item.value || ui.item.label || "");
+                    }
+                }).on("focus", function () {
+                    el.autocomplete("search", el.val() || "");
+                });
+            }
+
+            function addMapRow(container, row) {
+                const r = row || {};
+                const flatVal = (r.flat == null || r.flat === "") ? "" : String(r.flat);
+                const streamVal = r.stream || "";
+                const zoneVal = r.zone || "liv";
+                const memberVal = (r.memberBase != null && r.memberBase !== "") ? String(r.memberBase) : "1";
+
+                const $row = $('<div class="idu-map-list"/>').appendTo(container);
+                $('<input type="number" class="node-input-idu" min="1" max="999" style="width:48px"/>')
+                    .val(r.idu != null ? r.idu : "")
+                    .appendTo($row);
+                $('<input type="text" class="node-input-flat" placeholder="flat" style="width:52px"/>')
+                    .val(flatVal)
+                    .appendTo($row);
+                const $zone = $('<select class="node-input-zone" style="width:72px"/>').appendTo($row);
+                ["kohvik", "liv", "bed"].forEach(function (z) {
+                    $zone.append($("<option/>").val(z).text(z));
+                });
+                $zone.val(zoneVal);
+                const $stream = $('<input type="text" class="node-input-stream" placeholder="CAS/CBS" style="width:88px"/>')
+                    .val(streamVal)
+                    .appendTo($row);
+                initStreamAutocomplete($stream);
+                const $member = $('<select class="node-input-memberBase" style="width:52px"/>').appendTo($row);
+                [0, 1, 7].forEach(function (m) {
+                    $member.append($("<option/>").val(String(m)).text(String(m)));
+                });
+                $member.val(memberVal);
+                $('<span class="node-input-state idu-st-unknown" style="width:36px;text-align:center">--</span>')
+                    .appendTo($row);
+            }
+
+            function loadRows(rows) {
+                $("#idu-map-container").editableList("empty");
+                $("#idu-map-container").editableList("addItems", rows);
+            }
+
+            $("#idu-map-container").editableList({
+                removable: true,
+                sortable: true,
+                header: $("<div>").append($.parseHTML(
+                    '<div class="idu-map-header">' +
+                    '<div style="width:52px">IDU</div>' +
+                    '<div style="width:56px">Flat</div>' +
+                    '<div style="width:76px">Zone</div>' +
+                    '<div style="flex:1;min-width:90px">Stream</div>' +
+                    '<div style="width:56px">Mbr</div>' +
+                    '<div style="width:40px">St</div>' +
+                    '</div>'
+                )),
+                buttons: [
+                    {
+                        label: "load perton default",
+                        icon: "fa fa-download",
+                        title: "Replace table with perton default 54 IDU rows",
+                        click: function () {
+                            loadRows(cloneSeed(PERTON_IDU_MAP_SEED));
+                            RED.notify("Loaded perton default IDU map (54 rows)", { type: "success", timeout: 3000 });
+                        }
+                    },
+                    {
+                        label: "delete all",
+                        icon: "fa fa-trash",
+                        title: "Clear all mapping rows",
+                        click: function () {
+                            $("#idu-map-container").editableList("empty");
+                        }
+                    }
+                ],
+                addItem: function (container, index, row) {
+                    addMapRow(container, row);
+                }
+            });
+
+            loadRows(savedRows);
+
+            $.getJSON("uniflex/controller-config")
+                .done(function (data) {
+                    _streamTopics = buildStreamTopicList(data);
+                    $("#idu-map-container .node-input-stream").each(function () {
+                        initStreamAutocomplete($(this));
+                    });
+                })
+                .fail(function () {
+                    _streamTopics = [];
+                });
+
+            $("#node-input-pollSec").spinner({ min: 15, max: 3600 });
+            $("#node-input-timeoutMs").spinner({ min: 3000, max: 60000 });
+            subscribeComms();
+            startStateRefreshTimer();
+        },
+
+        oneditcancel: function () {
+            const timerKey = "iduGwState_" + (this.id || "new");
+            if (window._iduGwStateTimers && window._iduGwStateTimers[timerKey]) {
+                clearInterval(window._iduGwStateTimers[timerKey]);
+                delete window._iduGwStateTimers[timerKey];
+            }
+            window._iduGwCommsSubs = window._iduGwCommsSubs || {};
+            const subId = window._iduGwCommsSubs[timerKey];
+            if (subId && RED.comms && typeof RED.comms.unsubscribe === "function") {
+                RED.comms.unsubscribe(subId);
+            }
+            delete window._iduGwCommsSubs[timerKey];
+        },
+
+        oneditsave: function () {
+            const timerKey = "iduGwState_" + (this.id || "new");
+            if (window._iduGwStateTimers && window._iduGwStateTimers[timerKey]) {
+                clearInterval(window._iduGwStateTimers[timerKey]);
+                delete window._iduGwStateTimers[timerKey];
+            }
+            window._iduGwCommsSubs = window._iduGwCommsSubs || {};
+            const subId = window._iduGwCommsSubs[timerKey];
+            if (subId && RED.comms && typeof RED.comms.unsubscribe === "function") {
+                RED.comms.unsubscribe(subId);
+            }
+            delete window._iduGwCommsSubs[timerKey];
+
+            const rows = [];
+            const seenIdu = new Set();
+            let dropped = 0;
+
+            $("#idu-map-container").editableList("items").each(function () {
+                const c = $(this);
+                const idu = parseInt(c.find(".node-input-idu").val(), 10);
+                if (!Number.isFinite(idu) || idu < 1) {
+                    return;
+                }
+                if (seenIdu.has(idu)) {
+                    dropped += 1;
+                    return;
+                }
+                seenIdu.add(idu);
+
+                let flatRaw = (c.find(".node-input-flat").val() || "").trim();
+                let flat = flatRaw === "" ? null : parseInt(flatRaw, 10);
+                if (flat !== null && !Number.isFinite(flat)) {
+                    flat = null;
+                }
+
+                let stream = (c.find(".node-input-stream").val() || "").trim();
+                if (stream === "") {
+                    stream = null;
+                } else {
+                    stream = stream.replace(/\.\d+$/, "");
+                }
+
+                const zone = (c.find(".node-input-zone").val() || "liv").trim();
+                const memberBase = parseInt(c.find(".node-input-memberBase").val(), 10);
+
+                rows.push({
+                    idu: idu,
+                    flat: flat,
+                    zone: zone,
+                    stream: stream,
+                    memberBase: Number.isFinite(memberBase) ? memberBase : 0
+                });
+            });
+
+            rows.sort(function (a, b) {
+                return a.idu - b.idu;
+            });
+
+            this.mapRows = rows;
+
+            if (dropped > 0) {
+                RED.notify("Removed " + dropped + " duplicate IDU row(s).", { type: "warning", timeout: 4000 });
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .idu-gateway-monitor-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .idu-map-header {
+        display: flex;
+        gap: 6px;
+        font-weight: bold;
+        padding: 4px 0;
+        align-items: center;
+    }
+
+    .idu-map-list {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex: 1;
+    }
+
+    .idu-map-list input,
+    .idu-map-list select {
+        margin: 0;
+    }
+
+    #idu-map-container .red-ui-editableList-item-content {
+        overflow: visible;
+    }
+
+    .node-input-state.idu-st-offl {
+        color: #a33;
+        font-weight: bold;
+    }
+
+    .node-input-state.idu-st-on {
+        color: #393;
+        font-weight: bold;
+    }
+
+    .node-input-state.idu-st-idle {
+        color: #666;
+    }
+
+    .node-input-state.idu-st-unknown {
+        color: #999;
+    }
+
+    #idu-poll-state-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    #idu-poll-state-row label {
+        margin-bottom: 0;
+    }
+
+    .idu-poll-summary {
+        font-size: 12px;
+        color: #333;
+        margin-left: 6px;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-idu-gateway-monitor">
+    <div class="idu-gateway-monitor-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="idu gateway monitor">
+        </div>
+        <div class="form-row">
+            <label for="node-input-gatewayHost"><i class="fa fa-globe"></i> Gateway host</label>
+            <input type="text" id="node-input-gatewayHost" placeholder="192.168.2.200">
+        </div>
+        <div class="form-row">
+            <label for="node-input-pathSuffix"><i class="fa fa-link"></i> API path suffix</label>
+            <input type="text" id="node-input-pathSuffix" placeholder="888">
+        </div>
+        <div class="form-row">
+            <label for="node-input-pollSec"><i class="fa fa-clock-o"></i> Poll interval (s)</label>
+            <input type="number" id="node-input-pollSec" placeholder="120">
+        </div>
+        <div class="form-row">
+            <label for="node-input-timeoutMs"><i class="fa fa-hourglass-half"></i> HTTP timeout (ms)</label>
+            <input type="number" id="node-input-timeoutMs" placeholder="15000">
+        </div>
+        <div class="form-row">
+            <label for="node-input-enableDebug">&nbsp;</label>
+            <input type="checkbox" id="node-input-enableDebug" style="width:auto;">
+            <label for="node-input-enableDebug" style="width:auto;">Enable debug logging</label>
+        </div>
+        <div class="form-row" id="idu-poll-state-row">
+            <label><i class="fa fa-heartbeat"></i> Live state</label>
+            <span id="idu-poll-summary" class="idu-poll-summary">waiting for poll...</span>
+        </div>
+        <div class="form-row">
+            <label><i class="fa fa-list"></i> IDU map</label>
+            <ol id="idu-map-container" style="width:100%;max-width:none;margin-left:0;"></ol>
+        </div>
+        <div class="form-tips">
+            Gateway IDU index to flat / zone / CAS|CBS stream. Stream picker lists CAS/CBS keys from controller-config.
+            Use <b>load perton default</b> to prefill 54 rows. Saved in this node (flows.json).
+            <b>St</b> column shows last gateway poll: offl / idle / ON. State is autorefreshed every 30 s
+            while dialog open (not 120 s); also updates immediately on each gateway poll.
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-idu-gateway-monitor">
+    <p>
+        HTTP poll of the Modbus TCP VRF gateway web API. Decodes
+        <code>inunit_discrete</code> (54 IDUs) using the <b>mapping table</b> in this node dialog.
+    </p>
+
+    <h3>Outputs</h3>
+    <p>One message per poll:</p>
+    <ul>
+        <li><code>topic</code>: <code>idu-gateway/snapshot</code></li>
+        <li>
+            <code>payload</code>: array of
+            <code>{ idu, flat, zone, stream, memberBase, coolMember, maintainerStream, label, v }</code>
+        </li>
+    </ul>
+
+    <h3>Details</h3>
+    <p>
+        Zone naming (perton / uistatus): <b>liv</b> = UI elu row (CBS members 1–6),
+        <b>bed</b> = UI mag row (CBS 7–12).
+    </p>
+    <p>
+        <code>maintainerStream</code> (<code>IDU###W</code>) and <code>coolMember</code>
+        (<code>memberBase+2</code>) are derived at runtime.
+    </p>
+    <p>
+        Wire <b>IDU gw to streams</b> function → <b>flow/cooling/send</b> →
+        <b>to_datastreams</b> (<code>IDU2W</code>..<code>IDU8W</code>). CAS/CBS from ai2di
+        (CAM/CBM), not gateway. Debug optional.
+    </p>
+    <p>Also polls on a timer (default 120 s) and accepts manual inject on input.</p>
+</script>

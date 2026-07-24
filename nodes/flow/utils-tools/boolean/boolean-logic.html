@@ -1,0 +1,816 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-boolean-logic", {
+        category: "uniflex utils",
+        color: "#FFDDCC",
+        // Define the default values for the node configuration
+        defaults: {
+            name: { value: "" },
+            outputTopic: { value: "" },
+            gateType: { value: "and", required: true },
+            outputMode: {
+                value: "",
+                validate: function (v) {
+                    return ["all", "true", "false"].includes(v);
+                }
+            },
+            formatMode: {
+                value: "passthrough",
+                validate: function (v) {
+                    return ["passthrough", "comprehensive"].includes(v);
+                }
+            },
+            rules: { value: [{ topic: "", property: "payload", propertyType: "msg", t: "eq", v: "" }] }
+        },
+        // Define the inputs and outputs of the node
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-question-circle",
+        label: function () {
+            return this.name || this.gateType + " gate";
+        },
+        paletteLabel: function () {
+            return "logic gate";
+        },
+        // Update form fields
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-outputTopic").val(node.outputTopic);
+            $("#node-input-gateType").val(node.gateType);
+            $("#node-input-outputMode").val(node.outputMode);
+            $("#node-input-formatMode").val(node.formatMode);
+
+            // Adding this type for typed input
+            const previousValueType = { value: "prev", label: "previous value", hasValue: false };
+            const operators = [
+                { v: "eq", t: "==" },
+                { v: "neq", t: "!=" },
+                { v: "lt", t: "<" },
+                { v: "lte", t: "<=" },
+                { v: "gt", t: ">" },
+                { v: "gte", t: ">=" },
+                { v: "btwn", t: "is between" },
+                { v: "cont", t: "contains" },
+                { v: "regex", t: "match regex" },
+                { v: "true", t: "is true" },
+                { v: "false", t: "is false" },
+                { v: "null", t: "is null" },
+                { v: "nnull", t: "is not null" }
+            ];
+
+            const andLabel = "and";
+            const caseLabel = "ignore case";
+
+            // Initialize the form fields
+            queryControllerConfig();
+            initializeEditableList();
+            populateList();
+
+            // Define event listeners for form fields
+            $("#mappings-container, #node-input-gateType, #node-input-outputMode").change(function () {
+                updateTipText();
+            });
+
+            $("#node-input-formatMode, #node-input-outputMode").change(function () {
+                checkFields();
+            });
+
+            // Query topics defined in read and write nodes
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            // Initialize the EditableList widget
+            function initializeEditableList() {
+                $("#mappings-container").editableList({
+                    removable: true,
+                    sortable: true,
+                    header: $("<div>").append(
+                        $.parseHTML(`
+                        <div style="width: 22px"></div>
+                        <div class="boolean-logic-list" style="text-align: center; white-space: normal; flex: 1">
+                            <div class="topic-row">Topic</div>
+                            <div class="property-row">Property</div>
+                            <div class="operator-row">Operator</div>
+                            <div class="value-row">Value</div>
+                         </div>
+                         <div style="width: 28px"></div>
+                    `)
+                    ),
+                    buttons: [
+                        {
+                            label: "delete all",
+                            icon: "fa fa-trash",
+                            title: "delete all entries",
+                            click: function (e) {
+                                $("#mappings-container").editableList("empty");
+
+                                updateTipText();
+                            }
+                        }
+                    ],
+                    addItem: function (container, i, row) {
+                        addRowElements(container, row);
+
+                        const elements = getRowElements(container);
+
+                        formatRow(elements, row);
+                        attachRowEvents(elements, row);
+
+                        // Show elements after initialization due to weird width issues
+                        elements.valueDiv.show();
+
+                        updateTipText();
+                    },
+                    removeItem: function (data) {
+                        updateTipText();
+                    }
+                });
+            }
+
+            // Append the row to the container
+            function addRowElements(container, row) {
+                const rowHtml = `
+                    <div class="boolean-logic-list">
+                        <div class="topic-row">
+                            <input class="node-input-rule-topic" type="text" placeholder="Topic">
+                        </div>
+                        <div class="property-row">
+                            <input class="node-input-rule-property" type="text">
+                        </div>
+                        <div class="operator-row">
+                            <select class="node-input-rule-select" style="text-align: center;">
+                                ${Object.keys(operators)
+                        .map((d) => `<option value="${operators[d].v}">${operators[d].t}</option>`)
+                        .join("")}
+                            </select>
+                        </div>
+                        <div class="value-row">
+                            <input class="node-input-rule-value" type="text" placeholder="value">
+                            <div class="value-row-btwn">
+                                <input class="node-input-rule-btwn-value" type="text">
+                                <span class="node-input-rule-btwn-label"> ${andLabel} </span>
+                                <input class="node-input-rule-btwn-value2" type="text">
+                            </div>
+                            <div class="value-row-regex">
+                                <input class="node-input-rule-regex" type="text">
+                                <div class="checkbox-container">
+                                    <input class="node-input-rule-case" type="checkbox">
+                                    <label class="node-input-rule-case-label" for="node-input-rule-case">${caseLabel}</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                container.append(rowHtml);
+            }
+
+            // Format the newly created / intialized row's elements
+            function formatRow(elements, row) {
+                elements.topicField.typedInput({
+                    default: "str",
+                    types: [
+                        {
+                            value: "str",
+                            icon: "red/images/typedInput/az.svg",
+                            autoComplete: function (val) {
+                                const term = val.toLowerCase();
+                                const selection = getTopics();
+
+                                return selection
+                                    .filter((topic) => topic.label.toLowerCase().includes(term) || topic.key.toLowerCase().includes(term))
+                                    .map((topic) => ({
+                                        value: topic.topic,
+                                        label: topic.label
+                                    }));
+                            }
+                        }
+                    ]
+                });
+                elements.propertyField.typedInput({ default: row.propertyType || "msg", types: ["msg", "flow", "global"] });
+                elements.valueField.typedInput({ default: "str", types: ["msg", "flow", "global", "str", "num", previousValueType] });
+                elements.btwnValueField.typedInput({ default: "num", types: ["msg", "flow", "global", "num", previousValueType] });
+                elements.btwnValue2Field.typedInput({ default: "num", types: ["msg", "flow", "global", "num", previousValueType] });
+                elements.regexField.typedInput({ default: "re", types: ["re"] });
+            }
+
+            // Return a list of topics from the controller configuration
+            // Structure: [ { key: "ABC", member: 1, topic: test/1, label: ... } ]
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                return result;
+            }
+
+            // Attach events to the row elements
+            function attachRowEvents(elements = {}, row) {
+                const { topicField, propertyField, valueField, selectField } = elements;
+                const { btwnDiv, btwnValueField, btwnValue2Field, btwnValueLabel } = elements;
+                const { regexDiv, regexField, caseSensitive, caseSensitiveLabel } = elements;
+
+                selectField.on("change", function () {
+                    const selected = selectField.val() || "eq";
+
+                    switch (selected) {
+                        case "btwn": {
+                            valueField.typedInput("hide");
+                            btwnDiv.show();
+                            regexDiv.hide();
+                            break;
+                        }
+                        case "regex": {
+                            valueField.typedInput("hide");
+                            btwnDiv.hide();
+                            regexDiv.show();
+                            break;
+                        }
+                        case "true":
+                        case "false":
+                        case "null":
+                        case "nnull": {
+                            valueField.typedInput("hide");
+                            btwnDiv.hide();
+                            regexDiv.hide();
+                            break;
+                        }
+                        default: {
+                            valueField.typedInput("show");
+                            btwnDiv.hide();
+                            regexDiv.hide();
+                            break;
+                        }
+                    }
+                });
+
+                // Format the topic field based on the property type
+                propertyField.on("change", function (e, type) {
+                    topicField.typedInput("disable", type !== "msg");
+
+                    if (type !== "msg") {
+                        topicField.typedInput("value", "");
+                    }
+                });
+
+                // If t isn't defined, set equal as default value
+                if (!row.hasOwnProperty("t")) row.t = "eq";
+
+                // Save existing values to fields
+                selectField.val(row.t);
+                topicField.typedInput("value", row.topic);
+                propertyField.typedInput("value", row.property || "payload");
+                propertyField.typedInput("type", row.propertyType || "msg");
+
+                if (row.t == "btwn") {
+                    btwnValueField.typedInput("value", row.v);
+                    btwnValueField.typedInput("type", row.vt || "num");
+
+                    btwnValue2Field.typedInput("value", row.v2);
+                    btwnValue2Field.typedInput("type", row.v2t || "num");
+                } else if (typeof row.v != "undefined") {
+                    if (row.t == "regex") {
+                        regexField.typedInput("value", row.v);
+                    } else {
+                        valueField.typedInput("value", row.v);
+                        valueField.typedInput("type", row.vt || "str");
+                    }
+                }
+
+                caseSensitive.prop("checked", row.case ? true : false);
+
+                selectField.change();
+            }
+
+            // Get references to the created elements
+            function getRowElements(container) {
+                return {
+                    topicField: container.find(".node-input-rule-topic"),
+                    propertyField: container.find(".node-input-rule-property"),
+                    valueField: container.find(".node-input-rule-value"),
+                    selectField: container.find(".node-input-rule-select"),
+
+                    propertyDiv: container.find(".property-row"),
+                    operatorDiv: container.find(".opertator-row"),
+                    valueDiv: container.find(".value-row"),
+
+                    btwnDiv: container.find(".value-row-btwn"),
+                    btwnValueField: container.find(".node-input-rule-btwn-value"),
+                    btwnValue2Field: container.find(".node-input-rule-btwn-value2"),
+                    btwnValueLabel: container.find(".node-input-rule-btwn-label"),
+
+                    regexDiv: container.find(".value-row-regex"),
+                    regexField: container.find(".node-input-rule-regex"),
+                    caseSensitive: container.find(".node-input-rule-case"),
+                    caseSensitiveLabel: container.find(".node-input-rule-case-label")
+                };
+            }
+
+            // Populate the form with the node configuration
+            function populateList() {
+                for (let i = 0; i < node.rules.length; i++) {
+                    const rule = node.rules[i];
+                    $("#mappings-container").editableList("addItem", rule);
+                }
+            }
+
+            // Update tip text based on current settings
+            function updateTipText() {
+                const rows = getListElements();
+                const gate = $("#node-input-gateType").val();
+                const mode = $("#node-input-outputMode").val();
+
+                const tipText1 = `Using ${rows.length} rows to evaluate boolean logic.`;
+                const tipText3 =
+                    mode === "all"
+                        ? `The node will always output a message, regardless of the boolean result.`
+                        : `The node will only output a message if the boolean result is true.`;
+
+                let tipText2;
+
+                switch (gate) {
+                    case "and":
+                        tipText2 = "Boolean gate AND: true if all conditions are true.";
+                        break;
+                    case "or":
+                        tipText2 = "Boolean gate OR: true if at least one condition is true.";
+                        break;
+                    case "nand":
+                        tipText2 = "Boolean gate NAND: true if at least one condition is false.";
+                        break;
+                    case "nor":
+                        tipText2 = "Boolean gate NOR: true if all conditions are false.";
+                        break;
+                    case "xor":
+                        tipText2 = "Boolean gate XOR: true if only one condition is true.";
+                        break;
+                    case "xnor":
+                        tipText2 = "Boolean gate XNOR: true if all conditions are the same.";
+                        break;
+                }
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+
+                // Highlight the current gate type in the truth table
+                $(".truth-table th").removeClass("highlighted-gate");
+                if (gate) {
+                    $(".truth-table th").each(function () {
+                        if ($(this).text().toLowerCase() === gate.toLowerCase()) {
+                            $(this).addClass("highlighted-gate");
+                        }
+                    });
+                }
+            }
+
+            // Check the fields, disable or enable them if need be
+            function checkFields() {
+                const mode = $("#node-input-outputMode").val();
+                const format = $("#node-input-formatMode").val();
+
+                if (mode === "all") {
+                    $("#node-input-formatMode").val("comprehensive");
+                    $("#node-input-formatMode").prop("disabled", true);
+                } else {
+                    $("#node-input-formatMode").prop("disabled", false);
+                }
+            }
+
+            // Iterate over each mapping row and store the elements
+            function getListElements() {
+                const result = [];
+
+                $("#mappings-container")
+                    .editableList("items")
+                    .each(function () {
+                        const container = $(this);
+                        const elements = getRowElements(container);
+
+                        result.push(elements);
+                    });
+
+                return result;
+            }
+        },
+        // Save the values from the UI to the node configuration
+        oneditsave: function () {
+            const node = this;
+
+            node.name = $("#node-input-name").val();
+            node.outputTopic = $("#node-input-outputTopic").val();
+            node.gateType = $("#node-input-gateType").val();
+            node.outputMode = $("#node-input-outputMode").val();
+            node.formatMode = $("#node-input-formatMode").val();
+            node.rules = getMappings();
+
+            // Iterate over each mapping row and store the values
+            function getMappings() {
+                const mappings = [];
+
+                $("#mappings-container")
+                    .editableList("items")
+                    .each(function () {
+                        const container = $(this);
+
+                        // Get the selected operator
+                        const type = container.find("select").val();
+
+                        // format rule
+                        const r = { t: type };
+
+                        if (!(type === "true" || type === "false" || type === "null" || type === "nnull")) {
+                            if (type === "btwn") {
+                                r.v = container.find(".node-input-rule-btwn-value").typedInput("value");
+                                r.vt = container.find(".node-input-rule-btwn-value").typedInput("type");
+                                r.v2 = container.find(".node-input-rule-btwn-value2").typedInput("value");
+                                r.v2t = container.find(".node-input-rule-btwn-value2").typedInput("type");
+                            } else {
+                                r.v = container.find(".node-input-rule-value").typedInput("value");
+                                r.vt = container.find(".node-input-rule-value").typedInput("type");
+                            }
+                            if (type === "regex") {
+                                r.v = container.find(".node-input-rule-regex").typedInput("value");
+                                r.case = container.find(".node-input-rule-case").prop("checked");
+                            }
+                        }
+
+                        r.propertyType = container.find(".node-input-rule-property").typedInput("type");
+                        r.property = container.find(".node-input-rule-property").typedInput("value");
+
+                        if (r.propertyType === "msg") {
+                            // if it's a message, store the message topic
+                            r.topic = container.find(".node-input-rule-topic").typedInput("value");
+                        }
+
+                        mappings.push(r);
+                    });
+
+                return mappings;
+            }
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .boolean-logic-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .boolean-logic-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .boolean-logic-div .form-row div,
+    .boolean-logic-div .form-row input,
+    .boolean-logic-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .boolean-logic-div .form-row select {
+        width: 66% !important;
+    }
+
+    .boolean-logic-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    /* Editable list style */
+    .boolean-logic-div .red-ui-editableList-header {
+        background-color: #80808014;
+        font-weight: bold;
+        display: flex;
+    }
+
+    .boolean-logic-div .red-ui-editableList-container {
+        min-height: 50px;
+    }
+
+    .boolean-logic-div .red-ui-editableList {
+        margin-bottom: 10px;
+        min-width: 600px;
+    }
+
+    .boolean-logic-list {
+        overflow: hidden;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+    }
+
+    /* By default, fields fill their respective columns widths */
+    .boolean-logic-list select,
+    .boolean-logic-list .red-ui-typedInput-container {
+        width: 100% !important;
+    }
+
+    .boolean-logic-list select,
+    .boolean-logic-list .red-ui-typedInput-input,
+    .boolean-logic-list .node-input-rule-btwn-label,
+    .boolean-logic-list .red-ui-typedInput-type-label {
+        font-size: 12px !important;
+    }
+
+    .boolean-logic-div .red-ui-autoComplete-container {
+        width: fit-content !important;
+    }
+
+    /* List is split into different columns: topic, arrow, property, operator, value */
+    .boolean-logic-list .topic-row {
+        min-width: 100px;
+        width: 20%;
+    }
+
+    .boolean-logic-list .property-row {
+        min-width: 100px;
+        width: 27%;
+    }
+
+    .boolean-logic-list .operator-row {
+        min-width: 100px;
+        width: 18%;
+    }
+
+    .boolean-logic-list .value-row {
+        min-width: 200px;
+        width: 35%;
+    }
+
+    /* Special style for specific operators */
+    .value-row-btwn .red-ui-typedInput-container {
+        width: 45% !important;
+    }
+
+    /* Special style for specific operators */
+    .value-row-regex {
+        width: 100%;
+        display: inline-flex;
+        margin-bottom: -4px;
+    }
+
+    /* Special style for specific operators */
+    .value-row-regex .red-ui-typedInput-container {
+        width: 70% !important;
+    }
+
+    /* Special style for specific operators */
+    .value-row-regex .node-input-rule-case {
+        min-width: 16px;
+        min-height: 16px;
+    }
+
+    /* Special style for specific operators */
+    .value-row-regex .node-input-rule-case-label {
+        font-size: 10px;
+        line-height: 12px;
+        text-wrap: wrap;
+        color: #666;
+    }
+
+    /* Special style for specific operators */
+    .value-row-regex .checkbox-container {
+        text-align: center;
+        min-width: 35px;
+        width: 30%;
+    }
+
+    /* Truth table styling */
+    .truth-table-container {
+        margin: 15px 0;
+        padding: 8px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        background-color: #f9f9f9;
+    }
+
+    .truth-table-container h4 {
+        margin: 0 0 10px 0;
+        color: #333;
+        font-size: 14px;
+        text-align: center;
+    }
+
+    .truth-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+        font-family: monospace;
+    }
+
+    .truth-table th,
+    .truth-table td {
+        border: 1px solid #ccc;
+        padding: 2px 4px;
+        text-align: center;
+    }
+
+    .truth-table th {
+        background-color: #e6e6e6;
+        font-weight: bold;
+        font-size: 11px;
+    }
+
+    .truth-table td {
+        background-color: white;
+    }
+
+    .truth-table tr:nth-child(even) td {
+        background-color: #f5f5f5;
+    }
+
+    .truth-table th.highlighted-gate {
+        background-color: #4caf50;
+        color: white;
+    }
+</style>
+
+<!-- Form fields are defined in the template below -->
+<script type="text/html" data-template-name="uniflex-boolean-logic">
+    <div class="boolean-logic-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-comment"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="Topic" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-gateType"><i class="fa fa-cog"></i> Boolean gate</label>
+            <select id="node-input-gateType" name="node-input-gateType">
+                <option value="" disabled>Select gate type...</option>
+                <option value="and">AND</option>
+                <option value="or">OR</option>
+                <option value="nand">NAND</option>
+                <option value="nor">NOR</option>
+                <option value="xor">XOR</option>
+                <option value="xnor">XNOR</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputMode"><i class="fa fa-sign-out"></i> Output mode</label>
+            <select id="node-input-outputMode">
+                <option value="" disabled selected>Select output mode...</option>
+                <option value="all">Output data every time</option>
+                <option value="true">Output data only when true</option>
+                <option value="false">Output data only when false</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-formatMode"><i class="fa fa-code"></i> Output format</label>
+            <select id="node-input-formatMode">
+                <option value="" disabled selected>Select output format...</option>
+                <option value="passthrough">Passthrough (output original input message)</option>
+                <option value="comprehensive">Comprehensive (output both input message and boolean result)</option>
+            </select>
+        </div>
+
+        <ol id="mappings-container"></ol>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+
+        <!-- Truth Table -->
+        <div class="truth-table-container">
+            <h4>Truth table</h4>
+            <table class="truth-table">
+                <thead>
+                    <tr>
+                        <th>A</th>
+                        <th>B</th>
+                        <th>AND</th>
+                        <th>OR</th>
+                        <th>NAND</th>
+                        <th>NOR</th>
+                        <th>XOR</th>
+                        <th>XNOR</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>0</td>
+                        <td>0</td>
+                        <td>0</td>
+                        <td>0</td>
+                        <td>1</td>
+                        <td>1</td>
+                        <td>0</td>
+                        <td>1</td>
+                    </tr>
+                    <tr>
+                        <td>0</td>
+                        <td>1</td>
+                        <td>0</td>
+                        <td>1</td>
+                        <td>1</td>
+                        <td>0</td>
+                        <td>1</td>
+                        <td>0</td>
+                    </tr>
+                    <tr>
+                        <td>1</td>
+                        <td>0</td>
+                        <td>0</td>
+                        <td>1</td>
+                        <td>1</td>
+                        <td>0</td>
+                        <td>1</td>
+                        <td>0</td>
+                    </tr>
+                    <tr>
+                        <td>1</td>
+                        <td>1</td>
+                        <td>1</td>
+                        <td>1</td>
+                        <td>0</td>
+                        <td>0</td>
+                        <td>0</td>
+                        <td>1</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <br />
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-boolean-logic">
+    <p>Perform boolean logic operations, according to user-defined rules.</p>
+    <p>Each rule is defined by a topic, a property, an operator, and a value.</p>
+    <p>The node will evaluate the message according to the rules and output a boolean value.</p>
+
+    <h3>Parameters</h3>
+    <dl class="message-properties">
+        <dt class="optional">name <span class="property-type">string</span></dt>
+        <dd>User-friendly name for the node.</dd>
+
+        <dt class="optional">topic <span class="property-type">string</span></dt>
+        <dd>The topic of the output message to distinguish it from other messages.</dd>
+
+        <dt>gateType <span class="property-type">string</span></dt>
+        <dd>The type of logic gate to use. Options include: <code>and</code>, <code>or</code>, <code>nand</code>, <code>nor</code>, <code>xor</code>, and <code>xnor</code>.</dd>
+
+        <dt>outputMode <span class="property-type">string</span></dt>
+        <dd>
+            Defines the output mode of the node. Options include: <code>all</code> (output data every time), <code>true</code> (output data only when true), and
+            <code>false</code> (output data only when false).
+        </dd>
+
+        <dt>formatMode <span class="property-type">string</span></dt>
+        <dd>Defines the output format of the node. Options include: <code>passthrough</code> (keep input message) and <code>result</code> (output the boolean result).</dd>
+
+        <dt>mappings <span class="property-type">object</span></dt>
+        <dd>Each row specifies a boolean logic rule. Add a new rule by clicking on the "add" button below the list.</dd>
+    </dl>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>The topic of the message. Required if parameter is set to 'msg'.</dd>
+
+        <dt>payload <span class="property-type">string | number | object | bool</span></dt>
+        <dd>The property to evaluate as part of the boolean logic. Allow inputs from 'msg', 'flow', and 'global' types.</dd>
+    </dl>
+
+    <p>Below is an example of the input message object.</p>
+
+    <p>
+        <code style="white-space: pre-line;"> { "topic": "my-topic-1", "payload": 1 } </code>
+    </p>
+
+    <h3>Output</h3>
+    <p>In the <code>passthrough</code> format mode, the output message will be exactly the same as the input message.</p>
+    <p>In the <code>result</code> format mode, the output message will only contain the object with the properties seen below:</p>
+
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">boolean</span></dt>
+        <dd><code>true</code> if the logic gate meets all the conditions, <code>false</code> otherwise.</dd>
+
+        <dt class="optional">topic <span class="property-type">string</span></dt>
+        <dd>The output topic, if defined.</dd>
+
+        <dt>trigger <span class="property-type">obj</span></dt>
+        <dd>Includes info about the message that triggered the node, e.g. input message <code>payload</code> or <code>topic</code>.</dd>
+    </dl>
+
+    <h3>Additional details</h3>
+    <p>Any other incoming <code>msg</code> properties will be preserved.</p>
+</script>

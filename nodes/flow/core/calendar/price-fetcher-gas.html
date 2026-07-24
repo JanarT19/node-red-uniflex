@@ -1,0 +1,190 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-price-fetcher-gas", {
+        category: "uniflex calendar",
+        paletteLabel: "price fetcher gas",
+        color: "#c7e9ff",
+        defaults: {
+            name: { value: "" },
+            priceUrl: { value: "", required: true },
+            startParam: { value: "startDateTime" },
+            endParam: { value: "endDateTime" },
+            timeFormat: { value: "offset" },
+            startHour: { value: 0 },
+            startDaysOffset: { value: 0 },
+            endHour: { value: 0 },
+            endDaysOffset: { value: 2 },
+            calendarTitle: { value: "gas.spot" },
+            calendarTopic: { value: "calendar/prices" },
+            enableLogging: { value: true },
+            debugTopics: { value: "" },
+            retryCount: { value: 3 },
+            retryDelayMinutes: { value: 30 }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-line-chart",
+        label: function () {
+            return this.name || "price-fetcher-gas";
+        },
+        oneditprepare: function () {
+            const updateExample = () => {
+                const startParam = $("#node-input-startParam").val() || "startDateTime";
+                const endParam = $("#node-input-endParam").val() || "endDateTime";
+                const timeFormat = $("#node-input-timeFormat").val() || "offset";
+                const startHour = parseInt($("#node-input-startHour").val() || "0", 10);
+                const startDaysOffset = parseInt($("#node-input-startDaysOffset").val() || "0", 10);
+                const endHour = parseInt($("#node-input-endHour").val() || "0", 10);
+                const endDaysOffset = parseInt($("#node-input-endDaysOffset").val() || "2", 10);
+
+                const now = new Date();
+                const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + startDaysOffset, startHour, 0, 0, 0);
+                const endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + endDaysOffset, endHour, 0, 0, 0);
+                const startTs = Math.floor(startDate.getTime() / 1000);
+                const endTs = Math.floor(endDate.getTime() / 1000);
+
+                let startStr, endStr;
+                if (timeFormat === "utc") {
+                    const sd = new Date(startTs * 1000);
+                    const ed = new Date(endTs * 1000);
+                    startStr = sd.toISOString().replace(/\.\d{3}Z$/, ".000Z");
+                    endStr = ed.toISOString().replace(/\.\d{3}Z$/, ".000Z");
+                } else {
+                    const sd = new Date(startTs * 1000);
+                    const ed = new Date(endTs * 1000);
+                    const offset = -sd.getTimezoneOffset();
+                    const offsetHours = Math.floor(Math.abs(offset) / 60);
+                    const offsetMinutes = Math.abs(offset) % 60;
+                    const offsetSign = offset >= 0 ? "+" : "-";
+                    const offsetStr = `${offsetSign}${String(offsetHours).padStart(2, "0")}:${String(offsetMinutes).padStart(2, "0")}`;
+                    const formatDate = (d) => {
+                        const y = d.getFullYear();
+                        const m = String(d.getMonth() + 1).padStart(2, "0");
+                        const day = String(d.getDate()).padStart(2, "0");
+                        const h = String(d.getHours()).padStart(2, "0");
+                        const min = String(d.getMinutes()).padStart(2, "0");
+                        const s = String(d.getSeconds()).padStart(2, "0");
+                        return `${y}-${m}-${day}T${h}:${min}:${s}${offsetStr}`;
+                    };
+                    startStr = formatDate(sd);
+                    endStr = formatDate(ed);
+                }
+
+                const baseUrl = $("#node-input-priceUrl").val() || "https://estfeed.elering.ee/api/public/v1/energy-price/gas";
+                const urlObj = new URL(baseUrl);
+                urlObj.searchParams.set(startParam, startStr);
+                urlObj.searchParams.set(endParam, endStr);
+                const fullUrl = urlObj.toString();
+                $(".price-fetcher-example-full").text(fullUrl);
+            };
+
+            // Update example on load
+            setTimeout(updateExample, 100);
+
+            // Update example when values change
+            $("#node-input-priceUrl, #node-input-startParam, #node-input-endParam, #node-input-timeFormat, #node-input-startHour, #node-input-startDaysOffset, #node-input-endHour, #node-input-endDaysOffset").on("input change", updateExample);
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-price-fetcher-gas">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="price-fetcher-gas" style="max-width: 75%;">
+    </div>
+
+    <h4>Price API</h4>
+    <div class="form-row">
+        <label for="node-input-priceUrl">Base URL</label>
+        <input type="text" id="node-input-priceUrl" placeholder="https://estfeed.elering.ee/api/public/v1/energy-price/gas" style="max-width: 75%;">
+    </div>
+    <div class="form-row">
+        <span class="help-block">Start/end params added automatically</span>
+    </div>
+    <div class="form-row">
+        <label style="width: auto; margin-right: 5px;">Full URL result (at fetching time now):</label>
+        <code class="price-fetcher-example-full" style="display: block; margin-top: 5px; word-break: break-all; background: #f5f5f5; padding: 5px; border-radius: 3px; font-size: 11px;">https://estfeed.elering.ee/api/public/v1/energy-price/gas?startDateTime=2026-01-11T22:00:00+02:00&endDateTime=2026-01-13T22:00:00+02:00</code>
+    </div>
+
+    <h4>Time Window</h4>
+    <div class="form-row">
+        <label for="node-input-startParam" style="width: 110px;">Start param</label>
+        <input type="text" id="node-input-startParam" placeholder="startDateTime" style="width: 120px;">
+        <label for="node-input-endParam" style="width: 90px; margin-left: 5px;">End param</label>
+        <input type="text" id="node-input-endParam" placeholder="endDateTime" style="width: 120px;">
+        <label for="node-input-timeFormat" style="width: 70px; margin-left: 5px;">Format</label>
+        <select id="node-input-timeFormat" style="width: 110px;">
+            <option value="offset" selected>ISO+offset</option>
+            <option value="utc">ISO UTC</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-startHour" style="width: 110px;">Start hour (local)</label>
+        <input type="number" id="node-input-startHour" min="0" max="23" value="0" style="width: 50px;">
+        <label for="node-input-startDaysOffset" style="width: 70px; margin-left: 5px;">Days offset</label>
+        <input type="number" id="node-input-startDaysOffset" value="0" style="width: 50px;">
+        <span class="help-block" style="display: inline-block; margin-left: 5px; font-size: 11px;">0=today, 1=tomorrow, -1=yesterday</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-endHour" style="width: 110px;">End hour (local)</label>
+        <input type="number" id="node-input-endHour" min="0" max="23" value="0" style="width: 50px;">
+        <label for="node-input-endDaysOffset" style="width: 70px; margin-left: 5px;">Days offset</label>
+        <input type="number" id="node-input-endDaysOffset" value="2" style="width: 50px;">
+        <span class="help-block" style="display: inline-block; margin-left: 5px; font-size: 11px;">0=today, 2=day after tomorrow</span>
+    </div>
+    <div class="form-row">
+        <span class="help-block" style="margin-top: 5px;">Can override via msg.payload.startTs/endTs</span>
+    </div>
+
+    <h4>Calendar Integration</h4>
+    <div class="form-row">
+        <label for="node-input-calendarTitle">Calendar title</label>
+        <input type="text" id="node-input-calendarTitle" placeholder="gas.spot" style="max-width: 75%;">
+        <span class="help-block">Title to use for price series in sql-calendar</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-calendarTopic">Calendar topic</label>
+        <input type="text" id="node-input-calendarTopic" placeholder="calendar/prices" style="max-width: 75%;">
+        <span class="help-block">Topic to send delete/create messages to sql-calendar nodes. Wire this node's output to sql-calendar input(s).</span>
+    </div>
+
+    <h4>Retry on Failure</h4>
+    <div class="form-row">
+        <label for="node-input-retryCount" style="width: 110px;">Retry count</label>
+        <input type="number" id="node-input-retryCount" min="0" max="10" value="3" style="width: 60px;">
+        <span class="help-block" style="display: inline-block; margin-left: 10px; font-size: 11px;">Number of retries if fetch fails</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-retryDelayMinutes" style="width: 110px;">Retry delay</label>
+        <input type="number" id="node-input-retryDelayMinutes" min="1" max="1440" value="30" style="width: 60px;">
+        <span class="help-block" style="display: inline-block; margin-left: 10px; font-size: 11px;">Minutes between retries</span>
+    </div>
+
+    <h4>Logging</h4>
+    <div class="form-row">
+        <label for="node-input-enableLogging">Enable logging</label>
+        <input type="checkbox" id="node-input-enableLogging" checked>
+    </div>
+    <div class="form-row">
+        <label for="node-input-debugTopics">Debug topics</label>
+        <input type="text" id="node-input-debugTopics" placeholder="comma-separated" style="max-width: 75%;">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-price-fetcher-gas">
+    <p>Fetches gas spot prices from an external API (including estfeed-style JSON) and writes them to sql-calendar. Interval detected from timestamps (default 1 hour). Window uses configured start/end hour offsets.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Trigger <span class="property-type">any</span></dt>
+        <dd>Any message starts a fetch (inject). Daily is usually enough. Optional <code>payload.startTs</code> / <code>payload.endTs</code> override the time window.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Calendar writes</dt>
+        <dd>sql-calendar <code>delete</code> then <code>create</code> messages for the configured title (wire to sql-calendar). Single output.</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>Retries on failure per node settings. Status shows fetch progress and final point count.</p>
+</script>

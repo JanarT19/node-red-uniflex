@@ -1,0 +1,236 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-controller", {
+        category: "config",
+        // Define the default values for the node configuration
+        defaults: {
+            name: { value: "" },
+            uniqueId: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.trim().length > 0;
+                }
+            },
+            host: {
+                value: "127.0.0.1",
+                validate: function (v) {
+                    return /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(
+                        v
+                    );
+                }
+            },
+            udpPort: {
+                value: 55554,
+                validate: function (v) {
+                    return Number.isInteger(parseInt(v)) && parseInt(v) > 0 && parseInt(v) <= 65535;
+                }
+            },
+            httpPort: {
+                value: 80,
+                validate: function (v) {
+                    return Number.isInteger(parseInt(v)) && parseInt(v) > 0 && parseInt(v) <= 65535;
+                }
+            }
+        },
+        label: function () {
+            const name = this.name;
+            const host = this.host;
+            const uniqueId = this.uniqueId;
+
+            let defaultName = `Controller`;
+            if (name && host) defaultName = `${name} (${host})`;
+            if (!name && host && uniqueId) defaultName = `${uniqueId} (${host})`;
+
+            return defaultName;
+        },
+        // Update form fields
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Populate form with node values
+            $("#node-config-input-name").val(node.name);
+            $("#node-config-input-uniqueId").val(node.uniqueId);
+            $("#node-config-input-host").val(node.host);
+            $("#node-config-input-udpPort").val(node.udpPort);
+            $("#node-config-input-httpPort").val(node.httpPort);
+
+            // Define event listeners for form fields
+            $("#node-config-input-name, #node-config-input-host").on("change", function () {
+                updateTipText();
+            });
+
+            $("#node-config-input-uniqueId").on("input", function () {
+                validateUniqueId();
+            });
+
+            $("#node-config-input-host").on("input", function () {
+                validateHost();
+            });
+
+            // Execute functions on form load
+            queryControllerConfigs();
+            validateUniqueId();
+            validateHost();
+
+            // Get other controller node configurations to show the tip text
+            function queryControllerConfigs() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    // Execute functions after successful query
+                    updateTipText();
+
+                    validateUniqueId();
+                    validateHost();
+                }).fail(function () {
+                    console.error("Failed to get controller configurations!");
+                });
+            }
+
+            // Update tip text based on current settings
+            function updateTipText() {
+                const name = $("#node-config-input-name").val();
+                const host = $("#node-config-input-host").val();
+
+                let tipText1 = ``;
+
+                if (name && host) {
+                    tipText1 = `This node will query configuration from controller: ${name} at ${host}.`;
+                } else {
+                    tipText1 = `This node is used to query controller's configuration parameters to support other nodes.`;
+                }
+
+                const tipText2 = `The unique ID is used to save and retrieve controller data from the global context.`;
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+            }
+
+            // Custom validation functions below
+            function validateUniqueId() {
+                const uniqueId = $("#node-config-input-uniqueId").val() ?? "";
+
+                let valid;
+                valid = isValidUniqueId(uniqueId) && !keyValueAlreadyExists("uniqueId", uniqueId);
+
+                $("#node-config-input-uniqueId").css("border-color", valid ? "" : "red");
+            }
+
+            function validateHost() {
+                const host = $("#node-config-input-host").val() ?? "";
+
+                let valid;
+                valid = isValidHost(host) && !keyValueAlreadyExists("host", host);
+
+                $("#node-config-input-host").css("border-color", valid ? "" : "red");
+            }
+
+            function keyValueAlreadyExists(key, value) {
+                if (!_controllers.controllers) return false;
+
+                return _controllers.controllers.some((controller) => controller[key] === value && controller.id !== node.id);
+            }
+
+            function isValidUniqueId(uniqueId) {
+                return typeof uniqueId === "string" && uniqueId.trim().length > 0;
+            }
+
+            function isValidHost(host) {
+                const ipRegex =
+                    /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+                return ipRegex.test(host);
+            }
+        },
+        // Save the values from the UI to the node configuration
+        oneditsave: function () {
+            const node = this;
+
+            node.name = $("#node-config-input-name").val();
+            node.uniqueId = $("#node-config-input-uniqueId").val();
+            node.host = $("#node-config-input-host").val();
+            node.udpPort = $("#node-config-input-udpPort").val();
+            node.httpPort = $("#node-config-input-httpPort").val();
+
+            // Send the current configuration to the server
+            $.post("uniflex/controller-config", {
+                id: node.id,
+                uniqueId: node.uniqueId,
+                name: node.name,
+                host: node.host,
+                udpPort: node.udpPort,
+                httpPort: node.httpPort
+            });
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .controller-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .controller-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .controller-div .form-row input,
+    .controller-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .controller-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+</style>
+
+<!-- Form fields are defined in the template below -->
+<script type="text/html" data-template-name="uniflex-controller">
+    <div class="controller-div">
+        <div class="form-row">
+            <label for="node-config-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-config-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-config-input-uniqueId"><i class="fa fa-id-badge"></i> Unique ID</label>
+            <input type="text" id="node-config-input-uniqueId" placeholder="Controller ID, e.g. 'local'" />
+        </div>
+        <div class="form-row">
+            <label for="node-config-input-host"><i class="fa fa-laptop"></i> IP-address</label>
+            <input type="text" id="node-config-input-host" placeholder="127.0.0.1" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-config-input-udpPort"><i class="fa fa-plug"></i> UDP port</label>
+            <input type="number" id="node-config-input-udpPort" placeholder="55554" style="width:100px" disabled />
+            &nbsp;&nbsp;
+            <label for="node-config-input-using" style="text-align: right; margin-right: 10px; width: 50px !important;"><i class="fa fa-network-wired"></i> Using</label>
+            <input type="text" id="node-config-input-using" value="ipv4" style="width:80px" disabled />
+        </div>
+        <div class="form-row">
+            <label for="node-config-input-httpPort"><i class="fa fa-plug"></i> HTTP port</label>
+            <input type="number" id="node-config-input-httpPort" value="80" style="width:100px" disabled />
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-controller">
+    <p>
+        This node is used to configure the controller that is connected to the network. Once a configuration is created, it can be used by other nodes to read and parse data from
+        the controller.
+    </p>
+
+    <h3>Details</h3>
+    <p>
+        The configuration includes details such as the controller's host, port, and unique ID. Once configured, other nodes can use this configuration to read and parse data from
+        the controller.
+    </p>
+
+    <p>The unique ID is used to save and retrieve controller data from the global context.</p>
+</script>

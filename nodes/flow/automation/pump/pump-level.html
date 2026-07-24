@@ -1,0 +1,573 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-level-controller", {
+        category: "uniflex water",
+        color: "#87CEEB",
+        icon: "font-awesome/fa-tint",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9_-]+$/.test(v) && v.length <= 50;
+                }
+            },
+            levelActualTopic: { value: "", required: true },
+            levelStartTopic: { value: "", required: true },
+            levelStopTopic: { value: "", required: true },
+            lowFloatTopic: { value: "" },
+            highFloatTopic: { value: "" },
+            phaseCtrlTopic: { value: "" },
+            totalCurrentTopic: { value: "I11W.1" }, // Default: actual current from iolayer
+            maxCurrentTopic: { value: "I11W.2" },   // Default: max current limit from iolayer
+            numPumps: { value: 2, validate: RED.validators.number() },
+            // Numeric port count in defaults (not a function -- that becomes NaN on palette drop).
+            // Updated via node.outputs in defineOutputPorts(), same pattern as read-data-streams.
+            outputs: { value: 2 },
+            // Dynamic pump topics stored as arrays
+            pumpErrorTopics: { value: [] },
+            pumpCmdTopics: { value: [] },
+            enableRotation: { value: true },
+            swapDelaySec: { value: 30, validate: RED.validators.number() },
+            startDelaySec: { value: 2.0, validate: RED.validators.number() },
+            maxPumpTimeSec: { value: 600, validate: RED.validators.number() },
+            levelStartPump2: {
+                value: null,
+                validate: function (v) {
+                    if (v === null || v === undefined || v === "") return true; // Allow empty/null
+                    const num = Number(v);
+                    return !isNaN(num);
+                }
+            },
+            totalCurrentMeasured: { value: true }, // true = total current, false = individual sensors
+            enableSystemLog: { value: false },
+            // Dynamic pump error topics stored as arrays
+            pumpNoRunTopics: { value: [] },
+            pumpOvercurrentTopics: { value: [] }
+        },
+        inputs: 1,
+        outputLabels: function (i) {
+            return `pump ${i + 1} cmd`;
+        },
+        label: function () {
+            return this.name || "level controller";
+        },
+        paletteLabel: "level controller",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Initialize arrays if undefined or convert old comma-separated format to array
+            // IMPORTANT: Preserve existing values from saved config
+            if (!Array.isArray(node.pumpErrorTopics)) {
+                if (typeof node.pumpErrorTopics === 'string' && node.pumpErrorTopics.length > 0) {
+                    node.pumpErrorTopics = node.pumpErrorTopics.split(',').map(t => t.trim()).filter(t => t);
+                } else {
+                    node.pumpErrorTopics = node.pumpErrorTopics || [];
+                }
+            }
+            if (!Array.isArray(node.pumpCmdTopics)) {
+                if (typeof node.pumpCmdTopics === 'string' && node.pumpCmdTopics.length > 0) {
+                    node.pumpCmdTopics = node.pumpCmdTopics.split(',').map(t => t.trim()).filter(t => t);
+                } else {
+                    node.pumpCmdTopics = node.pumpCmdTopics || [];
+                }
+            }
+            if (!Array.isArray(node.pumpNoRunTopics)) {
+                if (typeof node.pumpNoRunTopics === 'string' && node.pumpNoRunTopics.length > 0) {
+                    node.pumpNoRunTopics = node.pumpNoRunTopics.split(',').map(t => t.trim()).filter(t => t);
+                } else {
+                    node.pumpNoRunTopics = node.pumpNoRunTopics || [];
+                }
+            }
+            if (!Array.isArray(node.pumpOvercurrentTopics)) {
+                if (typeof node.pumpOvercurrentTopics === 'string' && node.pumpOvercurrentTopics.length > 0) {
+                    node.pumpOvercurrentTopics = node.pumpOvercurrentTopics.split(',').map(t => t.trim()).filter(t => t);
+                } else {
+                    node.pumpOvercurrentTopics = node.pumpOvercurrentTopics || [];
+                }
+            }
+
+            function defineOutputPorts() {
+                node.outputs = parseInt($("#node-input-numPumps").val(), 10) || 2;
+            }
+
+            // Number of pumps change handler
+            $("#node-input-numPumps").on("change", function () {
+                defineOutputPorts();
+                updatePumpFields();
+                updateOutputInfo();
+            });
+            defineOutputPorts();
+
+            function updatePumpFields() {
+                const numPumps = parseInt($("#node-input-numPumps").val()) || 2;
+
+                // Ensure arrays are properly sized
+                while (node.pumpErrorTopics.length < numPumps) {
+                    node.pumpErrorTopics.push("");
+                }
+                while (node.pumpNoRunTopics.length < numPumps) {
+                    node.pumpNoRunTopics.push("");
+                }
+                while (node.pumpOvercurrentTopics.length < numPumps) {
+                    node.pumpOvercurrentTopics.push("");
+                }
+                while (node.pumpCmdTopics.length < numPumps) {
+                    node.pumpCmdTopics.push("");
+                }
+
+                // Clear existing pump fields
+                $("#pump-fuse-topics-container").empty();
+                $("#pump-norun-topics-container").empty();
+                $("#pump-overcurrent-topics-container").empty();
+                $("#pump-cmd-topics-container").empty();
+
+                // Create individual input fields for each pump
+                for (let i = 0; i < numPumps; i++) {
+                    // Fuse OFF topic field
+                    const fuseRow = $('<div class="form-row"></div>');
+                    fuseRow.append(`<label style="width:33%"><i class="fa fa-exclamation-triangle"></i> Pump ${i + 1} fuse OFF</label>`);
+                    const fuseInput = $(`<input type="text" class="pump-fuse-topic" data-index="${i}" placeholder="e.g., F${i + 1}W" style="max-width:66%">`);
+                    fuseInput.val(node.pumpErrorTopics[i] || "");
+                    fuseRow.append(fuseInput);
+                    $("#pump-fuse-topics-container").append(fuseRow);
+
+                    // NORUN topic field
+                    const norunRow = $('<div class="form-row"></div>');
+                    norunRow.append(`<label style="width:33%"><i class="fa fa-times-circle"></i> Pump ${i + 1} NORUN</label>`);
+                    const norunInput = $(`<input type="text" class="pump-norun-topic" data-index="${i}" placeholder="e.g., P${i + 1}_NORUN" style="max-width:66%">`);
+                    norunInput.val(node.pumpNoRunTopics[i] || "");
+                    norunRow.append(norunInput);
+                    $("#pump-norun-topics-container").append(norunRow);
+
+                    // Overcurrent topic field
+                    const ocRow = $('<div class="form-row"></div>');
+                    ocRow.append(`<label style="width:33%"><i class="fa fa-bolt"></i> Pump ${i + 1} overcurrent</label>`);
+                    const ocInput = $(`<input type="text" class="pump-overcurrent-topic" data-index="${i}" placeholder="e.g., P${i + 1}_OC" style="max-width:66%">`);
+                    ocInput.val(node.pumpOvercurrentTopics[i] || "");
+                    ocRow.append(ocInput);
+                    $("#pump-overcurrent-topics-container").append(ocRow);
+
+                    // Command topic field
+                    const cmdRow = $('<div class="form-row"></div>');
+                    cmdRow.append(`<label style="width:33%"><i class="fa fa-power-off"></i> Pump ${i + 1} cmd</label>`);
+                    const cmdInput = $(`<input type="text" class="pump-cmd-topic" data-index="${i}" placeholder="e.g., pump${i + 1}/cmd" style="max-width:66%">`);
+                    cmdInput.val(node.pumpCmdTopics[i] || "");
+                    cmdRow.append(cmdInput);
+                    $("#pump-cmd-topics-container").append(cmdRow);
+
+                    // Initialize autocomplete for these fields
+                    initializeAutocomplete(fuseInput);
+                    initializeAutocomplete(norunInput);
+                    initializeAutocomplete(ocInput);
+                    initializeAutocomplete(cmdInput);
+                }
+            }
+
+            function updateOutputInfo() {
+                const numPumps = parseInt($("#node-input-numPumps").val()) || 2;
+                let outputText = `Node will have ${numPumps} output(s): `;
+                const labels = [];
+                for (let i = 1; i <= numPumps; i++) {
+                    labels.push(`pump${i}_cmd`);
+                }
+                outputText += labels.join(", ");
+                $("#output-info-text").text(outputText);
+            }
+
+            function updateTipText() {
+                const levelActual = $("#node-input-levelActualTopic").val() || "<not set>";
+                const numPumps = parseInt($("#node-input-numPumps").val()) || 2;
+
+                const tipText = `Level (${levelActual}) controls ${numPumps} pump(s) with hysteresis and safety interlocks.`;
+                $("#node-input-tip-text").text(tipText);
+            }
+
+            $("#node-input-levelActualTopic, #node-input-numPumps").on("input change", updateTipText);
+
+            // Toggle total current fields based on checkbox
+            function updateCurrentFields() {
+                const totalMeasured = $("#node-input-totalCurrentMeasured").is(":checked");
+                if (totalMeasured) {
+                    $("#total-current-row, #max-current-row").show();
+                } else {
+                    $("#total-current-row, #max-current-row").hide();
+                }
+            }
+            $("#node-input-totalCurrentMeasured").on("change", updateCurrentFields);
+            updateCurrentFields(); // Initial state
+
+            queryControllerConfig();
+            updatePumpFields();
+            updateOutputInfo();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-levelActualTopic"));
+                    initializeAutocomplete($("#node-input-levelStartTopic"));
+                    initializeAutocomplete($("#node-input-levelStopTopic"));
+                    initializeAutocomplete($("#node-input-lowFloatTopic"));
+                    initializeAutocomplete($("#node-input-highFloatTopic"));
+                    initializeAutocomplete($("#node-input-phaseCtrlTopic"));
+                    initializeAutocomplete($("#node-input-totalCurrentTopic"));
+                    initializeAutocomplete($("#node-input-maxCurrentTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            // Ensure matches are sorted by topic
+                            matches.sort((a, b) => {
+                                const topicA = (a.topic || a.label || "").toLowerCase();
+                                const topicB = (b.topic || b.label || "").toLowerCase();
+                                return topicA.localeCompare(topicB);
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                // Sort by topic (key) alphabetically
+                return result.sort((a, b) => {
+                    const topicA = (a.topic || a.label || "").toLowerCase();
+                    const topicB = (b.topic || b.label || "").toLowerCase();
+                    return topicA.localeCompare(topicB);
+                });
+            }
+        },
+
+        oneditsave: function () {
+            const node = this;
+
+            // Collect pump fuse OFF topics from individual fields
+            node.pumpErrorTopics = [];
+            $(".pump-fuse-topic").each(function () {
+                node.pumpErrorTopics.push($(this).val() || "");
+            });
+
+            // Collect pump NORUN topics from individual fields
+            node.pumpNoRunTopics = [];
+            $(".pump-norun-topic").each(function () {
+                node.pumpNoRunTopics.push($(this).val() || "");
+            });
+
+            // Collect pump overcurrent topics from individual fields
+            node.pumpOvercurrentTopics = [];
+            $(".pump-overcurrent-topic").each(function () {
+                node.pumpOvercurrentTopics.push($(this).val() || "");
+            });
+
+            // Collect pump command topics from individual fields
+            node.pumpCmdTopics = [];
+            $(".pump-cmd-topic").each(function () {
+                node.pumpCmdTopics.push($(this).val() || "");
+            });
+        }
+    });
+</script>
+
+<style type="text/css">
+    .uniflex-level-controller-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .uniflex-level-controller-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .uniflex-level-controller-div .form-row div,
+    .uniflex-level-controller-div .form-row input,
+    .uniflex-level-controller-div .form-row select,
+    .uniflex-level-controller-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .uniflex-level-controller-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        font-style: italic;
+        color: #555;
+    }
+
+    .uniflex-level-controller-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .uniflex-level-controller-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .uniflex-level-controller-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .uniflex-level-controller-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .uniflex-level-controller-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    .uniflex-level-controller-div input[type="text"] {
+        user-select: text !important;
+        cursor: text !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-level-controller">
+    <div class="uniflex-level-controller-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g., level-ctrl" />
+            <div class="help-text">Unique identifier. Only letters, numbers, underscore, hyphen.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Input Topics</b>
+
+        <div class="form-row">
+            <label for="node-input-levelActualTopic"><i class="fa fa-signal"></i> Level actual</label>
+            <input type="text" id="node-input-levelActualTopic" placeholder="e.g. LVW.1" />
+            <div class="help-text">Actual water level (mm) from iolayer.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-levelStartTopic"><i class="fa fa-arrow-up"></i> Level start</label>
+            <input type="text" id="node-input-levelStartTopic" placeholder="e.g. LVW.3" />
+            <div class="help-text">Start threshold (mm) - pump starts when actual > start.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-levelStopTopic"><i class="fa fa-arrow-down"></i> Level stop</label>
+            <input type="text" id="node-input-levelStopTopic" placeholder="e.g. LVW.2" />
+            <div class="help-text">Stop threshold (mm) - pump stops when actual < stop.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-lowFloatTopic"><i class="fa fa-exclamation-triangle"></i> Low float</label>
+            <input type="text" id="node-input-lowFloatTopic" placeholder="e.g. LES" />
+            <div class="help-text">Optional: 0=OK, 1=triggered (emergency stop).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-highFloatTopic"><i class="fa fa-arrow-up"></i> High float</label>
+            <input type="text" id="node-input-highFloatTopic" placeholder="e.g. LHS" />
+            <div class="help-text">Optional: 0=OK, 1=triggered.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-phaseCtrlTopic"><i class="fa fa-bolt"></i> Phase control</label>
+            <input type="text" id="node-input-phaseCtrlTopic" placeholder="e.g. PWS" />
+            <div class="help-text">Optional: 0=OK, 1=fault (stop all pumps).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-totalCurrentMeasured"><i class="fa fa-check-square-o"></i> Pumps total current measured</label>
+            <input type="checkbox" id="node-input-totalCurrentMeasured" />
+            <div class="help-text">Check if total current of all pumps is measured (single sensor). Uncheck if individual current sensors per pump (or not measured at all).</div>
+        </div>
+
+        <div class="form-row" id="total-current-row">
+            <label for="node-input-totalCurrentTopic"><i class="fa fa-flash"></i> Total current</label>
+            <input type="text" id="node-input-totalCurrentTopic" placeholder="e.g. I11W.1" />
+            <div class="help-text">Optional: total current measurement (A) from iolayer.</div>
+        </div>
+
+        <div class="form-row" id="max-current-row">
+            <label for="node-input-maxCurrentTopic"><i class="fa fa-exclamation-circle"></i> Max current/pump</label>
+            <input type="text" id="node-input-maxCurrentTopic" placeholder="e.g. I11W.2" />
+            <div class="help-text">Optional: maximum allowed current PER PUMP (A) from iolayer.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Pump Configuration</b>
+
+        <div class="form-row">
+            <label for="node-input-numPumps"><i class="fa fa-list-ol"></i> Number of pumps</label>
+            <input type="number" id="node-input-numPumps" min="1" max="10" />
+            <div class="help-text">Number of pumps to control (1-10).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Fuse OFF Topics (from iolayer)</b>
+        <div id="pump-fuse-topics-container"></div>
+        <div class="help-text" style="margin-left: 33%; margin-top: -10px; margin-bottom: 10px;">Input: 0=OK, 1=active problem (pump unusable).</div>
+
+        <div class="form-divider"></div>
+        <b>Pump Error Topics (from pump nodes, for swap logic)</b>
+        <div id="pump-norun-topics-container"></div>
+        <div class="help-text" style="margin-left: 33%; margin-top: -10px; margin-bottom: 10px;">NORUN topics: 0=OK, 1=no feedback after start (optional).</div>
+        <div id="pump-overcurrent-topics-container"></div>
+        <div class="help-text" style="margin-left: 33%; margin-top: -10px; margin-bottom: 10px;">Overcurrent topics: 0=OK, 1=latched overcurrent (optional).</div>
+
+        <div class="form-divider"></div>
+        <b>Pump Command Topics</b>
+        <div id="pump-cmd-topics-container"></div>
+        <div class="help-text" style="margin-left: 33%; margin-top: -10px; margin-bottom: 10px;">Optional: output topics for pump commands (0=stop, 1=start). If configured, commands are sent via topics to iolayer. Otherwise, connect level controller outputs directly to pump nodes.</div>
+
+        <div class="form-divider"></div>
+        <b>Sequencing</b>
+
+        <div class="form-row">
+            <label for="node-input-enableRotation"><i class="fa fa-refresh"></i> Enable rotation</label>
+            <input type="checkbox" id="node-input-enableRotation" />
+            <div class="help-text">Alternate which pump starts first for even wear.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-swapDelaySec"><i class="fa fa-exchange"></i> Swap delay (s)</label>
+            <input type="number" id="node-input-swapDelaySec" step="1" min="1" />
+            <div class="help-text">Delay before swapping pump on NORUN or overcurrent error (seconds).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-startDelaySec"><i class="fa fa-hourglass-start"></i> Start delay (s)</label>
+            <input type="number" id="node-input-startDelaySec" step="0.1" min="0.1" />
+            <div class="help-text">Delay before checking NORUN after pump start command (seconds). Pump needs time to start before feedback is expected.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-maxPumpTimeSec"><i class="fa fa-clock-o"></i> Max pump time (s)</label>
+            <input type="number" id="node-input-maxPumpTimeSec" step="1" min="60" />
+            <div class="help-text">Maximum runtime before automatic pump swap (seconds). Default: 600s (10 minutes). Pump will be swapped to another pump after this time to distribute wear.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-levelStartPump2"><i class="fa fa-tint"></i> Level offset for 2nd pump (m)</label>
+            <input type="number" id="node-input-levelStartPump2" step="0.001" placeholder="leave empty to disable" />
+            <div class="help-text">Level offset added to start level to trigger 2nd pump. Example: if start=0.8m and offset=0.2m, 2nd pump starts at 1.0m. Leave empty to disable 2nd pump auto-start.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Logging</b>
+
+        <div class="form-row">
+            <label for="node-input-enableSystemLog"><i class="fa fa-file-text-o"></i> Enable system log</label>
+            <input type="checkbox" id="node-input-enableSystemLog" />
+            <div class="help-text">Output log messages to system log (configured in settings.js).</div>
+        </div>
+
+        <div class="form-tips" id="output-info-text"></div>
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-level-controller">
+    <h3>Level Controller</h3>
+    <p>Orchestrates multiple pumps based on water level with hysteresis, safety interlocks, and current limiting.</p>
+
+    <h4>Inputs</h4>
+    <ul>
+        <li><b>Level actual</b> -- Current water level (mm) from iolayer.</li>
+        <li><b>Level start</b> -- Start threshold (mm) from iolayer.</li>
+        <li><b>Level stop</b> -- Stop threshold (mm) from iolayer.</li>
+        <li><b>Low float</b> -- 0=OK, 1=triggered (emergency stop all).</li>
+        <li><b>High float</b> -- 0=OK, 1=triggered.</li>
+        <li><b>Phase control</b> -- 0=OK, 1=fault (stop all pumps).</li>
+        <li><b>Total current</b> -- Total current measurement (A).</li>
+        <li><b>Max current/pump</b> -- Maximum allowed current per pump (A).</li>
+        <li><b>Pump fuse OFF</b> -- Fuse OFF/problem inputs: 0=OK, 1=active problem (pump unusable).</li>
+    </ul>
+
+    <h4>Outputs</h4>
+    <p>One output per pump (configured by <b>numPumps</b>):</p>
+    <ul>
+        <li><b>Output 1..N</b> -- Pump commands: 0=stop, 1=start.</li>
+    </ul>
+
+    <h4>Control Logic</h4>
+    <p><b>Start</b> when:</p>
+    <ul>
+        <li>level > start</li>
+        <li>Safety interlocks OK (floats, phase)</li>
+        <li>Selected pump has no fuse OFF</li>
+        <li>Current per pump < maxCurrent (if configured)</li>
+    </ul>
+
+    <p><b>Stop</b> when:</p>
+    <ul>
+        <li>level < stop</li>
+        <li>Safety interlock triggered</li>
+        <li>Current per pump > maxCurrent</li>
+    </ul>
+
+    <h4>Pump Sequencing</h4>
+    <ul>
+        <li><b>Rotation enabled:</b> Alternates which pump starts first for even wear distribution.</li>
+        <li><b>Fuse OFF handling:</b> Skips pumps with active fuse OFF/problem, tries next available pump.</li>
+        <li><b>Minimum off-time:</b> Prevents rapid cycling of pumps.</li>
+    </ul>
+
+    <h4>Status Display</h4>
+    <p>Shows level, active pumps, total current, and warnings.</p>
+    <ul>
+        <li><span style="color:green">●</span> Green: Pumps running</li>
+        <li><span style="color:grey">●</span> Grey: All pumps stopped</li>
+        <li><span style="color:red">●</span> Red: Safety interlock or critical error</li>
+        <li><span style="color:orange">●</span> Orange: Warning condition</li>
+    </ul>
+</script>

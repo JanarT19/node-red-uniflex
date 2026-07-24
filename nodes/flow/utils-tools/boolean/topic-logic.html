@@ -1,0 +1,582 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-topic-logic", {
+        category: "uniflex utils",
+        color: "#FFDDCC",
+        icon: "font-awesome/fa-sitemap",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9_-]+$/.test(v) && v.length <= 50;
+                }
+            },
+            outputTopic: { value: "" },
+            gateType: { value: "or", required: true },
+            outputMode: {
+                value: "all",
+                validate: function (v) {
+                    return ["all", "true", "false"].includes(v);
+                }
+            },
+            formatMode: {
+                value: "passthrough",
+                validate: function (v) {
+                    return ["passthrough", "comprehensive"].includes(v);
+                }
+            },
+            inputTopics: { value: [] },
+            inputComments: { value: [] },
+            enableSystemLog: { value: false },
+            statusColor0: {
+                value: "green",
+                validate: function (v) {
+                    return ["green", "yellow", "red", "blue", "grey"].includes(v);
+                }
+            },
+            statusColor1: {
+                value: "yellow",
+                validate: function (v) {
+                    return ["green", "yellow", "red", "blue", "grey"].includes(v);
+                }
+            }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || (this.gateType + " gate");
+        },
+        paletteLabel: "topic logic",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Initialize arrays if undefined
+            if (!Array.isArray(node.inputTopics)) {
+                if (typeof node.inputTopics === 'string') {
+                    node.inputTopics = node.inputTopics.split(',').map(t => t.trim()).filter(t => t);
+                } else {
+                    node.inputTopics = [];
+                }
+            }
+            if (!Array.isArray(node.inputComments)) {
+                if (typeof node.inputComments === 'string') {
+                    node.inputComments = node.inputComments.split(',').map(c => c.trim());
+                } else {
+                    node.inputComments = [];
+                }
+            }
+
+            // If no inputs exist, create one empty row
+            if (!node.inputTopics || node.inputTopics.length === 0) {
+                node.inputTopics = [""];
+                node.inputComments = [""];
+            }
+
+            // Ensure arrays are same length
+            while (node.inputComments.length < node.inputTopics.length) {
+                node.inputComments.push("");
+            }
+            while (node.inputTopics.length < node.inputComments.length) {
+                node.inputTopics.push("");
+            }
+
+            function updateInputFields() {
+                // Ensure arrays are initialized
+                if (!node.inputTopics) node.inputTopics = [];
+                if (!node.inputComments) node.inputComments = [];
+
+                // Ensure arrays are same length
+                while (node.inputComments.length < node.inputTopics.length) {
+                    node.inputComments.push("");
+                }
+                while (node.inputTopics.length < node.inputComments.length) {
+                    node.inputTopics.push("");
+                }
+
+                // If no inputs exist, create one empty row
+                if (node.inputTopics.length === 0) {
+                    node.inputTopics = [""];
+                    node.inputComments = [""];
+                }
+
+                // Clear existing input fields
+                $("#input-topics-container").empty();
+
+                // Create table header
+                const headerRow = $('<div class="input-table-header"></div>');
+                headerRow.append('<div style="width:5%;"></div>'); // Delete button column
+                headerRow.append('<div style="width:30%;"><b>Comment</b></div>');
+                headerRow.append('<div style="width:65%;"><b>Input Topic</b></div>');
+                $("#input-topics-container").append(headerRow);
+
+                // Create individual input rows for each topic
+                for (let i = 0; i < node.inputTopics.length; i++) {
+                    createInputRow(i);
+                }
+            }
+
+            function syncArraysFromDOM() {
+                // Sync current input field values to arrays before rebuilding UI
+                if (!node.inputTopics) node.inputTopics = [];
+                if (!node.inputComments) node.inputComments = [];
+
+                // Collect current values from DOM
+                const topics = [];
+                const comments = [];
+
+                $(".input-topic").each(function () {
+                    topics.push($(this).val() || "");
+                });
+
+                $(".input-comment").each(function () {
+                    comments.push($(this).val() || "");
+                });
+
+                // Update arrays with current DOM values
+                node.inputTopics = topics;
+                node.inputComments = comments;
+            }
+
+            function createInputRow(index) {
+                const inputRow = $('<div class="input-table-row"></div>');
+
+                // Delete button
+                const deleteBtn = $('<button type="button" class="input-delete-btn" data-index="' + index + '"><i class="fa fa-trash"></i></button>');
+                deleteBtn.on("click", function () {
+                    const idx = $(this).data("index");
+                    // Sync current values first
+                    syncArraysFromDOM();
+                    // Remove from arrays
+                    node.inputTopics.splice(idx, 1);
+                    node.inputComments.splice(idx, 1);
+                    // Rebuild UI
+                    updateInputFields();
+                    updateTipText();
+                });
+                inputRow.append($('<div style="width:5%;">').append(deleteBtn));
+
+                // Comment field
+                const commentDiv = $('<div style="width:30%; padding-right:5px;"></div>');
+                const commentInput = $(`<input type="text" class="input-comment" data-index="${index}" placeholder="e.g., Sensor A" style="width:100%;">`);
+                commentInput.val((node.inputComments && node.inputComments[index]) ? node.inputComments[index] : "");
+                commentDiv.append(commentInput);
+                inputRow.append(commentDiv);
+
+                // Topic field
+                const topicDiv = $('<div style="width:65%;"></div>');
+                const topicInput = $(`<input type="text" class="input-topic" data-index="${index}" placeholder="e.g., S1W" style="width:100%;">`);
+                topicInput.val((node.inputTopics && node.inputTopics[index]) ? node.inputTopics[index] : "");
+                topicDiv.append(topicInput);
+                inputRow.append(topicDiv);
+
+                $("#input-topics-container").append(inputRow);
+
+                // Initialize autocomplete for topic field
+                initializeAutocomplete(topicInput);
+            }
+
+            function addInputRow() {
+                // Sync current input values to arrays first
+                syncArraysFromDOM();
+
+                // Add new empty entry
+                node.inputTopics.push("");
+                node.inputComments.push("");
+
+                // Rebuild UI
+                updateInputFields();
+                updateTipText();
+            }
+
+            function updateTipText() {
+                const numInputs = node.inputTopics ? node.inputTopics.length : 0;
+                const gate = $("#node-input-gateType").val() || "or";
+                const outputTopic = $("#node-input-outputTopic").val() || "<not set>";
+
+                let gateDesc = "";
+                switch (gate) {
+                    case "and": gateDesc = "AND: true if all inputs are true"; break;
+                    case "or": gateDesc = "OR: true if at least one input is true"; break;
+                    case "nand": gateDesc = "NAND: true if at least one input is false"; break;
+                    case "nor": gateDesc = "NOR: true if all inputs are false"; break;
+                    case "xor": gateDesc = "XOR: true if exactly one input is true"; break;
+                    case "xnor": gateDesc = "XNOR: true if all inputs are the same"; break;
+                }
+
+                const tipText = `Using ${numInputs} input(s) with ${gate.toUpperCase()} gate (${gateDesc}) → output topic: ${outputTopic}`;
+                $("#node-input-tip-text").text(tipText);
+            }
+
+            $("#node-input-gateType, #node-input-outputTopic").on("input change", updateTipText);
+
+            // Set default status colors if not set
+            if (!node.statusColor0) node.statusColor0 = "green";
+            if (!node.statusColor1) node.statusColor1 = "yellow";
+
+            // Set selected values for status color dropdowns
+            $("#node-input-statusColor0").val(node.statusColor0 || "green");
+            $("#node-input-statusColor1").val(node.statusColor1 || "yellow");
+
+            queryControllerConfig();
+            updateInputFields();
+            updateTipText();
+
+            // Add input button handler
+            $("#add-input-btn").on("click", function () {
+                addInputRow();
+                updateTipText();
+            });
+
+            // Update tip text when inputs change (after a short delay to allow UI to update)
+            setTimeout(updateTipText, 100);
+
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-outputTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            // Ensure matches are sorted by topic
+                            matches.sort((a, b) => {
+                                const topicA = (a.topic || a.label || "").toLowerCase();
+                                const topicB = (b.topic || b.label || "").toLowerCase();
+                                return topicA.localeCompare(topicB);
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                // Sort by topic (key) alphabetically
+                return result.sort((a, b) => {
+                    const topicA = (a.topic || a.label || "").toLowerCase();
+                    const topicB = (b.topic || b.label || "").toLowerCase();
+                    return topicA.localeCompare(topicB);
+                });
+            }
+        },
+
+        oneditsave: function () {
+            const node = this;
+
+            // Collect input topics and comments from individual fields
+            node.inputTopics = [];
+            node.inputComments = [];
+
+            $(".input-topic").each(function () {
+                node.inputTopics.push($(this).val() || "");
+            });
+
+            $(".input-comment").each(function () {
+                node.inputComments.push($(this).val() || "");
+            });
+        }
+    });
+</script>
+
+<style type="text/css">
+    .uniflex-topic-logic-div .input-table-header {
+        display: flex;
+        padding: 5px 0;
+        border-bottom: 1px solid #ddd;
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+
+    .uniflex-topic-logic-div .input-table-row {
+        display: flex;
+        padding: 5px 0;
+        align-items: center;
+        border-bottom: 1px solid #eee;
+    }
+
+    .uniflex-topic-logic-div .input-table-row:hover {
+        background-color: #f9f9f9;
+    }
+
+    .uniflex-topic-logic-div .input-delete-btn {
+        background: #d32f2f;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        padding: 3px 8px;
+        cursor: pointer;
+        font-size: 12px;
+    }
+
+    .uniflex-topic-logic-div .input-delete-btn:hover {
+        background: #b71c1c;
+    }
+
+    .uniflex-topic-logic-div .input-add-btn {
+        background: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        padding: 8px 15px;
+        cursor: pointer;
+        margin-top: 10px;
+        font-size: 14px;
+    }
+
+    .uniflex-topic-logic-div .input-add-btn:hover {
+        background: #45a049;
+    }
+
+    .uniflex-topic-logic-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .uniflex-topic-logic-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .uniflex-topic-logic-div .form-row div,
+    .uniflex-topic-logic-div .form-row input,
+    .uniflex-topic-logic-div .form-row select,
+    .uniflex-topic-logic-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .uniflex-topic-logic-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        font-style: italic;
+        color: #555;
+    }
+
+    .uniflex-topic-logic-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .uniflex-topic-logic-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .uniflex-topic-logic-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .uniflex-topic-logic-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .uniflex-topic-logic-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    .uniflex-topic-logic-div input[type="text"] {
+        user-select: text !important;
+        cursor: text !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-topic-logic">
+    <div class="uniflex-topic-logic-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g., safety-interlock" />
+            <div class="help-text">Unique identifier. Only letters, numbers, underscore, hyphen.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Configuration</b>
+
+        <div class="form-row">
+            <label for="node-input-gateType"><i class="fa fa-cog"></i> Logic gate</label>
+            <select id="node-input-gateType" name="node-input-gateType">
+                <option value="or">OR</option>
+                <option value="and">AND</option>
+                <option value="nand">NAND</option>
+                <option value="nor">NOR</option>
+                <option value="xor">XOR</option>
+                <option value="xnor">XNOR</option>
+            </select>
+            <div class="help-text">Boolean logic function to apply to inputs.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="e.g., OUT1W" />
+            <div class="help-text">Output topic for logic result (0=false, 1=true).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-outputMode"><i class="fa fa-filter"></i> Output mode</label>
+            <select id="node-input-outputMode">
+                <option value="all">Output data every time</option>
+                <option value="true">Output data only when true</option>
+                <option value="false">Output data only when false</option>
+            </select>
+            <div class="help-text">When to send output messages.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-formatMode"><i class="fa fa-code"></i> Output format</label>
+            <select id="node-input-formatMode">
+                <option value="passthrough">Passthrough (output original input message)</option>
+                <option value="comprehensive">Comprehensive (output with logic result and input details)</option>
+            </select>
+            <div class="help-text">Format of output message.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-statusColor0"><i class="fa fa-circle"></i> Status color (output 0)</label>
+            <select id="node-input-statusColor0">
+                <option value="green">Green</option>
+                <option value="yellow">Yellow</option>
+                <option value="red">Red</option>
+                <option value="blue">Blue</option>
+                <option value="grey">Grey</option>
+            </select>
+            <div class="help-text">Status icon color when output is 0 (false).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-statusColor1"><i class="fa fa-circle"></i> Status color (output 1)</label>
+            <select id="node-input-statusColor1">
+                <option value="green">Green</option>
+                <option value="yellow">Yellow</option>
+                <option value="red">Red</option>
+                <option value="blue">Blue</option>
+                <option value="grey">Grey</option>
+            </select>
+            <div class="help-text">Status icon color when output is 1 (true).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Input Topics</b>
+        <div id="input-topics-container"></div>
+        <button type="button" class="input-add-btn" id="add-input-btn"><i class="fa fa-plus"></i> Add Input</button>
+        <div class="help-text" style="margin-left: 0; margin-top: 10px; margin-bottom: 10px;">For each input: comment (description) and input topic (0=false, 1=true). Click "+" to add more inputs.</div>
+
+        <div class="form-divider"></div>
+        <b>Logging</b>
+
+        <div class="form-row">
+            <label for="node-input-enableSystemLog"><i class="fa fa-file-text-o"></i> Enable system log</label>
+            <input type="checkbox" id="node-input-enableSystemLog" />
+            <div class="help-text">Output log messages to system log (configured in settings.js).</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-topic-logic">
+    <h3>Topic Logic Gate</h3>
+    <p>Perform boolean logic operations on topic-based inputs (0/1) with configurable logic gates.</p>
+
+    <h4>Features</h4>
+    <ul>
+        <li><b>Logic Gates</b>: AND, OR, NAND, NOR, XOR, XNOR</li>
+        <li><b>Autocomplete</b>: Topic selection from datastreams</li>
+        <li><b>Comments</b>: Descriptive labels for each input</li>
+        <li><b>Output Modes</b>: All, true only, false only</li>
+        <li><b>Output Formats</b>: Passthrough or comprehensive</li>
+    </ul>
+
+    <h4>Inputs</h4>
+    <ul>
+        <li><b>Input 1..N</b> -- Input topics: 0=false, 1=true. Each input has a configurable comment/description.</li>
+    </ul>
+
+    <h4>Outputs</h4>
+    <p>Single output:</p>
+    <ul>
+        <li><b>Logic result</b> -- topic = outputTopic, payload = 0/1 (0=false, 1=true)</li>
+        <li><b>Message object</b> -- Format depends on output format mode</li>
+    </ul>
+
+    <h4>Logic Gates</h4>
+    <ul>
+        <li><b>OR</b>: true if at least one input is true</li>
+        <li><b>AND</b>: true if all inputs are true</li>
+        <li><b>NAND</b>: true if at least one input is false</li>
+        <li><b>NOR</b>: true if all inputs are false</li>
+        <li><b>XOR</b>: true if exactly one input is true</li>
+        <li><b>XNOR</b>: true if all inputs are the same</li>
+    </ul>
+
+    <h4>Use Cases</h4>
+    <ul>
+        <li>Safety interlocks: combine multiple safety signals</li>
+        <li>Alarm aggregation: combine multiple alarm sources</li>
+        <li>Status monitoring: combine multiple status signals</li>
+        <li>Control logic: implement complex boolean conditions</li>
+    </ul>
+
+    <h4>Status Display</h4>
+    <p>Shows logic result and active inputs. Status icon colors are configurable:</p>
+    <ul>
+        <li><b>Output 0 (false)</b>: Configurable color (default: green) - shows when logic result is 0</li>
+        <li><b>Output 1 (true)</b>: Configurable color (default: yellow) - shows when logic result is 1</li>
+        <li>Available colors: Green, Yellow, Red, Blue, Grey</li>
+        <li>Status text shows: active inputs count, gate type, result, and active input comments</li>
+    </ul>
+</script>

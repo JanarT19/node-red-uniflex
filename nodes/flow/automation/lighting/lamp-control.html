@@ -1,0 +1,813 @@
+<script type="text/javascript">
+    // Calculate the internal mtype value for compatibility with the node.js code
+    // This function is defined outside the node type so it's accessible everywhere in this script
+    function calculateMtype(inputCondition, outputAction, extend) {
+        let mtype = 0;
+
+        // Input condition bits
+        switch (inputCondition) {
+            case "on-high":
+                mtype |= 1; // UP bit
+                break;
+            case "on-low":
+                mtype |= 2; // DOWN bit
+                break;
+            case "on-up-change":
+                mtype |= 1; // UP bit
+                break;
+            case "on-down-change":
+                mtype |= 2; // DOWN bit
+                break;
+        }
+
+        // Output action bits
+        switch (outputAction) {
+            case "on":
+                mtype |= 4; // ON bit
+                break;
+            case "off":
+                mtype |= 8; // OFF bit
+                break;
+            case "invert":
+                mtype |= 12; // ON + OFF bits
+                break;
+        }
+
+        // For changes (edge detection), set bit 16
+        if (inputCondition === "on-up-change" || inputCondition === "on-down-change" || inputCondition === "on-any-change") {
+            mtype |= 16;
+        }
+
+        // For "on any change", set both UP and DOWN bits
+        if (inputCondition === "on-any-change") {
+            mtype |= 3; // both UP (1) and DOWN (2) bits
+        }
+
+        // Extend bit
+        if (extend) {
+            mtype |= 32;
+        }
+
+        return mtype;
+    }
+
+    RED.nodes.registerType("uniflex-lamp-control", {
+        category: "uniflex home",
+        color: "#fdff75",
+        // Define the default values for the node configuration
+        defaults: {
+            name: { value: "" },
+            outputTopic: { value: "", required: true },
+            timeout: { value: 0, required: true },
+            enableDebug: { value: false },
+            mappings: { value: [] } // Store multiple mappings
+        },
+        // Define the inputs of the node
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-lightbulb-o",
+        label: function () {
+            return this.name || "lamp control";
+        },
+        paletteLabel: function () {
+            return "lamp control";
+        },
+        // Update form fields
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Load existing mappings or initialize an empty array
+            const mappings = node.mappings || [];
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-outputTopic").val(node.outputTopic);
+            $("#node-input-timeout").val(node.timeout || 0);
+
+            $("#mappings-container").change(function () {
+                updateTipText();
+            });
+
+            // Initialize the form fields
+            queryControllerConfig();
+            initializeEditableList();
+
+            // Query topics defined in read and write nodes
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+                    initializeAutocomplete($("#node-input-outputTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            // Initialize the EditableList widget
+            function initializeEditableList() {
+                $("#mappings-container").editableList({
+                    removable: true,
+                    sortable: true,
+                    header: $("<div>").append(
+                        $.parseHTML(`
+                        <div style="width: 22px"></div>
+                        <div class="lamp-control-list" style="text-align: center; white-space: normal; flex: 1">
+                            <div class="node-input-topic">Input topic</div>
+                            <span class="node-input-arrow">&nbsp;&nbsp;</span>
+                            <div class="node-input-input-condition">Input condition</div>
+                            <div class="node-input-action-text"></div>
+                            <div class="node-input-output-action">Output action</div>
+                            <div class="checkbox-container">Extend timeout</div>
+                         </div>
+                         <div style="width: 14px"></div>
+                    `)
+                    ),
+                    addItem: function (container, index, row) {
+                        addRowElements(container, row);
+
+                        const elements = getRowElements(container);
+
+                        // Initialize autocomplete for the topic input in this row
+                        initializeAutocomplete(elements.topicElement, onAutocompleteSelect);
+
+                        validateTopic(elements);
+                        updateExtended(elements);
+                        validateInputConditionAndAction(elements);
+
+                        updateTipText();
+                        attachRowEvents(elements);
+                    },
+                    removeItem: function (data) {
+                        updateTipText();
+                    }
+                });
+
+                $("#mappings-container").editableList("empty");
+                $("#mappings-container").editableList("addItems", mappings);
+            }
+
+            // Initialize autocomplete for topic inputs in the editable list
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            // Don't change the input value on hover/focus
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            // Call the onSelect callback if provided
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            // Return a list of topics from the controller configuration
+            // Structure: [ { key: "ABC", member: 1, topic: test/1, label: ... } ]
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                return result;
+            }
+
+            // Further processing of a row after a topic is selected from the autocomplete
+            function onAutocompleteSelect(element, obj = {}) {
+                const container = element.closest(".red-ui-editableList-item-content");
+                const elements = getRowElements(container);
+
+                validateTopic(elements);
+            }
+
+            // Append the row to the container
+            function addRowElements(container, row) {
+                // Determine input condition value
+                let inputCondition = row.inputCondition || "on-high";
+
+                // Determine output action value
+                let outputAction = row.outputAction || "on";
+
+                const rowHtml = `
+                <div class="lamp-control-list">
+                    <input type="text" class="node-input-topic" placeholder="Topic" value="${row.topic || ""}">
+
+                    <span class="node-input-arrow">&#8594;</span>
+
+                    <select class="node-input-input-condition">
+                        <option value="on-high" ${inputCondition === "on-high" ? "selected" : ""}>On high</option>
+                        <option value="on-up-change" ${inputCondition === "on-up-change" ? "selected" : ""}>On up change</option>
+                        <option value="on-down-change" ${inputCondition === "on-down-change" ? "selected" : ""}>On down change</option>
+                        <option value="on-any-change" ${inputCondition === "on-any-change" ? "selected" : ""}>On any change</option>
+                        <option value="on-low" ${inputCondition === "on-low" ? "selected" : ""}>On low</option>
+                    </select>
+
+                    <span class="node-input-action-text action-text"></span>
+
+                    <select class="node-input-output-action">
+                        <option value="on" ${outputAction === "on" ? "selected" : ""}>ON</option>
+                        <option value="off" ${outputAction === "off" ? "selected" : ""}>OFF</option>
+                        <option value="invert" ${outputAction === "invert" ? "selected" : ""}>inverted</option>
+                    </select>
+
+                    <div class="checkbox-container">
+                        <input type="checkbox" class="node-input-extend" ${row.extend === true ? "checked" : ""}>
+                    </div>
+                </div>`;
+
+                container.append(rowHtml);
+
+                // Update the action text based on initial values
+                updateActionText(container.find(".node-input-input-condition"), container.find(".node-input-action-text"));
+            }
+
+            // Get references to the created elements
+            function getRowElements(container) {
+                return {
+                    topicElement: container.find(".node-input-topic"),
+                    inputConditionElement: container.find(".node-input-input-condition"),
+                    actionTextElement: container.find(".node-input-action-text"),
+                    outputActionElement: container.find(".node-input-output-action"),
+                    extendElement: container.find(".node-input-extend")
+                };
+            }
+
+            // Update the action text based on the input condition
+            function updateActionText(inputConditionElement, actionTextElement) {
+                const inputCondition = inputConditionElement.val();
+                let actionText = "";
+
+                switch (inputCondition) {
+                    case "on-high":
+                        actionText = "keep";
+                        break;
+                    case "on-low":
+                        actionText = "keep";
+                        break;
+                    case "on-up-change":
+                        actionText = "turn";
+                        break;
+                    case "on-down-change":
+                        actionText = "turn";
+                        break;
+                    case "on-any-change":
+                        actionText = "turn";
+                        break;
+                }
+
+                // If the extend checkbox is checked, change "turn" to "extend"
+                if (
+                    (inputCondition === "on-up-change" || inputCondition === "on-down-change" || inputCondition === "on-any-change") &&
+                    inputConditionElement.closest(".lamp-control-list").find(".node-input-extend").is(":checked")
+                ) {
+                    actionText = "extend";
+                }
+
+                actionTextElement.text(actionText);
+            }
+
+            // Attach events to the row elements
+            function attachRowEvents(elements = {}) {
+                elements.topicElement.on("input change", function () {
+                    validateTopic(elements);
+                    updateTipText();
+                });
+
+                elements.inputConditionElement.on("change", function () {
+                    updateActionText(elements.inputConditionElement, elements.actionTextElement);
+                    updateExtended(elements);
+                    validateInputConditionAndAction(elements);
+                    updateTipText();
+                });
+
+                elements.outputActionElement.on("change", function () {
+                    updateExtended(elements);
+                    validateInputConditionAndAction(elements);
+                    updateTipText();
+                });
+
+                elements.extendElement.on("change", function () {
+                    updateActionText(elements.inputConditionElement, elements.actionTextElement);
+                    validateInputConditionAndAction(elements);
+                    updateTipText();
+                });
+            }
+
+            /**
+             * Validates the input condition, output action, and extend settings for a row
+             *
+             * Rules:
+             * 1) invert action can only be used with edge triggers (changes)
+             * 2) only one action (turn ON or OFF) is allowed for level triggers
+             */
+            function validateInputConditionAndAction(elements) {
+                const inputCondition = elements.inputConditionElement.val();
+                const outputAction = elements.outputActionElement.val();
+
+                // 1)
+                if (outputAction === "invert" && ["on-high", "on-low"].includes(inputCondition)) {
+                    elements.inputConditionElement.css("border-color", "red");
+                    elements.outputActionElement.css("border-color", "red");
+                } else {
+                    elements.inputConditionElement.css("border-color", "");
+                    elements.outputActionElement.css("border-color", "");
+                }
+
+                // 2) Only one action (turn ON or OFF) is allowed for level triggers
+                const rows = getListElements();
+                const levelActions = new Set();
+
+                // Find all unique actions for this trigger type across all rows
+                for (const row of rows) {
+                    const rowInputCondition = row.inputConditionElement.val();
+                    const rowOutputAction = row.outputActionElement.val();
+
+                    if (["on-high", "on-low"].includes(rowInputCondition) && ["on", "off"].includes(rowOutputAction)) {
+                        levelActions.add(rowOutputAction);
+                    }
+                }
+
+                // If we have both ON and OFF actions, it's invalid
+                if (levelActions.size > 1) {
+                    for (const row of rows) {
+                        const rowInputCondition = row.inputConditionElement.val();
+                        const rowOutputAction = row.outputActionElement.val();
+
+                        if (["on-high", "on-low"].includes(rowInputCondition) && ["on", "off"].includes(rowOutputAction)) {
+                            row.inputConditionElement.css("border-color", "orange");
+                            row.outputActionElement.css("border-color", "orange");
+                        }
+                    }
+                } else {
+                    for (const row of rows) {
+                        const rowInputCondition = row.inputConditionElement.val();
+                        const rowOutputAction = row.outputActionElement.val();
+
+                        if (["on-high", "on-low"].includes(rowInputCondition) && ["on", "off"].includes(rowOutputAction)) {
+                            row.inputConditionElement.css("border-color", "");
+                            row.outputActionElement.css("border-color", "");
+                        }
+                    }
+                }
+            }
+
+            /**
+             * Validates the topic in a row
+             *
+             * Rules:
+             * 1) cannot be empty
+             * 2) cannot be duplicate
+             */
+            function validateTopic(elements) {
+                const topic = elements.topicElement.val();
+
+                const invalidValues = ["", undefined, null];
+
+                let valid = !invalidValues.includes(topic);
+                elements.topicElement.css("border-color", valid ? "" : "red");
+
+                return valid;
+            }
+
+            // Disable the checkbox if not applicable
+            function updateExtended(elements) {
+                const inputCondition = elements.inputConditionElement.val();
+                const outputAction = elements.outputActionElement.val();
+
+                // Extend is only applicable for change triggers and ON output action
+                if ((inputCondition === "on-up-change" || inputCondition === "on-down-change" || inputCondition === "on-any-change") && outputAction === "on") {
+                    elements.extendElement.prop("disabled", false);
+                } else {
+                    elements.extendElement.prop("disabled", true);
+                    elements.extendElement.prop("checked", false);
+                }
+
+                // Update the action text
+                updateActionText(elements.inputConditionElement, elements.actionTextElement);
+            }
+
+            // Update tip text based on current settings
+            function updateTipText() {
+                const rows = getListElements();
+                const tips = $("#form-tips");
+                tips.empty(); // Clear previous tips
+
+                for (let i = 0; i < rows.length; i++) {
+                    const row = rows[i];
+
+                    const topic = row.topicElement.val();
+                    const inputCondition = row.inputConditionElement.val();
+                    const outputAction = row.outputActionElement.val();
+                    const extend = row.extendElement.is(":checked");
+
+                    // Calculate the internal mtype value for compatibility with the node.js code
+                    const mtype = calculateMtype(inputCondition, outputAction, extend);
+
+                    let tipText = `Input ${i + 1}: `;
+
+                    if (!topic) {
+                        tipText += ` invalid // cfg: ${mtype}`;
+                        tips.append(`<div class="form-tips">${tipText}</div>`);
+                        continue;
+                    }
+
+                    // Build the description based on the configuration
+                    switch (inputCondition) {
+                        case "on-high":
+                            tipText += "when input is HIGH (1), ";
+
+                            switch (outputAction) {
+                                case "on":
+                                    tipText += "keep output ON";
+                                    break;
+                                case "off":
+                                    tipText += "keep output OFF";
+                                    break;
+                                case "invert":
+                                    tipText += "toggle output state";
+                                    break;
+                            }
+                            break;
+
+                        case "on-low":
+                            tipText += "when input is LOW (0), ";
+
+                            switch (outputAction) {
+                                case "on":
+                                    tipText += "keep output ON";
+                                    break;
+                                case "off":
+                                    tipText += "keep output OFF";
+                                    break;
+                                case "invert":
+                                    tipText += "toggle output state";
+                                    break;
+                            }
+                            break;
+
+                        case "on-up-change":
+                            tipText += "when input changes from LOW to HIGH, ";
+
+                            switch (outputAction) {
+                                case "on":
+                                    tipText += extend ? "extend timeout if already ON" : "turn output ON";
+                                    break;
+                                case "off":
+                                    tipText += "turn output OFF";
+                                    break;
+                                case "invert":
+                                    tipText += "toggle output state";
+                                    break;
+                            }
+                            break;
+
+                        case "on-down-change":
+                            tipText += "when input changes from HIGH to LOW, ";
+
+                            switch (outputAction) {
+                                case "on":
+                                    tipText += extend ? "extend timeout if already ON" : "turn output ON";
+                                    break;
+                                case "off":
+                                    tipText += "turn output OFF";
+                                    break;
+                                case "invert":
+                                    tipText += "toggle output state";
+                                    break;
+                            }
+                            break;
+
+                        case "on-any-change":
+                            tipText += "when input changes in any direction, ";
+
+                            switch (outputAction) {
+                                case "on":
+                                    tipText += extend ? "extend timeout if already ON" : "turn output ON";
+                                    break;
+                                case "off":
+                                    tipText += "turn output OFF";
+                                    break;
+                                case "invert":
+                                    tipText += "toggle output state";
+                                    break;
+                            }
+                            break;
+                    }
+
+                    tipText += ` // cfg: ${mtype}`;
+                    tips.append(`<div class="form-tips">${tipText}</div>`);
+                }
+            }
+
+            // Iterate over each mapping row and store the elements
+            function getListElements() {
+                const result = [];
+
+                $("#mappings-container")
+                    .editableList("items")
+                    .each(function () {
+                        const container = $(this);
+                        const elements = getRowElements(container);
+
+                        result.push(elements);
+                    });
+
+                return result;
+            }
+        },
+        oneditsave: function () {
+            const node = this;
+
+            node.name = $("#node-input-name").val();
+            node.outputTopic = $("#node-input-outputTopic").val();
+            node.timeout = parseInt($("#node-input-timeout").val());
+            node.mappings = getMappings();
+
+            // Iterate over each mapping row and store the values
+            function getMappings() {
+                const mappings = [];
+
+                $("#mappings-container")
+                    .editableList("items")
+                    .each(function () {
+                        const container = $(this);
+
+                        const topic = container.find(".node-input-topic").val();
+                        const inputCondition = container.find(".node-input-input-condition").val();
+                        const outputAction = container.find(".node-input-output-action").val();
+                        const extend = container.find(".node-input-extend").is(":checked");
+
+                        // Calculate the internal mtype value for compatibility
+                        const mtype = calculateMtype(inputCondition, outputAction, extend);
+
+                        mappings.push({
+                            topic,
+                            inputCondition,
+                            outputAction,
+                            extend,
+                            mtype
+                        });
+                    });
+
+                return mappings;
+            }
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .lamp-control-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 2px;
+        margin-bottom: 8px;
+    }
+
+    .lamp-control-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .lamp-control-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .lamp-control-div .form-row div,
+    .lamp-control-div .form-row input,
+    .lamp-control-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .lamp-control-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    /* Editable list style */
+    .lamp-control-div .red-ui-editableList-header {
+        background-color: #80808014;
+        font-weight: bold;
+        display: flex;
+    }
+
+    .lamp-control-div .red-ui-editableList-container {
+        min-height: 50px;
+    }
+
+    .lamp-control-div .red-ui-editableList {
+        margin-bottom: 10px;
+        min-width: 450px;
+    }
+
+    /* Editable list elements style */
+    .lamp-control-list {
+        overflow: hidden;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+    }
+
+    .lamp-control-list .checkbox-container {
+        text-align: center;
+        min-width: 50px;
+        width: 10%;
+    }
+
+    .lamp-control-list .node-input-topic {
+        font-size: 12px !important;
+        min-width: 100px;
+        width: 25%;
+    }
+
+    .lamp-control-list .node-input-arrow {
+        font-size: 18px;
+        margin-left: 10px;
+        margin-right: 5px;
+    }
+
+    .lamp-control-list .node-input-input-condition {
+        font-size: 12px;
+        min-width: 120px;
+        width: 30%;
+    }
+
+    .lamp-control-list .node-input-action-text {
+        font-size: 12px;
+        width: 15%;
+        text-align: center;
+        font-style: italic;
+        color: #666;
+    }
+
+    .lamp-control-list .node-input-output-action {
+        font-size: 12px;
+        min-width: 75px;
+        width: 20%;
+    }
+
+    .lamp-control-list .node-input-extend {
+        min-width: 16px;
+        min-height: 16px;
+    }
+
+    /* Autocomplete widget styling */
+    .lamp-control-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .lamp-control-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+        position: relative;
+    }
+
+    .lamp-control-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+</style>
+
+<!-- Form fields for the node -->
+<script type="text/html" data-template-name="uniflex-lamp-control">
+    <div class="lamp-control-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-timeout"><i class="fa fa-clock-o"></i> Timeout (seconds)</label>
+            <input type="number" id="node-input-timeout" min="0" placeholder="0 = no timeout" />
+            <div class="help-text">Automatically turn off after this many seconds (0 = no timeout)</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-enableDebug"><i class="fa fa-bug"></i> Debug</label>
+            <input type="checkbox" id="node-input-enableDebug" style="width:auto;" />
+            <div class="help-text">Log routine input processing (no-change, discarded). Output state changes are always logged.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output Topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="e.g. lamp/1/out" />
+            <div class="help-text">Topic name for output signal</div>
+        </div>
+
+        <!-- Dynamic input channel configs will be inserted here -->
+        <ol id="mappings-container"></ol>
+
+        <div id="form-tips"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-lamp-control">
+    <p>
+        This node controls a lamp or similar device by monitoring multiple input channels and managing the output state based on their values. It can handle up to 4 input channels,
+        each with its own behavior configuration.
+    </p>
+    <p>Often used to control lights, fans, or other devices that can be turned on or off based on multiple inputs.</p>
+
+    <h3>Parameters</h3>
+    <dl class="message-properties">
+        <dt class="optional">name <span class="property-type">string</span></dt>
+        <dd>User-friendly name for the node</dd>
+
+        <dt>timeout <span class="property-type">number</span></dt>
+        <dd>Timeout in seconds after which the output will be turned off automatically. Set to 0 for no timeout.</dd>
+
+        <dt>outputTopic <span class="property-type">string</span></dt>
+        <dd>The topic name for the output signal, e.g. <code>lamp/1/out</code>.</dd>
+
+        <dt>mappings <span class="property-type">array</span></dt>
+        <dd>
+            An array of input channel configurations, each containing:
+            <ul>
+                <li><code>topic</code>: The topic name for the input, e.g. <code>sensor/1</code>.</li>
+                <li>
+                    <code>inputCondition</code>: When the input should trigger an action:
+                    <ul>
+                        <li>On high: Responds while the input is HIGH (1)</li>
+                        <li>On low: Responds while the input is LOW (0)</li>
+                        <li>On up change: Responds when the input changes from LOW to HIGH</li>
+                        <li>On down change: Responds when the input changes from HIGH to LOW</li>
+                        <li>On any change: Responds to any change in the input state</li>
+                    </ul>
+                </li>
+                <li>
+                    <code>outputAction</code>: What happens when the input condition is met:
+                    <ul>
+                        <li>ON: Sets the output to ON state</li>
+                        <li>OFF: Sets the output to OFF state</li>
+                        <li>INVERT: Toggles the output state (ON→OFF or OFF→ON)</li>
+                    </ul>
+                </li>
+                <li>
+                    <code>extend</code>: When enabled, an "On up change" or "On down change" input with "ON" output action will extend the timeout instead of turning ON if the
+                    output is already ON.
+                </li>
+            </ul>
+        </dd>
+    </dl>
+
+    <h3>Output</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>1 when the lamp is ON, 0 when the lamp is OFF.</dd>
+
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>The output topic specified in the node configuration.</dd>
+    </dl>
+
+    <h3>Additional details</h3>
+    <p>The node processes inputs in two ways:</p>
+    <ul>
+        <li>
+            <strong>Level triggering</strong> ("On high" and "On low"): These inputs take control of the output while the condition is met. When multiple level-trigger inputs are
+            active, the first one takes precedence.
+        </li>
+        <li><strong>Edge triggering</strong> ("On up change" and "On down change"): These inputs respond to changes in the input state and don't maintain control.</li>
+    </ul>
+    <p>The timeout feature automatically turns off the output after the specified number of seconds. Level-trigger inputs override the timeout when active.</p>
+    <p>The "extend" option resets the timeout when an edge-trigger input is activated while the output is already ON, instead of just turning it ON again.</p>
+</script>

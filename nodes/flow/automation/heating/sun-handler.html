@@ -1,0 +1,74 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-sun-handler", {
+        category: "uniflex home",
+        color: "#FDE68A",
+        icon: "font-awesome/fa-sun-o",
+        defaults: {
+            name: { value: "" },
+            calendarHost: { value: "localhost" },
+            calendarPort: { value: 80, validate: RED.validators.number() },
+            cloudsTitle: { value: "clouds_all" },
+            solarGainTitle: { value: "solar_irradiance" },
+            irradianceOutTopic: { value: "" },
+            latitude: { value: 58.9, validate: RED.validators.number() },
+            longitude: { value: 25.6, validate: RED.validators.number() },
+            cloudGamma: { value: 1.4, validate: RED.validators.number() },
+            clearSkyPeakKwM2: { value: 1.0, validate: RED.validators.number() },
+            fetchOnStartup: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "sun-handler";
+        },
+        paletteLabel: "sun handler"
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-sun-handler">
+    <div class="form-row"><label>Name</label><input type="text" id="node-input-name" /></div>
+
+    <h4>Calendar</h4>
+    <div class="form-row"><label>Host</label><input type="text" id="node-input-calendarHost" /></div>
+    <div class="form-row"><label>Port</label><input type="number" id="node-input-calendarPort" /></div>
+    <div class="form-row"><label>Clouds title</label><input type="text" id="node-input-cloudsTitle" placeholder="clouds_all" /></div>
+    <div class="form-row"><label>Output title</label><input type="text" id="node-input-solarGainTitle" placeholder="solar_irradiance" /></div>
+    <div class="form-tips">Reads cloud forecast, computes solar irradiance (kW/m²), writes to calendar. 5-day horizon.</div>
+
+    <h4>Real-time output</h4>
+    <div class="form-row"><label>Irradiance topic</label><input type="text" id="node-input-irradianceOutTopic" placeholder="e.g. solar/irradiance" /></div>
+    <div class="form-tips">Publishes current irradiance (kW/m²) on each trigger. Rooms can subscribe for real-time input.</div>
+
+    <h4>Location and model</h4>
+    <div class="form-row"><label>Latitude</label><input type="number" step="0.0001" id="node-input-latitude" /></div>
+    <div class="form-row"><label>Longitude</label><input type="number" step="0.0001" id="node-input-longitude" /></div>
+    <div class="form-row"><label>Cloud gamma</label><input type="number" step="0.1" id="node-input-cloudGamma" /></div>
+    <div class="form-tips">Cloud attenuation: (1 − cloud%)^γ. Higher γ = stronger attenuation.</div>
+    <div class="form-row"><label>Clear sky peak (kW/m²)</label><input type="number" step="0.01" id="node-input-clearSkyPeakKwM2" /></div>
+    <div class="form-tips">Peak irradiance at zenith on a clear day. ~1.0 kW/m² at sea level.</div>
+
+    <h4>Timing</h4>
+    <div class="form-row"><label>Fetch on startup</label><input type="checkbox" id="node-input-fetchOnStartup" style="width:auto;" /></div>
+    <div class="form-tips">Any input message triggers refresh (cronplus twice/day recommended).</div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-sun-handler">
+    <p>Computes solar irradiance forecast (kW/m²) from sun position and cloud-cover calendar data, then writes the series to sql-calendar.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Trigger <span class="property-type">any</span></dt>
+        <dd>Any inbound message (except loopback <code>_fromSunHandler</code>) runs fetch/compute/write. Optional fetch-on-startup.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Calendar writes</dt>
+        <dd><code>mode: "delete"</code> then <code>mode: "create"</code> points for the solar title (wire to sql-calendar).</dd>
+        <dt>Current irradiance <span class="property-type">number</span></dt>
+        <dd>Optional topic with current kW/m² for real-time consumers.</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>GHI ≈ clearSkyPeak × sin(elevation) × (1 − cloud%)^γ; zero when elevation ≤ 0. <b>mpc-room-advanced</b> applies per-room window area/azimuth/coeff to this irradiance for solar gain.</p>
+</script>

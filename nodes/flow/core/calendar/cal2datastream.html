@@ -1,0 +1,327 @@
+<script type="text/javascript">
+    console.log("*** uniflex-cal2datastream UI loaded: VERSION 1.0.0 ***");
+
+    RED.nodes.registerType("uniflex-cal2datastream", {
+        category: "uniflex calendar",
+        color: "#E8D4CF",
+        icon: "font-awesome/fa-exchange",
+        defaults: {
+            name: { value: "" },
+
+            // Calendar API
+            calendarHost: { value: "localhost" },
+            calendarPort: { value: 80, validate: RED.validators.number() },
+
+            // Output datastream
+            outTopic: { value: "" },
+            valueMode: { value: "raw" },
+
+            // Mappings: array of {title, member, description}
+            mappings: { value: [] }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "cal2datastream";
+        },
+        paletteLabel: "cal2datastream",
+
+        oneditprepare: function () {
+            const node = this;
+
+            // Fetch controller config for autocomplete
+            $.getJSON("uniflex/controller-config", function (data) {
+                const _controllers = data || {};
+
+                // Get base topics (without member suffix) for write datastreams
+                function getBaseTopics() {
+                    const baseTopics = new Set();
+                    const controllers = _controllers.controllers || [];
+                    controllers.forEach(function (c) {
+                        if (c.writableServices) {
+                            Object.keys(c.writableServices).forEach(function (key) {
+                                baseTopics.add(key);
+                            });
+                        }
+                    });
+                    return Array.from(baseTopics).sort().map(function (t) {
+                        return { label: t, value: t };
+                    });
+                }
+
+                // Initialize autocomplete for output topic
+                function initializeBaseTopicAutocomplete(element) {
+                    const topics = getBaseTopics();
+                    element.autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const matches = topics.filter(function (item) {
+                                return item.label.toLowerCase().indexOf(term) >= 0;
+                            });
+                            response(matches);
+                        },
+                        select: function (event, ui) {
+                            element.val(ui.item.value);
+                            return false;
+                        }
+                    }).on("focus", function () {
+                        element.autocomplete("search", "");
+                    });
+                }
+
+                initializeBaseTopicAutocomplete($("#node-input-outTopic"));
+            }).fail(function (err) {
+                console.warn("[cal2datastream] Failed to fetch controller config for autocomplete:", err);
+            });
+
+            // Fetch calendar titles for autocomplete
+            let calendarTitles = [];
+            const calendarHost = node.calendarHost || "localhost";
+            const calendarPort = node.calendarPort || 80;
+            $.getJSON(`http://${calendarHost}:${calendarPort}/calendar/titles`, function (titles) {
+                calendarTitles = (titles || []).map(function (t) {
+                    return { label: t, value: t };
+                });
+                console.log("[cal2datastream] Loaded " + calendarTitles.length + " calendar titles for autocomplete");
+            }).fail(function (err) {
+                console.warn("[cal2datastream] Failed to fetch calendar titles:", err);
+            });
+
+            // Initialize autocomplete for calendar title field
+            function initializeTitleAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const matches = calendarTitles.filter(function (item) {
+                            return item.label.toLowerCase().indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    select: function (event, ui) {
+                        element.val(ui.item.value);
+                        element.trigger("change");
+                        return false;
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", "");
+                });
+            }
+
+            // Ensure mappings is always an array (flow may have saved it as string or wrong type)
+            function ensureMappingsArray() {
+                if (Array.isArray(node.mappings)) return;
+                if (typeof node.mappings === "string") {
+                    try {
+                        node.mappings = JSON.parse(node.mappings) || [];
+                    } catch (e) {
+                        node.mappings = [];
+                    }
+                } else {
+                    node.mappings = [];
+                }
+            }
+
+            // Build mappings editor
+            function renderMappings() {
+                ensureMappingsArray();
+                const container = $("#node-input-mappings-container");
+                container.empty();
+
+                node.mappings.forEach((mapping, index) => {
+                    const row = $(`
+                        <div class="mapping-row" data-index="${index}">
+                            <input type="number" class="mapping-member" value="${mapping.member || (index + 1)}" min="1" max="20" style="width: 40px;" title="Member number (.1, .2, etc.)" />
+                            <input type="text" class="mapping-title" value="${mapping.title || ""}" placeholder="e.g. elering" style="width: 140px;" title="Calendar series title" />
+                            <input type="text" class="mapping-desc" value="${mapping.description || ""}" placeholder="e.g. ElSpot" style="width: 120px;" title="Description (documentation only)" />
+                            <button type="button" class="red-ui-button red-ui-button-small mapping-remove" title="Remove"><i class="fa fa-times"></i></button>
+                        </div>
+                    `);
+                    container.append(row);
+
+                    // Initialize autocomplete on the title field
+                    initializeTitleAutocomplete(row.find(".mapping-title"));
+                });
+
+                // Add button
+                const addBtn = $(`
+                    <div class="mapping-add-row">
+                        <button type="button" class="red-ui-button red-ui-button-small" id="mapping-add-btn">
+                            <i class="fa fa-plus"></i> Add mapping
+                        </button>
+                    </div>
+                `);
+                container.append(addBtn);
+
+                // Update on change and mark form dirty so Deploy is required
+                function onMappingChange() {
+                    const row = $(this).closest(".mapping-row");
+                    const idx = row.data("index");
+                    if (node.mappings[idx] == null) return;
+                    node.mappings[idx] = {
+                        member: parseInt(row.find(".mapping-member").val()) || 1,
+                        title: row.find(".mapping-title").val(),
+                        description: row.find(".mapping-desc").val()
+                    };
+                    $("#node-input-mappings").val(JSON.stringify(node.mappings));
+                }
+                container.on("change input", ".mapping-member, .mapping-title, .mapping-desc", onMappingChange);
+            }
+
+            // Bind add/remove after container exists (use delegated handlers on container)
+            $("#node-input-mappings-container").on("click", ".mapping-remove", function () {
+                const idx = $(this).closest(".mapping-row").data("index");
+                node.mappings.splice(idx, 1);
+                renderMappings();
+                $("#node-input-mappings").val(JSON.stringify(node.mappings));
+            });
+            $("#node-input-mappings-container").on("click", "#mapping-add-btn", function () {
+                const nextMember = node.mappings.length + 1;
+                node.mappings.push({ member: nextMember, title: "", description: "" });
+                renderMappings();
+                $("#node-input-mappings").val(JSON.stringify(node.mappings));
+            });
+
+            // Initialize
+            ensureMappingsArray();
+            renderMappings();
+            $("#node-input-mappings").val(JSON.stringify(node.mappings));
+        },
+
+        oneditsave: function () {
+            // Collect mappings from UI
+            const mappings = [];
+            $(".mapping-row").each(function () {
+                const member = parseInt($(this).find(".mapping-member").val()) || 1;
+                const title = $(this).find(".mapping-title").val().trim();
+                const desc = $(this).find(".mapping-desc").val().trim();
+                if (title) {
+                    mappings.push({ member, title, description: desc });
+                }
+            });
+            this.mappings = mappings;
+        }
+    });
+</script>
+
+<style type="text/css">
+    .cal2ds-section {
+        margin-bottom: 15px;
+    }
+
+    .cal2ds-section h4 {
+        margin-bottom: 8px;
+        border-bottom: 1px solid #ddd;
+        padding-bottom: 4px;
+    }
+
+    .mapping-row {
+        display: flex;
+        gap: 5px;
+        align-items: center;
+        margin-bottom: 5px;
+    }
+
+    .mapping-row input {
+        padding: 4px 6px;
+    }
+
+    .mapping-add-row {
+        margin-top: 8px;
+    }
+
+    .cal2ds-tip {
+        font-size: 11px;
+        color: #666;
+        margin-top: 5px;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-cal2datastream">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name" />
+    </div>
+
+    <hr />
+    <div class="cal2ds-section">
+        <h4>Calendar Source</h4>
+        <div class="form-row">
+            <label for="node-input-calendarHost"><i class="fa fa-server"></i> Host</label>
+            <input type="text" id="node-input-calendarHost" placeholder="localhost" style="width: 150px;" />
+            <label for="node-input-calendarPort" style="width: 50px; margin-left: 15px;">Port</label>
+            <input type="number" id="node-input-calendarPort" placeholder="80" style="width: 70px;" />
+        </div>
+    </div>
+
+    <hr />
+    <div class="cal2ds-section">
+        <h4>Output Datastream</h4>
+        <div class="form-row">
+            <label for="node-input-outTopic"><i class="fa fa-database"></i> Topic</label>
+            <input type="text" id="node-input-outTopic" placeholder="e.g. PRENW" style="width: 180px;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-valueMode"><i class="fa fa-filter"></i> Value mode</label>
+            <select id="node-input-valueMode" style="width: 180px;">
+                <option value="raw">Raw numeric</option>
+                <option value="binary">Binary (0/1)</option>
+            </select>
+        </div>
+        <div class="cal2ds-tip">Base topic for iolayer datastream. Members appended as .1, .2, etc. Use inject or clock-ticker to trigger.</div>
+        <div class="cal2ds-tip"><strong>Binary mode:</strong> converts all fetched values in this node to <code>0</code> or <code>1</code>. Any non-zero numeric value becomes <code>1</code>; zero, missing, or invalid values become <code>0</code>.</div>
+    </div>
+
+    <hr />
+    <div class="cal2ds-section">
+        <h4>Mappings (Calendar → Datastream)</h4>
+        <div class="cal2ds-tip" style="margin-bottom: 8px;">
+            <strong>#</strong> = member number, <strong>Title</strong> = calendar series, <strong>Desc</strong> = documentation
+        </div>
+        <input type="hidden" id="node-input-mappings" />
+        <div id="node-input-mappings-container">
+            <!-- Dynamic content -->
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-cal2datastream">
+    <p>Reads values from calendar time-series and publishes to iolayer datastream.</p>
+
+    <h3>Purpose</h3>
+    <p>Bridge between calendar (time-series database) and iolayer (real-time datastreams).
+    Useful for making historical calendar data available in RRD/Nagios monitoring.</p>
+
+    <h3>Configuration</h3>
+    <dl>
+        <dt>Calendar Host/Port</dt>
+        <dd>HTTP endpoint for calendar API (usually localhost:80)</dd>
+
+        <dt>Topic</dt>
+        <dd>Base iolayer datastream topic (e.g., "PRENW"). Members are appended as .1, .2, etc.</dd>
+
+        <dt>Value mode</dt>
+        <dd><strong>Raw numeric</strong>: publish calendar value as-is. <strong>Binary (0/1)</strong>: publish <code>1</code> when value is non-zero, otherwise <code>0</code> (also for missing/invalid).</dd>
+
+        <dt>Mappings</dt>
+        <dd>List of calendar title → datastream member mappings with descriptions</dd>
+    </dl>
+
+    <h3>Example: Energy Prices</h3>
+    <table>
+        <tr><th>Member</th><th>Calendar Title</th><th>Description</th></tr>
+        <tr><td>.1</td><td>elering</td><td>ElSpot</td></tr>
+        <tr><td>.2</td><td>gasprice</td><td>GasSpot</td></tr>
+        <tr><td>.3</td><td>heat_prc_ele</td><td>ElHeatFinal</td></tr>
+        <tr><td>.4</td><td>heat_prc_gas</td><td>GasHeatFinal</td></tr>
+        <tr><td>.5</td><td>ele_tax</td><td>ElAdded</td></tr>
+        <tr><td>.6</td><td>gas_tax</td><td>GasAdded</td></tr>
+    </table>
+
+    <h3>Input</h3>
+    <p>Any message triggers fetch and publish. Use inject node (with repeat) or clock-ticker for periodic updates.</p>
+
+    <h3>Output</h3>
+    <p>Messages with <code>topic</code> = base topic + member (e.g., "PRENW.1") and <code>payload</code> = current value.</p>
+</script>

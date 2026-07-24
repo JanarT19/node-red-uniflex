@@ -1,0 +1,169 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-heating-config", {
+        category: "config",
+        color: "#CFE8FF",
+        defaults: {
+            name: { value: "default", required: true },
+
+            // Feedforward settings
+            ffEnable: { value: true },
+            ffHorizon1: { value: 6, validate: RED.validators.number() },
+            ffHorizon2: { value: 12, validate: RED.validators.number() },
+            ffGainTout: { value: 0.25, validate: RED.validators.number() },
+            ffGainWind: { value: 0.02, validate: RED.validators.number() },
+            ffTbalance: { value: 15, validate: RED.validators.number() },
+
+            // Iolayer topic prefixes
+            ffToutTopicPrefix: { value: "FCTW" },
+            ffWindTopicPrefix: { value: "FCWW" },
+
+            // FF param learning window
+            learningWindowStart: { value: 2, validate: RED.validators.number() },
+            learningWindowEnd: { value: 4, validate: RED.validators.number() },
+
+            // Balance temperature
+            Tbalance: { value: 15.0, validate: RED.validators.number() }
+        },
+        label: function () {
+            return this.name || "heating config";
+        },
+        paletteLabel: "heating config",
+
+        oneditprepare: function () {
+            // Known iolayer forecast datastreams (write topics)
+            const forecastDatastreams = [
+                { label: "FCTW - ForecaTemp (temperature)", value: "FCTW" },
+                { label: "FCWW - ForecaWind (wind speed)", value: "FCWW" },
+                { label: "FCCW - ForecaClouds (cloudiness)", value: "FCCW" }
+            ];
+
+            function initForecastAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const matches = forecastDatastreams.filter(function (item) {
+                            return item.label.toLowerCase().indexOf(term) >= 0 ||
+                                item.value.toLowerCase().indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    select: function (event, ui) {
+                        element.val(ui.item.value);
+                        return false;
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", "");
+                });
+            }
+
+            initForecastAutocomplete($("#node-config-input-ffToutTopicPrefix"));
+            initForecastAutocomplete($("#node-config-input-ffWindTopicPrefix"));
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-heating-config">
+    <div class="form-row">
+        <label for="node-config-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-config-input-name" placeholder="e.g., default, large-windows, south-facing" />
+    </div>
+
+    <hr />
+    <h4>Weather Feedforward</h4>
+
+    <div class="form-row">
+        <label for="node-config-input-ffEnable"><i class="fa fa-magic"></i> Enable</label>
+        <input type="checkbox" id="node-config-input-ffEnable" style="width: auto;" />
+    </div>
+    <div class="form-row">
+        <label for="node-config-input-ffHorizon1"><i class="fa fa-clock-o"></i> Horizon 1 (h)</label>
+        <input type="number" id="node-config-input-ffHorizon1" min="1" max="24" />
+        <span class="help-text" style="margin-left: 5px; color: #666;">Short-term (default 6h)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-config-input-ffHorizon2"><i class="fa fa-clock-o"></i> Horizon 2 (h)</label>
+        <input type="number" id="node-config-input-ffHorizon2" min="1" max="48" />
+        <span class="help-text" style="margin-left: 5px; color: #666;">Medium-term for trend (default 12h)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-config-input-ffGainTout"><i class="fa fa-thermometer-half"></i> Gain Tout</label>
+        <input type="number" id="node-config-input-ffGainTout" step="0.01" />
+        <span class="help-text" style="margin-left: 5px; color: #666;">°C per °C outdoor drop (default 0.25)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-config-input-ffGainWind"><i class="fa fa-flag"></i> Gain Wind</label>
+        <input type="number" id="node-config-input-ffGainWind" step="0.01" />
+        <span class="help-text" style="margin-left: 5px; color: #666;">°C per m/s wind (default 0.02)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-config-input-ffTbalance"><i class="fa fa-balance-scale"></i> T balance</label>
+        <input type="number" id="node-config-input-ffTbalance" step="0.5" />
+        <span class="help-text" style="margin-left: 5px; color: #666;">No-heating outdoor temp (default 15°C)</span>
+    </div>
+
+    <hr />
+    <h4>Iolayer Topics (from forecast-publisher)</h4>
+
+    <div class="form-row">
+        <label for="node-config-input-ffToutTopicPrefix"><i class="fa fa-thermometer-half"></i> Temp topic</label>
+        <input type="text" id="node-config-input-ffToutTopicPrefix" placeholder="FCTW" />
+        <span class="help-text" style="margin-left: 5px; color: #666;">FCTW.1 (3h), .2 (6h), .3 (12h), .4 (24h)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-config-input-ffWindTopicPrefix"><i class="fa fa-flag"></i> Wind topic</label>
+        <input type="text" id="node-config-input-ffWindTopicPrefix" placeholder="FCWW" />
+        <span class="help-text" style="margin-left: 5px; color: #666;">FCWW.1 (3h), .2 (6h), .3 (12h), .4 (24h)</span>
+    </div>
+
+    <hr />
+    <h4>FF Param Learning Window</h4>
+    <div class="form-row">
+        <label for="node-config-input-learningWindowStart"><i class="fa fa-clock-o"></i> Window start (h)</label>
+        <input type="number" id="node-config-input-learningWindowStart" min="-1" max="23" step="1" style="width:60px"
+               title="Start of the time window (local hour 0-23) during which updated FF params from ff_learning_daily.py (nagios server cron) are accepted from the iolayer. Outside this window, incoming FT*/FG* values are ignored to prevent iolayer restarts from overwriting good learned params with zeros." />
+        <span class="help-text" style="margin-left: 5px; color: #666;">Local hour (0-23). -1 = disabled</span>
+    </div>
+    <div class="form-row">
+        <label for="node-config-input-learningWindowEnd"><i class="fa fa-clock-o"></i> Window end (h)</label>
+        <input type="number" id="node-config-input-learningWindowEnd" min="-1" max="23" step="1" style="width:60px"
+               title="End of the time window (local hour 0-23) during which updated FF params from ff_learning_daily.py (nagios server cron) are accepted from the iolayer. Set window around the cron run time -- default 02:00-04:00. The 72h thermal lag is internal to the learning script and does not affect this window." />
+        <span class="help-text" style="margin-left: 5px; color: #666;">Local hour (0-23). Default 02:00-04:00 covers nightly ff_learning cron</span>
+    </div>
+
+    <hr />
+    <h4>Balance Temperature</h4>
+    <div class="form-row">
+        <label for="node-config-input-Tbalance"><i class="fa fa-thermometer-half"></i> Tbalance (°C)</label>
+        <input type="number" id="node-config-input-Tbalance" min="-10" max="25" step="0.5" style="width:70px" />
+        <span class="help-text" style="margin-left: 5px; color: #666;">Outdoor temp at which internal gains offset all heat losses (no heating needed). Typical: 12-17°C. Used by mpc-room-advanced to subtract internal gains from demand.</span>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-heating-config">
+    <h3>Heating Config</h3>
+    <p>Shared feedforward configuration for floor loops. Create one or more configs to avoid duplicating settings across many floor loops.</p>
+
+    <h4>Typical Setup</h4>
+    <ul>
+        <li><b>default</b> – Standard settings for most rooms</li>
+        <li><b>large-windows</b> – Higher gains for rooms with large glass areas</li>
+        <li><b>south-facing</b> – Lower gains for rooms with significant solar gains</li>
+    </ul>
+
+    <h4>Weather Feedforward</h4>
+    <p>Settings for anticipatory setpoint adjustment based on weather forecast:</p>
+    <ul>
+        <li><b>Horizon 1/2</b> – Dual-horizon logic: if both agree on trend direction, full gain; if reversal, 50% gain</li>
+        <li><b>Gain Tout</b> – Setpoint increase per °C outdoor temperature drop</li>
+        <li><b>Gain Wind</b> – Setpoint increase per m/s wind speed increase</li>
+        <li><b>T balance</b> – Outdoor temperature at which no heating is needed</li>
+    </ul>
+
+    <h4>Iolayer Topics</h4>
+    <p>Floor loops receive forecast data from <code>forecast-publisher</code> node via iolayer:</p>
+    <ul>
+        <li><b>FCTW</b>.1 (3h), .2 (6h), .3 (12h), .4 (24h) – temperature forecast</li>
+        <li><b>FCWW</b>.1, .2, .3, .4 – wind speed forecast</li>
+    </ul>
+</script>

@@ -1,0 +1,184 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-query-external-connections", {
+        category: "uniflex",
+        color: "#b7dfff",
+        defaults: {
+            name: { value: "" },
+            controller: { value: "", type: "uniflex-controller", required: true },
+            interval: {
+                value: 30,
+                validate: function (v) {
+                    return v >= 5 && v <= 7200;
+                }
+            }
+        },
+        inputs: 0,
+        outputs: 3,
+        icon: "node-red/status.svg",
+        label: function () {
+            let defaultName = `query connection status`;
+
+            return this.name || defaultName;
+        },
+        paletteLabel: function () {
+            return "query connection status";
+        },
+        outputLabels: function (index) {
+            switch (index) {
+                case 0:
+                    return "sdp: monitoring service portal status";
+                case 1:
+                    return "mqtt: uniflex portal status";
+                case 2:
+                    return "vpn: monitoring service vpn status";
+                default:
+                    return null;
+            }
+        },
+        oneditprepare: function () {
+            const node = this;
+            let _controller = {};
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-controller").val(node.controller);
+            $("#node-input-interval").val(node.interval);
+
+            // Define event listeners for form fields
+            $("#node-input-controller").change(function () {
+                queryControllerConfig();
+            });
+
+            $("#node-input-interval").change(function () {
+                updateTipText();
+            });
+
+            // Get the controller node configuration to populate fields and update helper text
+            function queryControllerConfig() {
+                const nodeId = $("#node-input-controller").val();
+
+                $.getJSON(`uniflex/controller-config?id=${nodeId}`, function (data) {
+                    _controller = data;
+
+                    updateTipText();
+                }).fail(function () {
+                    console.error("Failed to get controller configuration!");
+
+                    updateTipText();
+                });
+            }
+
+            // Update tip text based on current settings
+            function updateTipText() {
+                const tipText1 = `Detecting changes in controller (${_controller.uniqueId || "???"})'s external connections.`;
+                const tipText2 = `Status will be queried every ${$("#node-input-interval").val()} seconds.`;
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+            }
+        },
+        oneditsave: function () {
+            const node = this;
+
+            node.name = $("#node-input-name").val();
+            node.controller = $("#node-input-controller").val();
+            node.interval = $("#node-input-interval").val();
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .query-external-connections-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .query-external-connections-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .query-external-connections-div .form-row div,
+    .query-external-connections-div .form-row input,
+    .query-external-connections-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .query-external-connections-div .form-row select {
+        width: 66% !important;
+    }
+
+    .query-external-connections-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .query-external-connections-list .node-input-topic {
+        font-size: 12px !important;
+        min-width: 100px;
+        width: 15%;
+    }
+</style>
+
+<!-- Form fields for the Data Stream Router node -->
+<script type="text/html" data-template-name="uniflex-query-external-connections">
+    <div class="query-external-connections-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-controller"><i class="fa fa-search"></i> Controller</label>
+            <select id="node-input-controller">
+                <option value="" disabled selected>Select controller...</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-interval"><i class="fa fa-clock-o"></i> Query interval (s)</label>
+            <input type="number" id="node-input-interval" />
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+
+        <br />
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-query-external-connections">
+    <p>
+        Query the status of controller's external connections.
+        The node will output the current status of the controller's external connections.
+    </p>
+    <p>Often used to send and alert or switch to offline logic.</p>
+
+    <h3>Parameters</h3>
+    <dl class="message-properties">
+        <dt class="optional">name <span class="property-type">string</span></dt>
+        <dd>User-friendly name for the node</dd>
+
+        <dt>controller <span class="property-type">controller</span></dt>
+        <dd>The source of the data streams on the local network. Localhost (127.0.0.1) for most cases.</dd>
+
+        <dt>interval <span class="property-type">int</span></dt>
+        <dd>Specifies the interval in seconds at which the status of the controller's external connections will be queried. Default is 30 seconds.</dd>
+        </dd>
+    </dl>
+
+    <h3>Output</h3>
+    <dl class="message-properties">
+        <dt>controller <span class="property-type">object</span></dt>
+        <dd>Each output <code>msg</code> includes info about the source of the data, e.g. <code>uniqueId</code>, <code>host</code>, <code>protocol</code>.</dd>
+
+        <dt>topic <span class="property-type">stingr</span></dt>
+        <dd>The topic of the connection: <code>sdp</code>, <code>mqtt</code> or <code>vpn</code>.</dd>
+
+        <dt>payload <span class="property-type">boolean</span></dt>
+        <dd><code>true</code> if the controller is connected to the external resource, <code>false</code> if disconnected, and <code>null</code> in case of unknown problems.</dd>
+    </dl>
+
+    <h3>Additional details</h3>
+    <p>This node gets its data by querying the controller's internal status.</p>
+    <p>It is recommended to use this node in combination with the <code>switch</code> node to filter the output based on the connection status.</p>
+</script>

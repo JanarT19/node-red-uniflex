@@ -1,0 +1,289 @@
+<script type="text/html" data-template-name="uniflex-mpc-floor-advanced">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="e.g. 2k_M3" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-setpointTopic"><i class="fa fa-thermometer-half"></i> Floor setpoint (in)</label>
+        <input type="text" id="node-input-setpointTopic" placeholder="e.g. from mpc-room" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-returnTopic"><i class="fa fa-thermometer-half"></i> Floor return / actual (in)</label>
+        <input type="text" id="node-input-returnTopic" placeholder="return temp sensor" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-supplyTempTopic"><i class="fa fa-thermometer-full"></i> Supply temp (in)</label>
+        <input type="text" id="node-input-supplyTempTopic" placeholder="collector/manifold supply temp" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Onflow temperature from collector. Used for Q_delivery = K_room × (Tsupply − Treturn). If empty, fallback ΔT is used.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomTickTopic"><i class="fa fa-clock-o"></i> Room tick (in)</label>
+        <input type="text" id="node-input-roomTickTopic" placeholder="e.g. heating/roomName/tick" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-valveCmdTopic"><i class="fa fa-toggle-on"></i> Valve command (out)</label>
+        <input type="text" id="node-input-valveCmdTopic" placeholder="DO topic 0/1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomSetpointTopic"><i class="fa fa-bullseye"></i> Room setpoint (in, optional)</label>
+        <input type="text" id="node-input-roomSetpointTopic" placeholder="Tset room" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomActualTopic"><i class="fa fa-thermometer-half"></i> Room actual (in)</label>
+        <input type="text" id="node-input-roomActualTopic" placeholder="Ti for floor-room loss calc" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-forceOpenTopic">Force open topic (room)</label>
+        <input type="text" id="node-input-forceOpenTopic" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Output gate: valve forced open regardless of model.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-supervisorForceOpenTopic">Force open topic (test/individual)</label>
+        <input type="text" id="node-input-supervisorForceOpenTopic" placeholder="e.g. CFO3W.1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-forceCloseTopic">Force close topic</label>
+        <input type="text" id="node-input-forceCloseTopic" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-measurementNotifyTopic">Measurement notify topic</label>
+        <input type="text" id="node-input-measurementNotifyTopic" placeholder="e.g. CME2W.3" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-verboseLoggingTopic">Verbose logging topic</label>
+        <input type="text" id="node-input-verboseLoggingTopic" placeholder="payload 1=ON 0=OFF" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-verboseLogging">Verbose logging</label>
+        <input type="checkbox" id="node-input-verboseLogging" style="width:auto;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolingModeTopic">Cooling mode topic</label>
+        <input type="text" id="node-input-coolingModeTopic" placeholder="heating/mode/cooling" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-dewPointTopic">Dew point topic</label>
+        <input type="text" id="node-input-dewPointTopic" placeholder="optional" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-dewPointFixed">Dew point fixed (°C)</label>
+        <input type="number" id="node-input-dewPointFixed" step="0.5" placeholder="e.g. 15" style="width:80px;" />
+    </div>
+    <hr />
+    <h4 style="margin:8px 0 4px;">Thermal model</h4>
+    <div class="form-row">
+        <label for="node-input-K_room">K_room (kW/K)</label>
+        <input type="number" id="node-input-K_room" step="0.001" style="width:100px;" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Loop heat transfer coeff. Q_delivery = K × (Tsupply − Treturn).</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-Cf">Cf (kWh/°C)</label>
+        <input type="number" id="node-input-Cf" step="0.01" style="width:100px;" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Floor slab thermal capacitance. Rule of thumb: ~0.01 × floor m².</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-Uf">Uf (kW/°C)</label>
+        <input type="number" id="node-input-Uf" step="0.001" style="width:100px;" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Floor-to-air thermal conductance.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-supplyDtFallback">Supply ΔT fallback (°C)</label>
+        <input type="number" id="node-input-supplyDtFallback" step="1" style="width:80px;" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Assumed supply−return ΔT when no supply temp topic configured.</span>
+    </div>
+    <div class="form-row" style="margin-top:4px;">
+        <span style="font-size:11px; color:#666;">Per tick: E_gap = Cf × (Tf_set − Tf_ret), E_loss = Uf × (Tf − Troom) × dt, open_sec = (E_gap + E_loss) / (K × ΔT_supply) × 3600.</span>
+    </div>
+    <hr />
+    <h4 style="margin:8px 0 4px;">Adaptive K_room</h4>
+    <div class="form-row">
+        <label for="node-input-enableAdaptiveK">Enable adaptive K</label>
+        <input type="checkbox" id="node-input-enableAdaptiveK" style="width:auto;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-etaK">η (learning rate)</label>
+        <input type="number" id="node-input-etaK" step="0.01" min="0" max="1" style="width:80px;" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Blend: K = K×(1−η) + K_meas×η. Higher = faster adaptation, more noise.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-K_room_min">K min</label>
+        <input type="number" id="node-input-K_room_min" step="0.001" style="width:80px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-K_room_max">K max</label>
+        <input type="number" id="node-input-K_room_max" step="0.01" style="width:80px;" />
+    </div>
+    <hr />
+    <h4 style="margin:8px 0 4px;">Valve control</h4>
+    <div class="form-row">
+        <label for="node-input-minOpenSec">Min open (s)</label>
+        <input type="number" id="node-input-minOpenSec" min="0" style="width:80px;" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Below this: carryover to next tick.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-maxTicksWithoutOutput">Max ticks without output</label>
+        <input type="number" id="node-input-maxTicksWithoutOutput" min="0" style="width:60px;" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Gate open for averager after this many carry-only ticks.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-valveType">Valve type</label>
+        <select id="node-input-valveType" style="width:100px;">
+            <option value="NC">NC</option>
+            <option value="NO">NO</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-dewMarginC">Dew margin (°C)</label>
+        <input type="number" id="node-input-dewMarginC" step="0.1" style="width:80px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomSatisfiedMarginC">Room satisfied margin (°C)</label>
+        <input type="number" id="node-input-roomSatisfiedMarginC" step="0.1" style="width:80px;" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Safety cut: if Ti > Tset + margin, close valve immediately (logged as warning). Heating only.</span>
+    </div>
+</script>
+
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-mpc-floor-advanced", {
+        category: "uniflex home",
+        color: "#A8D8A8",
+        icon: "font-awesome/fa-thermometer-half",
+        defaults: {
+            name: { value: "" },
+            setpointTopic: { value: "" },
+            returnTopic: { value: "" },
+            supplyTempTopic: { value: "" },
+            roomTickTopic: { value: "" },
+            valveCmdTopic: { value: "" },
+            roomSetpointTopic: { value: "" },
+            roomActualTopic: { value: "" },
+            forceOpenTopic: { value: "" },
+            supervisorForceOpenTopic: { value: "" },
+            forceCloseTopic: { value: "" },
+            measurementNotifyTopic: { value: "" },
+            verboseLoggingTopic: { value: "" },
+            verboseLogging: { value: false },
+            coolingModeTopic: { value: "heating/mode/cooling" },
+            dewPointTopic: { value: "" },
+            dewPointFixed: { value: "" },
+            K_room: { value: 0.04, validate: RED.validators.number() },
+            Cf: { value: 0.15, validate: RED.validators.number() },
+            Uf: { value: 0.02, validate: RED.validators.number() },
+            supplyDtFallback: { value: 10, validate: RED.validators.number() },
+            enableAdaptiveK: { value: false },
+            etaK: { value: 0.1, validate: RED.validators.number() },
+            K_room_min: { value: 0.005, validate: RED.validators.number() },
+            K_room_max: { value: 0.5, validate: RED.validators.number() },
+            minOpenSec: { value: 180, validate: RED.validators.number() },
+            maxTicksWithoutOutput: { value: 2, validate: RED.validators.number() },
+            valveType: { value: "NC" },
+            dewMarginC: { value: 1.0, validate: RED.validators.number() },
+            roomSatisfiedMarginC: { value: 0.3, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "mpc floor adv";
+        },
+        paletteLabel: "mpc floor adv",
+
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (let i = 0; i < controllers.length; i++) {
+                    result.push.apply(result, controllers[i].formattedTopics || []);
+                }
+                return result;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const selection = getTopics();
+                        const matches = selection ? selection.filter(function (obj) {
+                            return (obj.label || "").toLowerCase().indexOf(term) > -1;
+                        }) : [];
+                        response(matches);
+                    },
+                    focus: function (event, ui) { event.preventDefault(); },
+                    select: function (event, ui) {
+                        event.preventDefault();
+                        element.val(ui.item.topic || ui.item.value);
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", element.val() || "");
+                });
+                element.autocomplete("instance")._renderItem = function (ul, item) {
+                    const term = (this.term || "").trim();
+                    const label = item.label || item.value || "";
+                    let hl = label;
+                    if (term) {
+                        const rx = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                        hl = label.replace(rx, "<strong style=\"color:#e65; font-weight:bold\">$1</strong>");
+                    }
+                    return $("<li></li>").data("ui-autocomplete-item", item).append("<div>" + hl + "</div>").appendTo(ul);
+                };
+            }
+            $.getJSON("uniflex/controller-config").done(function (data) {
+                _controllers = data;
+                initializeAutocomplete($("#node-input-setpointTopic"));
+                initializeAutocomplete($("#node-input-returnTopic"));
+                initializeAutocomplete($("#node-input-supplyTempTopic"));
+                initializeAutocomplete($("#node-input-roomTickTopic"));
+                initializeAutocomplete($("#node-input-valveCmdTopic"));
+                initializeAutocomplete($("#node-input-roomSetpointTopic"));
+                initializeAutocomplete($("#node-input-roomActualTopic"));
+                initializeAutocomplete($("#node-input-forceOpenTopic"));
+                initializeAutocomplete($("#node-input-supervisorForceOpenTopic"));
+                initializeAutocomplete($("#node-input-forceCloseTopic"));
+                initializeAutocomplete($("#node-input-measurementNotifyTopic"));
+                initializeAutocomplete($("#node-input-verboseLoggingTopic"));
+                initializeAutocomplete($("#node-input-coolingModeTopic"));
+                initializeAutocomplete($("#node-input-dewPointTopic"));
+            }).fail(function () {
+                _controllers = {};
+            });
+        }
+    });
+</script>
+
+<script type="text/html" data-help-name="uniflex-mpc-floor-advanced">
+    <p>Model-based floor valve controller. Per tick it estimates energy needed to close the floor temperature gap (plus floor→room loss) and converts that to valve open seconds using supply–return ΔT and K_room.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Room tick <span class="property-type">object</span></dt>
+        <dd>On tick topic. Arms a cycle; period from elapsed ticks or <code>payload.periodSec</code> (default 300). Computation runs when the next floor setpoint arrives.</dd>
+        <dt>Floor setpoint / return <span class="property-type">number °C</span></dt>
+        <dd>Required for normal MPC. Setpoint after tick triggers <code>computeAndAct</code>.</dd>
+        <dt>Supply temp <span class="property-type">number °C</span></dt>
+        <dd>Optional. Used as <code>Q_delivery = K_room × (Tsupply − Treturn)</code>. If missing, uses configured fallback ΔT (sign flips in cooling).</dd>
+        <dt>Room setpoint / actual <span class="property-type">number °C</span></dt>
+        <dd>Room actual used for floor–room loss and satisfaction cut. Room SP+actual also drive emergency heating when room is far below SP.</dd>
+        <dt>Cooling mode / dew point <span class="property-type">0/1 | number °C</span></dt>
+        <dd>Optional. Cooling dew guard closes the valve when floor SP is below dew + margin.</dd>
+        <dt>Force open / force close <span class="property-type">0/1</span></dt>
+        <dd>Output gates only; model state continues to update.</dd>
+        <dt>Verbose logging topic <span class="property-type">0/1</span></dt>
+        <dd>Optional runtime toggle for debug logging.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Valve command <span class="property-type">0/1</span></dt>
+        <dd>On valve command topic (NC/NO mapped). Also updated by force gates and emergency open/close.</dd>
+        <dt>Measurement notify <span class="property-type">0/1</span></dt>
+        <dd>Optional. 1 on gate min-open, 0 when that open ends.</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>
+        Energy model: <code>E_gap = Cf × (Tf_set − Tf_ret)</code>, <code>E_loss = Uf × (Tf_ret − Troom) × dt</code>,
+        <code>open_sec = (E_gap + E_loss) / Q_delivery × 3600</code>. Carryover / min-open and max-ticks-without-output match the basic mpc-floor gate behaviour.
+        Optional adaptive K_room learns from open intervals. Room satisfaction closes early when Ti &gt; Tset + margin.
+        Emergency paths force open when floor SP is missing and room error &gt; 2 °C (cold-start), or when valve is closed and room error &gt; 2.5 °C (exits when error &lt; 2 °C).
+    </p>
+</script>

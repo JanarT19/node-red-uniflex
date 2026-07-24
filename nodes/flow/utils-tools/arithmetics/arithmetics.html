@@ -1,0 +1,348 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-arithmetics", {
+        category: "uniflex utils",
+        color: "#FFDDCC",
+        icon: "font-awesome/fa-calculator",
+        defaults: {
+            name: { value: "" },
+            outputTopic: { value: "" },
+            inputsList: { value: [] },  // Array of {topic, operator} - renamed from "inputs" to avoid conflict
+            inputTimeout: { value: 300 },  // Seconds before input is considered stale
+            outputInt: { value: false },
+            enableSystemLog: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "arithmetics";
+        },
+        paletteLabel: "arithmetics",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+            const MAX_INPUTS = 16;
+
+            // Query controller config for autocomplete
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data;
+                initializeAutocomplete($("#node-input-outputTopic"));
+            }).fail(function () {
+                console.error("Failed to get controller config");
+                _controllers = {};
+            });
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                controllers.forEach(c => {
+                    if (c.formattedTopics) result.push(...c.formattedTopics);
+                });
+                return result;
+            }
+
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const topics = getTopics();
+                        const matches = topics.filter(t => {
+                            const l = (t.label || "").toLowerCase();
+                            return l.indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function (event, ui) {
+                        event.preventDefault();
+                    },
+                    select: function (event, ui) {
+                        event.preventDefault();
+                        element.val(ui.item.topic || ui.item.label);
+                        updateTipText();
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", element.val() || "");
+                });
+            }
+
+            function updateTipText() {
+                const items = $("#inputs-container").editableList("items");
+                const count = items.length;
+                const outTopic = $("#node-input-outputTopic").val() || "<same as last input>";
+                const timeout = $("#node-input-inputTimeout").val() || 300;
+                const useInt = $("#node-input-outputInt").prop("checked");
+
+                let tip = `${count} input(s) → ${outTopic} (timeout: ${timeout}s)`;
+                if (useInt) tip += " [int]";
+                $("#node-input-tip-text").text(tip);
+            }
+
+            // Update first row to show "Op" label instead of dropdown
+            function updateFirstRowOperator() {
+                const items = $("#inputs-container").editableList("items");
+                items.each(function (idx) {
+                    const opContainer = $(this).find(".op-container");
+                    if (idx === 0) {
+                        // First row: show label
+                        opContainer.html('<span class="op-label" style="display:inline-block; width:70px; text-align:center; color:#666; font-weight:bold;">Op</span>');
+                    } else {
+                        // Other rows: ensure dropdown exists
+                        if (opContainer.find("select").length === 0) {
+                            const savedOp = opContainer.data("operator") || "+";
+                            opContainer.html($(`
+                                <select class="input-operator" style="width:70px;">
+                                    <option value="+" ${savedOp === "+" ? "selected" : ""}>+</option>
+                                    <option value="-" ${savedOp === "-" ? "selected" : ""}>−</option>
+                                    <option value="*" ${savedOp === "*" ? "selected" : ""}>×</option>
+                                    <option value="/" ${savedOp === "/" ? "selected" : ""}>÷</option>
+                                </select>
+                            `));
+                            opContainer.find("select").on("change", updateTipText);
+                        }
+                    }
+                });
+            }
+
+            // Initialize editable list
+            $("#inputs-container").editableList({
+                removable: true,
+                sortable: true,
+                addButton: "Add input",
+                addItem: function (container, index, row) {
+                    const topic = row.topic || "";
+                    const operator = row.operator || "+";
+
+                    const rowDiv = $('<div style="display:flex; gap:10px; align-items:center;"></div>');
+
+                    // Operator container - will be updated by updateFirstRowOperator
+                    const opContainer = $('<div class="op-container" style="width:70px;"></div>');
+                    opContainer.data("operator", operator);
+
+                    // Initially add dropdown (will be replaced with label for first row)
+                    opContainer.html($(`
+                        <select class="input-operator" style="width:70px;">
+                            <option value="+" ${operator === "+" ? "selected" : ""}>+</option>
+                            <option value="-" ${operator === "-" ? "selected" : ""}>−</option>
+                            <option value="*" ${operator === "*" ? "selected" : ""}>×</option>
+                            <option value="/" ${operator === "/" ? "selected" : ""}>÷</option>
+                        </select>
+                    `));
+                    rowDiv.append(opContainer);
+
+                    // Topic input
+                    const topicInput = $(`<input type="text" class="input-topic" style="flex:1;" placeholder="Topic" value="${topic}">`);
+                    rowDiv.append(topicInput);
+
+                    container.append(rowDiv);
+
+                    // Initialize autocomplete on topic input
+                    initializeAutocomplete(topicInput);
+
+                    // Update tip on change
+                    opContainer.find("select").on("change", updateTipText);
+                    topicInput.on("input change", updateTipText);
+
+                    // Update first row display after a short delay
+                    setTimeout(updateFirstRowOperator, 10);
+                },
+                removeItem: function () {
+                    setTimeout(function () {
+                        updateFirstRowOperator();
+                        updateTipText();
+                    }, 50);
+                },
+                sortItems: function () {
+                    setTimeout(function () {
+                        updateFirstRowOperator();
+                        updateTipText();
+                    }, 10);
+                }
+            });
+
+            // Load existing inputs from inputsList
+            const existingInputs = node.inputsList || [];
+            if (existingInputs.length > 0) {
+                $("#inputs-container").editableList("addItems", existingInputs);
+            }
+
+            // Check max inputs on add
+            $("#inputs-container").on("editablelistaddbutton", function () {
+                const items = $("#inputs-container").editableList("items");
+                if (items.length >= MAX_INPUTS) {
+                    RED.notify(`Maximum ${MAX_INPUTS} inputs allowed`, { type: "warning", timeout: 2000 });
+                    return false;
+                }
+            });
+
+            $("#node-input-outputTopic, #node-input-outputInt, #node-input-inputTimeout").on("input change", updateTipText);
+
+            setTimeout(updateTipText, 100);
+        },
+
+        oneditsave: function () {
+            const node = this;
+            const inputsList = [];
+
+            $("#inputs-container").editableList("items").each(function (idx) {
+                const topic = $(this).find(".input-topic").val();
+                const opContainer = $(this).find(".op-container");
+                // First row has no select, use stored data or default "+"
+                let operator = opContainer.find(".input-operator").val();
+                if (!operator) {
+                    operator = opContainer.data("operator") || "+";
+                }
+                if (topic && topic.trim()) {
+                    inputsList.push({
+                        topic: topic.trim(),
+                        operator: operator
+                    });
+                }
+            });
+
+            node.inputsList = inputsList;
+        }
+    });
+</script>
+
+<style type="text/css">
+    .arithmetics-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .arithmetics-div .form-row label {
+        width: 130px !important;
+    }
+
+    .arithmetics-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 2px;
+        margin-bottom: 6px;
+    }
+
+    .arithmetics-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 10px 0;
+    }
+
+    .arithmetics-div .form-tips {
+        text-align: center;
+        font-style: italic;
+        color: #555;
+        margin-top: 10px;
+    }
+
+    .arithmetics-div .red-ui-editableList-container {
+        min-height: 50px;
+        max-height: 400px;
+        overflow-y: auto;
+    }
+
+    .arithmetics-div .red-ui-editableList {
+        margin-bottom: 10px;
+    }
+
+    .arithmetics-div .red-ui-editableList-item-remove {
+        background: #d32f2f !important;
+        color: white !important;
+    }
+
+    .arithmetics-div .red-ui-editableList-item-remove:hover {
+        background: #b71c1c !important;
+    }
+
+    .arithmetics-div .red-ui-editableList-addButton {
+        margin-top: 5px;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-arithmetics">
+    <div class="arithmetics-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g. sum-room-loads" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Inputs (up to 16)</b>
+        <div class="help-text">First input is the base value. Subsequent inputs apply their operator: v1 op v2 op v3 ...</div>
+
+        <div class="form-row">
+            <ol id="inputs-container"></ol>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-inputTimeout"><i class="fa fa-clock-o"></i> Input timeout (s)</label>
+            <input type="number" id="node-input-inputTimeout" min="10" max="86400" step="1" style="width:80px;" />
+            <div class="help-text">Seconds before an input is considered stale. Status shows warning if inputs not updated within this time.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Output</b>
+
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="e.g. heating/total_load" />
+            <div class="help-text">Where to send the result. If empty, uses the last updated input topic.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-outputInt"><i class="fa fa-hashtag"></i> Round to integer</label>
+            <input type="checkbox" id="node-input-outputInt" style="width:auto;" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-enableSystemLog"><i class="fa fa-file-text-o"></i> Enable system log</label>
+            <input type="checkbox" id="node-input-enableSystemLog" style="width:auto;" />
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-arithmetics">
+    <h3>Arithmetics</h3>
+    <p>
+        Combines up to 16 topic values using +, −, ×, ÷ operations.
+        Evaluation is left-to-right (no operator precedence).
+    </p>
+
+    <h4>Inputs</h4>
+    <ul>
+        <li>Add input topics using the "Add input" button</li>
+        <li>First input is the base value (shows "Op" column header)</li>
+        <li>Subsequent inputs apply their operator to the running result</li>
+        <li>Example: A + B − C = (A + B) − C</li>
+        <li>Drag to reorder, click X to remove</li>
+    </ul>
+
+    <h4>Input Timeout</h4>
+    <p>
+        Values are cached and used until timeout expires.
+        If an input hasn't been updated within the timeout, it's considered stale.
+        Status shows warning with count of stale inputs.
+    </p>
+
+    <h4>Example: Sum room loads</h4>
+    <p>Add inputs for each mpc-room load estimate topic (all with + operator):</p>
+    <pre>
+TKW.5 (room1 load)
++ TBW.5 (room2 load)
++ M1W.5 (room3 load)
+→ heating/total_load
+    </pre>
+
+    <h4>Output</h4>
+    <ul>
+        <li><b>Output topic:</b> Destination for result. If empty, uses last updated input's topic.</li>
+        <li><b>Round to integer:</b> Apply Math.round() to result.</li>
+    </ul>
+
+    <h4>Status</h4>
+    <ul>
+        <li><b>Grey:</b> Waiting for inputs</li>
+        <li><b>Green:</b> All inputs fresh, showing result</li>
+        <li><b>Yellow:</b> Some inputs stale (not updated within timeout)</li>
+    </ul>
+</script>

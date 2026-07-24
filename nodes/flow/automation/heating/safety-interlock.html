@@ -1,0 +1,106 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-safety-interlock", {
+        category: "uniflex home",
+        color: "#FECACA",
+        icon: "font-awesome/fa-shield",
+        defaults: {
+            name: { value: "" },
+            eStopTopic: { value: "" },
+            hpFaultTopic: { value: "" },
+            gasFaultTopic: { value: "" },
+            blockHpOutTopic: { value: "" },
+            blockGasOutTopic: { value: "" },
+            pumpSafeOutTopic: { value: "" },
+            floorSafeOutTopic: { value: "" },
+            pumpSafeValue: { value: 20, validate: RED.validators.number() },
+            floorSafeValue: { value: 1, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () { return this.name || "safety-interlock"; },
+        paletteLabel: "safety interlock",
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (let i = 0; i < controllers.length; i++) {
+                    result.push.apply(result, controllers[i].formattedTopics || []);
+                }
+                return result;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = (request.term || "").toLowerCase();
+                        const topics = getTopics();
+                        const matches = topics.filter(function (item) {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    focus: function () { return false; },
+                    select: function (event, ui) {
+                        this.value = ui.item.topic || ui.item.value || ui.item.label || "";
+                        return false;
+                    }
+                });
+            }
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                [
+                    "#node-input-eStopTopic", "#node-input-hpFaultTopic", "#node-input-gasFaultTopic",
+                    "#node-input-blockHpOutTopic", "#node-input-blockGasOutTopic",
+                    "#node-input-pumpSafeOutTopic", "#node-input-floorSafeOutTopic"
+                ].forEach((sel) => initializeAutocomplete($(sel)));
+            }).fail(function () {
+                _controllers = {};
+            });
+
+            const labels = $("#dialog-form label[title]");
+            if (!$("#uniflex-help-tooltip-style").length) {
+                $("head").append('<style id="uniflex-help-tooltip-style">.uniflex-help-tooltip{background:#fff8c4 !important;border:1px solid #d4b106 !important;color:#2b2b2b !important;max-width:560px !important;box-shadow:0 2px 6px rgba(0,0,0,.2) !important;padding:8px 10px !important;line-height:1.35 !important;}.uniflex-help-tooltip .ui-tooltip-content{font-size:12px !important;}</style>');
+            }
+            labels.each(function () {
+                if ($(this).data("ui-tooltip")) $(this).tooltip("destroy");
+            });
+            labels.tooltip({
+                track: false,
+                show: { delay: 150 },
+                hide: { delay: 0 },
+                position: { my: "left bottom-10", at: "left top", collision: "flipfit" },
+                classes: { "ui-tooltip": "uniflex-help-tooltip" }
+            });
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-safety-interlock">
+    <div class="form-row"><label>Name</label><input type="text" id="node-input-name" /></div>
+    <div class="form-row"><label title="Source: emergency stop topic (manual or hardware), non-zero activates interlock.">E-stop topic</label><input type="text" id="node-input-eStopTopic" /></div>
+    <div class="form-row"><label title="Source: heat pump fault topic (for example from hp-error-manager), non-zero activates interlock.">HP fault topic</label><input type="text" id="node-input-hpFaultTopic" /></div>
+    <div class="form-row"><label title="Source: gas source fault topic, non-zero activates interlock.">Gas fault topic</label><input type="text" id="node-input-gasFaultTopic" /></div>
+    <div class="form-row"><label title="Destination: topic consumed as hard block for HP path (1=blocked).">Block HP out</label><input type="text" id="node-input-blockHpOutTopic" /></div>
+    <div class="form-row"><label title="Destination: topic consumed as hard block for gas path (1=blocked).">Block gas out</label><input type="text" id="node-input-blockGasOutTopic" /></div>
+    <div class="form-row"><label title="Destination: pump controller safe-command topic.">Pump safe out</label><input type="text" id="node-input-pumpSafeOutTopic" /></div>
+    <div class="form-row"><label title="Value sent to Pump safe out when interlock is active.">Pump safe value</label><input type="number" id="node-input-pumpSafeValue" /></div>
+    <div class="form-row"><label title="Destination: floor-loop safe policy topic.">Floor safe out</label><input type="text" id="node-input-floorSafeOutTopic" /></div>
+    <div class="form-row"><label title="Value sent to Floor safe out when interlock is active.">Floor safe value</label><input type="number" id="node-input-floorSafeValue" /></div>
+    <p class="form-tips">Interlock is independent from normal control. On trigger, it emits block/safe commands immediately to actuator control paths.</p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-safety-interlock">
+    <p>Independent hard safety path. Emits block/safe commands when e-stop or source faults are active.</p>
+    <p>Signal format: <b>Purpose</b>, <b>Unit</b>, <b>Source</b>, <b>Destination</b>.</p>
+    <ul>
+        <li><b>E-stop / HP fault / Gas fault inputs</b> -- Purpose: trigger interlock. Unit: 0/1. Source: emergency/fault topics. Destination: interlock state.</li>
+        <li><b>Block HP out</b> -- Purpose: block HP actuation path. Unit: 0/1. Source: safety-interlock output. Destination: hp-control block input.</li>
+        <li><b>Block gas out</b> -- Purpose: block gas actuation path. Unit: 0/1. Source: safety-interlock output. Destination: gas path block input.</li>
+        <li><b>Pump safe out</b> -- Purpose: force safe pump command. Unit: command value (typically %). Source: safety-interlock output. Destination: circulation-control safe mode input/path.</li>
+        <li><b>Floor safe out</b> -- Purpose: safe floor policy command. Unit: policy value (system-defined). Source: safety-interlock output. Destination: floor controller safe input/path.</li>
+    </ul>
+</script>

@@ -1,0 +1,147 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-openweather-fetcher", {
+        category: "uniflex calendar",
+        paletteLabel: "openweather fetcher",
+        color: "#c7e9ff",
+        defaults: {
+            name: { value: "" },
+            lat: { value: "" },
+            lon: { value: "" },
+            appid: { value: "" },
+            units: { value: "metric" },
+            weatherUrl: { value: "" },
+            titles: { value: "main.temp,clouds.all,wind.speed" },
+            calendarTopic: { value: "calendar/weather" },
+            enableLogging: { value: true },
+            debugTopics: { value: "" },
+            retryCount: { value: 3 },
+            retryDelayMinutes: { value: 30 }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-cloud",
+        label: function () {
+            return this.name || "openweather-fetcher";
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-openweather-fetcher">
+    <div class="form-row">
+        <label for="node-input-name">Name</label>
+        <input type="text" id="node-input-name" placeholder="Name" style="max-width: 75%;">
+    </div>
+
+    <h4>OpenWeather API Configuration</h4>
+    <div class="form-row">
+        <label for="node-input-lat" style="width: 110px;">Latitude</label>
+        <input type="text" id="node-input-lat" placeholder="59.42483" style="width: 150px;">
+        <label for="node-input-lon" style="width: 70px; margin-left: 10px;">Longitude</label>
+        <input type="text" id="node-input-lon" placeholder="24.61344" style="width: 150px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-appid">API Key (appid)</label>
+        <input type="text" id="node-input-appid" placeholder="your-openweather-api-key" style="max-width: 75%;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-units" style="width: 110px;">Units</label>
+        <select id="node-input-units" style="width: 150px;">
+            <option value="metric">Metric (°C, m/s)</option>
+            <option value="imperial">Imperial (°F, mph)</option>
+            <option value="standard">Standard (K, m/s)</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-weatherUrl">Custom URL</label>
+        <input type="text" id="node-input-weatherUrl" placeholder="Optional: override URL (leave blank to auto-generate)" style="max-width: 75%;">
+        <span class="help-block">If provided, overrides lat/lon/appid. Auto-generated URL format:<br>
+        https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={appid}&units={units}</span>
+    </div>
+
+    <h4>Data Extraction</h4>
+    <div class="form-row">
+        <label for="node-input-titles">Data fields</label>
+        <input type="text" id="node-input-titles" placeholder="main.temp,clouds.all,wind.speed" style="max-width: 75%;">
+        <span class="help-block">Comma-separated dot-notation paths to extract from OpenWeather response. Examples:<br>
+        <code>main.temp</code> (temperature), <code>main.humidity</code> (humidity %), <code>clouds.all</code> (cloud cover %),<br>
+        <code>wind.speed</code> (wind speed), <code>rain.3h</code> (rain volume), <code>pop</code> (precipitation probability)<br>
+        Stored as series with dots replaced by underscores: <code>main.temp</code> → <code>main_temp</code><br>
+        <b>Note:</b> Raw 3-hour data is automatically interpolated to 1-hour intervals for MPC compatibility.</span>
+    </div>
+
+    <h4>Calendar Integration</h4>
+    <div class="form-row">
+        <label for="node-input-calendarTopic">Calendar topic</label>
+        <input type="text" id="node-input-calendarTopic" placeholder="calendar/weather" style="max-width: 75%;">
+        <span class="help-block">Topic to send delete/create messages to sql-calendar nodes. Wire this node's output to sql-calendar input(s).</span>
+    </div>
+
+    <h4>Retry on Failure</h4>
+    <div class="form-row">
+        <label for="node-input-retryCount" style="width: 110px;">Retry count</label>
+        <input type="number" id="node-input-retryCount" min="0" max="10" value="3" style="width: 60px;">
+        <span class="help-block" style="display: inline-block; margin-left: 10px; font-size: 11px;">Number of retries if fetch fails</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-retryDelayMinutes" style="width: 110px;">Retry delay</label>
+        <input type="number" id="node-input-retryDelayMinutes" min="1" max="1440" value="30" style="width: 60px;">
+        <span class="help-block" style="display: inline-block; margin-left: 10px; font-size: 11px;">Minutes between retries</span>
+    </div>
+
+    <h4>Logging</h4>
+    <div class="form-row">
+        <label for="node-input-enableLogging">Enable logging</label>
+        <input type="checkbox" id="node-input-enableLogging" checked>
+    </div>
+    <div class="form-row">
+        <label for="node-input-debugTopics">Debug topics</label>
+        <input type="text" id="node-input-debugTopics" placeholder="comma-separated" style="max-width: 75%;">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-openweather-fetcher">
+    <p>Fetches weather forecast from OpenWeatherMap API and writes multiple series to sql-calendar. 
+    Extracts specified fields (temperature, humidity, clouds, wind, etc.) and stores each as a separate time series.
+    Automatically interpolates 3-hour data to 1-hour intervals using linear interpolation.</p>
+    
+    <h4>Usage</h4>
+    <ul>
+        <li><b>Trigger:</b> Connect an inject node (no special topic needed)</li>
+        <li><b>Output:</b> Wire to sql-calendar node</li>
+        <li><b>Fetch interval:</b> Once per 3-6 hours is recommended (OpenWeather provides 5-day forecast in 3-hour intervals)</li>
+        <li><b>Interpolation:</b> Raw 3-hour data is automatically interpolated to 1-hour intervals (e.g., 40 points → ~120 points)</li>
+    </ul>
+    
+    <h4>API Configuration</h4>
+    <p>Provide either:</p>
+    <ul>
+        <li><b>Lat/Lon/API Key:</b> For automatic URL generation</li>
+        <li><b>Custom URL:</b> For full control (overrides lat/lon/appid)</li>
+    </ul>
+    <p>Get a free API key at <a href="https://openweathermap.org/api" target="_blank">openweathermap.org/api</a></p>
+    
+    <h4>Data Fields</h4>
+    <p>Specify which fields to extract using dot notation. Common fields:</p>
+    <ul>
+        <li><code>main.temp</code> - Temperature</li>
+        <li><code>main.humidity</code> - Humidity (%)</li>
+        <li><code>main.pressure</code> - Atmospheric pressure (hPa)</li>
+        <li><code>clouds.all</code> - Cloud cover (%)</li>
+        <li><code>wind.speed</code> - Wind speed</li>
+        <li><code>wind.deg</code> - Wind direction (degrees)</li>
+        <li><code>rain.3h</code> - Rain volume (mm, last 3 hours)</li>
+        <li><code>snow.3h</code> - Snow volume (mm, last 3 hours)</li>
+        <li><code>pop</code> - Probability of precipitation (0-1)</li>
+    </ul>
+    
+    <h4>Calendar Storage</h4>
+    <p>Each field is stored as a separate series in sql-calendar with dots replaced by underscores:</p>
+    <ul>
+        <li><code>main.temp</code> → series title <code>main_temp</code></li>
+        <li><code>clouds.all</code> → series title <code>clouds_all</code></li>
+    </ul>
+    <p>Old weather data is automatically deleted when new data is fetched.</p>
+    
+    <h4>Retry Logic</h4>
+    <p>If fetch fails, the node will automatically retry with configurable delay between attempts.</p>
+</script>

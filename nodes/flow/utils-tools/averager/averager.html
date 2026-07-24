@@ -1,0 +1,472 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-averager", {
+        category: "uniflex utils",
+        color: "#E8A87C",
+        defaults: {
+            name: { value: "" },
+            controller: { value: "", type: "uniflex-controller", required: true },
+            inputTopics: { value: [] },
+            outputTopic: { value: "" },
+            outputMode: { value: "any-input" },
+            selectedInputTopic: { value: "" },
+            minValues: { value: 1 },
+            precision: { value: 2 },
+            enableLogging: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-calculator",
+        label: function () {
+            return this.name || `averager (${this.inputTopics?.length || 0} topics)`;
+        },
+        paletteLabel: "averager",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controller = {};
+            let _lastControllerId = null;
+
+            const inputTopics = node.inputTopics || [];
+
+            $("#node-input-name").val(node.name);
+            $("#node-input-controller").val(node.controller);
+            $("#node-input-outputTopic").val(node.outputTopic);
+            $("#node-input-outputMode").val(node.outputMode);
+            $("#node-input-selectedInputTopic").val(node.selectedInputTopic);
+            $("#node-input-minValues").val(node.minValues);
+            $("#node-input-precision").val(node.precision);
+            $("#node-input-enableLogging").prop("checked", node.enableLogging !== false);
+
+            $("#node-input-controller").change(queryControllerConfig);
+            $("#node-input-outputMode").change(updateOutputModeFields);
+            $("#input-topics-container").change(updateTipText);
+
+            initializeEditableList();
+            updateOutputModeFields();
+            updateTipText();
+
+            // Button click handlers for input topic actions
+            $("#btn-add-topic").on("click", function () {
+                $("#input-topics-container").editableList("addItem", {});
+            });
+
+            $("#btn-clear-topics").on("click", function () {
+                if (confirm("Delete all input topics?")) {
+                    $("#input-topics-container").editableList("empty");
+                    updateTipText();
+                }
+            });
+
+            function queryControllerConfig() {
+                const controllerId = $("#node-input-controller").val();
+                if (_lastControllerId === controllerId) return;
+                _lastControllerId = controllerId;
+
+                $.getJSON(`uniflex/controller-config?id=${controllerId}`)
+                    .done((d) => {
+                        _controller = d;
+                    })
+                    .fail(() => {
+                        console.error("Failed to query controller configuration!");
+                        RED.notify("Failed to query controller configuration!", { type: "error", timeout: 3000 });
+                        _controller = {};
+                    })
+                    .always(function () {
+                        $("#input-topics-container").editableList("empty");
+                        $("#input-topics-container").editableList("addItems", inputTopics);
+                        initializeAutocomplete($("#node-input-outputTopic"));
+                        initializeAutocomplete($("#node-input-selectedInputTopic"));
+                        updateTipText();
+                    });
+            }
+
+            function initializeEditableList() {
+                $("#input-topics-container").editableList({
+                    removable: true,
+                    sortable: true,
+                    addItem: function (container, index, row) {
+                        addRowElements(container, row);
+                        const el = getRowElements(container);
+                        formatRow(el, row);
+                        attachRowEvents(el, container);
+                        updateTipText();
+                    },
+                    removeItem: function (data) {
+                        const confirmed = confirm("Remove this input topic?");
+                        if (!confirmed) return false;
+                        updateTipText();
+                    },
+                    header: $("<div>").append(
+                        $.parseHTML(`
+                        <div style="width:22px"></div>
+                        <div class="averager-list" style="text-align:center;white-space:normal;flex:1">
+                            <div class="checkbox-container">Manual</div>
+                            <div class="node-input-topic">Input topic</div>
+                        </div>
+                        <div style="width:28px"></div>
+                    `)
+                    ),
+                    buttons: [
+                        {
+                            label: "delete all",
+                            icon: "fa fa-trash",
+                            title: "delete all input topics",
+                            click: function () {
+                                if (confirm("Delete all input topics?")) {
+                                    $("#input-topics-container").editableList("empty");
+                                    updateTipText();
+                                }
+                            }
+                        }
+                    ]
+                });
+            }
+
+            function addRowElements(container, row) {
+                const rowHtml = `
+                <div class="averager-list">
+                    <div class="checkbox-container">
+                        <input type="checkbox" class="node-input-manual" ${row.manual === true ? "checked" : ""}>
+                        <div class="helper-text"></div>
+                    </div>
+                    <select class="node-input-topicSelect"></select>
+                    <input type="text" class="node-input-topicManual" placeholder="Manual entry, e.g. TKW.1" value="${row.topicManual || ""}">
+                </div>`;
+                container.append(rowHtml);
+            }
+
+            function getRowElements(container) {
+                return {
+                    manualElement: container.find(".node-input-manual"),
+                    topicSelectElement: container.find(".node-input-topicSelect"),
+                    topicManualElement: container.find(".node-input-topicManual")
+                };
+            }
+
+            function formatRow(e, row) {
+                const formattedTopics = _controller.formattedTopics || [];
+
+                // Sort topics alphabetically by label
+                const sortedTopics = formattedTopics.slice().sort((a, b) => {
+                    return (a.label || "").localeCompare(b.label || "");
+                });
+
+                const sel = e.topicSelectElement;
+                const selectedTopic = row.topicSelect;
+
+                sel.empty().append($(`<option value="">Select topic...</option>`));
+                sortedTopics.forEach((item) => {
+                    const topic = item.topic;
+                    const label = item.label || topic;
+                    sel.append($(`<option value="${topic}" ${selectedTopic === topic ? "selected" : ""}>${label}</option>`));
+                });
+
+                updateTopicSelect(e);
+                validateTopic(e);
+            }
+
+            function attachRowEvents(e, container) {
+                e.manualElement.on("change", function () {
+                    updateTopicSelect(e);
+                    validateTopic(e);
+                });
+
+                e.topicSelectElement.on("change", function () {
+                    validateTopic(e);
+                });
+
+                e.topicManualElement.on("change input", function () {
+                    validateTopic(e);
+                });
+            }
+
+            function updateTopicSelect(e) {
+                const manual = e.manualElement.is(":checked");
+                const helper = e.manualElement.closest(".checkbox-container").find(".helper-text");
+                if (manual) {
+                    e.topicSelectElement.val("").hide();
+                    e.topicManualElement.show();
+                    helper.text("manual");
+                } else {
+                    e.topicManualElement.val("").hide();
+                    e.topicSelectElement.show();
+                    helper.text("from list");
+                }
+            }
+
+            function validateTopic(e) {
+                const manual = e.manualElement.is(":checked");
+                const ts = e.topicSelectElement.val();
+                const tm = e.topicManualElement.val();
+                const invalid = ["", undefined, null];
+                let ok;
+                if (manual) {
+                    ok = !invalid.includes(tm);
+                    e.topicManualElement.css("border-color", ok ? "" : "red");
+                    e.topicSelectElement.css("border-color", "");
+                } else {
+                    ok = !invalid.includes(ts);
+                    e.topicSelectElement.css("border-color", ok ? "" : "red");
+                    e.topicManualElement.css("border-color", "");
+                }
+            }
+
+            function initializeAutocomplete(element) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (req, res) {
+                            const term = req.term.toLowerCase();
+                            const topics = getTopics();
+                            res(topics.filter((o) => o.label.toLowerCase().includes(term)));
+                        },
+                        focus: (e) => e.preventDefault(),
+                        select: function (e, ui) {
+                            e.preventDefault();
+                            element.val(ui.item.topic);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const lab = term
+                            ? item.label.replace(
+                                new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig"),
+                                '<strong style="color:#e65;font-weight:bold">$1</strong>'
+                            )
+                            : item.label;
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${lab}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                return _controller?.formattedTopics || [];
+            }
+
+            function updateOutputModeFields() {
+                const mode = $("#node-input-outputMode").val();
+                $(".selected-input-row").toggle(mode === "selected-input");
+            }
+
+            function updateTipText() {
+                const rows = getListElements();
+                const count = rows.length;
+                $("#node-input-tip-text-1").text(`Averaging ${count} input topic${count !== 1 ? "s" : ""}.`);
+                $("#node-input-tip-text-2").text(`Output mode: ${$("#node-input-outputMode option:selected").text()}`);
+            }
+
+            function getListElements() {
+                const out = [];
+                $("#input-topics-container")
+                    .editableList("items")
+                    .each(function () {
+                        out.push(getRowElements($(this)));
+                    });
+                return out;
+            }
+
+            // Initialize controller config on load
+            queryControllerConfig();
+        },
+
+        oneditsave: function () {
+            const node = this;
+            node.name = $("#node-input-name").val();
+            node.controller = $("#node-input-controller").val();
+            node.outputTopic = $("#node-input-outputTopic").val();
+            node.outputMode = $("#node-input-outputMode").val();
+            node.selectedInputTopic = $("#node-input-selectedInputTopic").val();
+            node.minValues = parseInt($("#node-input-minValues").val()) || 1;
+            node.precision = parseInt($("#node-input-precision").val()) || 2;
+            node.enableLogging = $("#node-input-enableLogging").is(":checked");
+
+            const inputTopics = [];
+            $("#input-topics-container")
+                .editableList("items")
+                .each(function () {
+                    const c = $(this);
+                    inputTopics.push({
+                        manual: c.find(".node-input-manual").is(":checked"),
+                        topicSelect: c.find(".node-input-topicSelect").val(),
+                        topicManual: c.find(".node-input-topicManual").val()
+                    });
+                });
+            node.inputTopics = inputTopics;
+        }
+    });
+</script>
+
+<style type="text/css">
+    .averager-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .averager-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .averager-div .form-row div,
+    .averager-div .form-row input,
+    .averager-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .averager-div .form-row select {
+        width: 66% !important;
+    }
+
+    .averager-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .averager-div .input-topic-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+        margin-bottom: 5px;
+    }
+
+    .averager-list {
+        overflow: hidden;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+    }
+
+    .averager-list .checkbox-container {
+        text-align: center;
+        min-width: 35px;
+        width: 15%;
+    }
+
+    .averager-list .helper-text {
+        font-size: 10px;
+        line-height: 12px;
+        text-wrap: wrap;
+        color: #666;
+    }
+
+    .averager-list .node-input-manual {
+        min-width: 16px;
+        min-height: 16px;
+    }
+
+    .averager-list .node-input-topicManual {
+        font-size: 12px !important;
+        min-width: 200px;
+        width: 80%;
+    }
+
+    .averager-list .node-input-topicSelect {
+        font-size: 12px;
+        min-width: 200px;
+        width: 80%;
+    }
+
+    .averager-div .red-ui-editableList {
+        margin-bottom: 10px;
+        min-width: 500px;
+    }
+
+    .averager-div .red-ui-editableList-header {
+        background-color: #80808014;
+        font-weight: bold;
+        display: flex;
+    }
+
+    .averager-div .red-ui-editableList-container {
+        min-height: 50px;
+    }
+
+    .averager-div .ui-autocomplete {
+        max-height: 300px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 1000 !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-averager">
+    <div class="averager-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-controller"><i class="fa fa-search"></i> Controller</label>
+            <select id="node-input-controller">
+                <option value="" disabled selected>Select controller...</option>
+            </select>
+        </div>
+
+        <div class="form-row">
+            <label style="width: 100% !important; font-weight: bold;"><i class="fa fa-list"></i> Input Topics</label>
+        </div>
+
+        <ol id="input-topics-container"></ol>
+
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="e.g. Tset_avg" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-outputMode"><i class="fa fa-clock-o"></i> Output mode</label>
+            <select id="node-input-outputMode">
+                <option value="any-input">On any input update</option>
+                <option value="selected-input">On selected input update</option>
+            </select>
+        </div>
+
+        <div class="form-row selected-input-row">
+            <label for="node-input-selectedInputTopic"><i class="fa fa-bullseye"></i> Selected input topic</label>
+            <input type="text" id="node-input-selectedInputTopic" placeholder="e.g. TKW.1" />
+            <div class="help-text">Output only when this specific input topic updates (value change or no change)</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-minValues"><i class="fa fa-sort-numeric-asc"></i> Min values</label>
+            <input type="number" id="node-input-minValues" placeholder="1" min="0" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-precision"><i class="fa fa-hashtag"></i> Precision</label>
+            <input type="number" id="node-input-precision" placeholder="2" min="0" max="10" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-enableLogging"><i class="fa fa-file-text-o"></i> Enable logging</label>
+            <input type="checkbox" id="node-input-enableLogging" checked />
+            <div class="help-text">Log value updates and average calculations to Node-RED logs (INFO level)</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <br />
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-averager">
+    <p>Universal Averager node for heating control system.</p>
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Numeric values from configured input topics.</dd>
+    </dl>
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Calculated average of valid input values.</dd>
+    </dl>
+    <h3>Details</h3>
+    <p>Averages values from multiple input topics with configurable output modes.</p>
+    <h4>Output Modes:</h4>
+    <ul>
+        <li><b>On any input update:</b> Calculate and publish whenever any input topic receives a new value</li>
+        <li><b>On selected input update:</b> Calculate and publish only when the selected input topic receives a new value (even if value unchanged)</li>
+    </ul>
+</script>

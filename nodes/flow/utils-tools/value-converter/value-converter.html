@@ -1,0 +1,346 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-value-converter", {
+        category: "uniflex utils",
+        color: "#FFDDCC",
+        icon: "font-awesome/fa-exchange",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9_-]+$/.test(v) && v.length <= 50;
+                }
+            },
+            inputTopic: { value: "" },
+            outputTopic: { value: "" },
+            operation: {
+                value: "multiply",
+                validate: function (v) {
+                    return ["multiply", "divide", "add", "subtract", "custom"].includes(v);
+                }
+            },
+            value: {
+                value: 100.0,
+                validate: RED.validators.number()
+            },
+            customExpression: { value: "value * 100" },
+            outputInt: { value: false },
+            enableSystemLog: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            const op = this.operation || "multiply";
+            const val = this.operation === "custom" ? "expr" : (this.value || 1);
+            return this.name || `${op} ${val}`;
+        },
+        paletteLabel: "value converter",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Set default values if not set
+            if (!node.operation) node.operation = "multiply";
+            if (node.value === undefined || node.value === null) node.value = 100.0;
+            if (!node.customExpression) node.customExpression = "value * 100";
+
+            // Set form values
+            $("#node-input-inputTopic").val(node.inputTopic || "");
+            $("#node-input-outputTopic").val(node.outputTopic || "");
+            $("#node-input-operation").val(node.operation || "multiply");
+            $("#node-input-value").val(node.value || 100.0);
+            $("#node-input-customExpression").val(node.customExpression || "value * 100");
+            $("#node-input-outputInt").prop("checked", node.outputInt === true);
+            $("#node-input-enableSystemLog").prop("checked", node.enableSystemLog === true);
+
+            function updateOperationFields() {
+                const op = $("#node-input-operation").val();
+                if (op === "custom") {
+                    $("#value-row").hide();
+                    $("#custom-expression-row").show();
+                } else {
+                    $("#value-row").show();
+                    $("#custom-expression-row").hide();
+                }
+                updateTipText();
+            }
+
+            function updateTipText() {
+                const inputTopic = $("#node-input-inputTopic").val() || "<any>";
+                const outputTopic = $("#node-input-outputTopic").val() || "<same as input>";
+                const op = $("#node-input-operation").val() || "multiply";
+                const val = op === "custom"
+                    ? $("#node-input-customExpression").val() || "expr"
+                    : ($("#node-input-value").val() || "1");
+
+                let opDesc = "";
+                switch (op) {
+                    case "multiply": opDesc = `× ${val}`; break;
+                    case "divide": opDesc = `÷ ${val}`; break;
+                    case "add": opDesc = `+ ${val}`; break;
+                    case "subtract": opDesc = `- ${val}`; break;
+                    case "custom": opDesc = `f(${val})`; break;
+                }
+
+                let tipText = `Input: ${inputTopic} → ${opDesc} → Output: ${outputTopic}`;
+                $("#node-input-tip-text").text(tipText);
+            }
+
+            $("#node-input-operation").on("change", updateOperationFields);
+            $("#node-input-inputTopic, #node-input-outputTopic, #node-input-value, #node-input-customExpression").on("input change", updateTipText);
+
+            queryControllerConfig();
+            updateOperationFields();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-inputTopic"));
+                    initializeAutocomplete($("#node-input-outputTopic"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            matches.sort((a, b) => {
+                                const topicA = (a.topic || a.label || "").toLowerCase();
+                                const topicB = (b.topic || b.label || "").toLowerCase();
+                                return topicA.localeCompare(topicB);
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                return result.sort((a, b) => {
+                    const topicA = (a.topic || a.label || "").toLowerCase();
+                    const topicB = (b.topic || b.label || "").toLowerCase();
+                    return topicA.localeCompare(topicB);
+                });
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .uniflex-value-converter-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .uniflex-value-converter-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .uniflex-value-converter-div .form-row div,
+    .uniflex-value-converter-div .form-row input,
+    .uniflex-value-converter-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .uniflex-value-converter-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .uniflex-value-converter-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 10px 0;
+    }
+
+    .uniflex-value-converter-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+        font-style: italic;
+        color: #555;
+        margin-top: 10px;
+    }
+
+    .uniflex-value-converter-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .uniflex-value-converter-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .uniflex-value-converter-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-value-converter">
+    <div class="uniflex-value-converter-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g., scale-to-percent" />
+            <div class="help-text">Unique identifier. Only letters, numbers, underscore, hyphen.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Configuration</b>
+
+        <div class="form-row">
+            <label for="node-input-inputTopic"><i class="fa fa-sign-in"></i> Input topic</label>
+            <input type="text" id="node-input-inputTopic" placeholder="e.g., T1W (optional)" />
+            <div class="help-text">Filter input by topic (leave empty to process all messages).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="e.g., D1W" />
+            <div class="help-text">Output topic for converted value (for iolayer).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-operation"><i class="fa fa-cog"></i> Operation</label>
+            <select id="node-input-operation">
+                <option value="multiply">Multiply</option>
+                <option value="divide">Divide</option>
+                <option value="add">Add</option>
+                <option value="subtract">Subtract</option>
+                <option value="custom">Custom expression</option>
+            </select>
+            <div class="help-text">Mathematical operation to apply.</div>
+        </div>
+
+        <div class="form-row" id="value-row">
+            <label for="node-input-value"><i class="fa fa-calculator"></i> Value</label>
+            <input type="number" id="node-input-value" step="any" placeholder="100.0" />
+            <div class="help-text">Value to use in operation (multiplier, divisor, addend, subtrahend).</div>
+        </div>
+
+        <div class="form-row" id="custom-expression-row" style="display:none;">
+            <label for="node-input-customExpression"><i class="fa fa-code"></i> Custom expression</label>
+            <input type="text" id="node-input-customExpression" placeholder="value * 100" style="font-family: monospace;" />
+            <div class="help-text">JavaScript expression. Use <code>value</code> for input, <code>configValue</code> for configured value.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-outputInt"><i class="fa fa-hashtag"></i> Output as integer</label>
+            <input type="checkbox" id="node-input-outputInt" />
+            <div class="help-text">If checked, output is rounded to the nearest integer instead of float.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Logging</b>
+
+        <div class="form-row">
+            <label for="node-input-enableSystemLog"><i class="fa fa-file-text-o"></i> Enable system log</label>
+            <input type="checkbox" id="node-input-enableSystemLog" />
+            <div class="help-text">Output log messages to system log (configured in settings.js).</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-value-converter">
+    <h3>Value Converter</h3>
+    <p>Convert/transform numeric values with configurable mathematical operations.</p>
+
+    <h4>Features</h4>
+    <ul>
+        <li><b>Operations</b>: Multiply, Divide, Add, Subtract, Custom expression</li>
+        <li><b>Autocomplete</b>: Topic selection from datastreams</li>
+        <li><b>Topic Filtering</b>: Process only messages matching input topic</li>
+    </ul>
+
+    <h4>Inputs</h4>
+    <ul>
+        <li><b>Input</b> -- Numeric value or array. If input topic is configured, only processes messages with matching topic.</li>
+    </ul>
+
+    <h4>Outputs</h4>
+    <ul>
+        <li><b>Output</b> -- Converted value. Topic set to output topic if configured.</li>
+    </ul>
+
+    <h4>Operations</h4>
+    <ul>
+        <li><b>Multiply</b>: <code>output = input × value</code> (e.g., 0.57 × 100 = 57)</li>
+        <li><b>Divide</b>: <code>output = input ÷ value</code> (e.g., 570 ÷ 100 = 5.7)</li>
+        <li><b>Add</b>: <code>output = input + value</code></li>
+        <li><b>Subtract</b>: <code>output = input - value</code></li>
+        <li><b>Custom</b>: JavaScript expression using <code>value</code> (input) and <code>configValue</code> (configured value)</li>
+    </ul>
+
+    <h4>Use Cases</h4>
+    <ul>
+        <li>Unit conversion: meters to millimeters (× 1000), °C to °F (custom expression)</li>
+        <li>Scaling: percentage to display value (× 100)</li>
+        <li>Offset: temperature calibration (+ 2.5)</li>
+        <li>Custom formulas: any JavaScript expression</li>
+    </ul>
+
+    <h4>Example: 0.57 → 57</h4>
+    <ul>
+        <li><b>Operation</b>: Multiply</li>
+        <li><b>Value</b>: 100</li>
+        <li><b>Input topic</b>: (your input topic, e.g., from read-data-streams)</li>
+        <li><b>Output topic</b>: (your output topic, e.g., for write-data-streams)</li>
+    </ul>
+
+    <h4>Status Display</h4>
+    <p>Shows conversion in real-time: <code>input operation value = output</code></p>
+    <p>Example: <code>0.57 × 100 = 57</code></p>
+</script>

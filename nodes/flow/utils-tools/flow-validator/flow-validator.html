@@ -1,0 +1,510 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-flow-validator", {
+        category: "uniflex utils",
+        color: "#E8E8E8",
+        icon: "font-awesome/fa-check-circle",
+        defaults: {
+            name: { value: "" },
+            enabled: { value: true },
+            includeTabs: { value: "" },
+            excludeTabs: { value: "" }
+        },
+        inputs: 0,
+        outputs: 0,
+        label: function () {
+            return this.name || "flow validator";
+        },
+        paletteLabel: "flow validator",
+
+        oneditprepare: function () {
+            const node = this;
+
+            // Initialize UI elements
+            const enabledCheckbox = $("#node-input-enabled");
+
+            // Validate button
+            const testButton = $('<button type="button" id="test-validation" class="red-ui-button red-ui-button-small" style="margin-top: 10px;">Validate</button>');
+            enabledCheckbox.closest(".form-row").after(testButton);
+
+            // Results display area
+            const resultsDiv = $(
+                '<div id="validation-results" style="margin-top: 10px; padding: 10px; border: 1px solid #ccc; border-radius: 3px; background-color: #f9f9f9; max-height: 200px; overflow-y: auto;"></div>'
+            );
+            testButton.after(resultsDiv);
+
+            // Validate function
+            function runValidation() {
+                // Check if validation is enabled
+                const enabled = $("#node-input-enabled").is(":checked");
+                if (!enabled) {
+                    const resultsDiv = $("#validation-results");
+                    resultsDiv.html('<div style="color: grey; font-style: italic;">⛔ Validation is disabled</div>');
+                    return;
+                }
+
+                const results = validateFlowTopics();
+                displayResults(results);
+            }
+
+            // Display validation results
+            function displayResults(results) {
+                const resultsDiv = $("#validation-results");
+                resultsDiv.empty();
+
+                if (results.warnings.length === 0 && results.errors.length === 0) {
+                    resultsDiv.html('<div style="color: green; font-weight: bold;">✅ All topics validated successfully!</div>');
+                    return;
+                }
+
+                let html = "";
+
+                if (results.errors.length > 0) {
+                    html += '<div style="color: red; font-weight: bold;">❌ Errors:</div>';
+                    results.errors.forEach((error) => {
+                        html += `<div style="color: red; margin-left: 10px;">${error}</div>`;
+                    });
+                }
+
+                if (results.warnings.length > 0) {
+                    html += '<div style="color: orange; font-weight: bold;">⚠️ Warnings:</div>';
+                    results.warnings.forEach((warning) => {
+                        html += `<div style="color: orange; margin-left: 10px;">${warning}</div>`;
+                    });
+                }
+
+                resultsDiv.html(html);
+            }
+
+            // Validation logic - UNIVERSAL APPROACH
+            function validateFlowTopics() {
+                console.log("Flow Validator HTML: Starting validation...");
+
+                const publishers = new Map(); // topic -> [node1, node2, ...]
+                const listeners = new Map(); // topic -> [node1, node2, ...]
+                const errors = [];
+                const warnings = [];
+
+                // Get filter settings from form
+                const includeTabs = $("#node-input-includeTabs")
+                    .val()
+                    .split(",")
+                    .map((t) => t.trim())
+                    .filter((t) => t);
+                const excludeTabs = $("#node-input-excludeTabs")
+                    .val()
+                    .split(",")
+                    .map((t) => t.trim())
+                    .filter((t) => t);
+
+                // Datastream-specific validation function
+                function validateDatastreams() {
+                    const datastreamTopics = new Set(); // Topics provided by read/write nodes
+                    const requiredTopics = new Map();    // topic -> [nodes that need it]
+
+                    // 1. Collect topics from uniflex-read-data-streams and uniflex-write-data-streams
+                    RED.nodes.eachNode(function (n) {
+                        // Apply tab filters
+                        if (n.z) {
+                            const tab = RED.nodes.workspace(n.z);
+                            if (tab && tab.disabled) return;
+                            const tabName = tab ? tab.label : n.z;
+                            if (includeTabs.length > 0 && !includeTabs.includes(tabName)) return;
+                            if (excludeTabs.length > 0 && excludeTabs.includes(tabName)) return;
+                        }
+
+                        if (n.type === 'uniflex-read-data-streams' || n.type === 'uniflex-write-data-streams') {
+                            // Parse mappings JSON to extract topics
+                            if (n.mappings) {
+                                try {
+                                    const mappings = JSON.parse(n.mappings);
+                                    mappings.forEach(m => {
+                                        if (m.topic) {
+                                            // Add base topic and member topics (e.g., FCTW and FCTW.1, FCTW.2, etc.)
+                                            datastreamTopics.add(m.topic);
+                                            // Also add member variants if they exist
+                                            if (m.member) {
+                                                datastreamTopics.add(`${m.topic}.${m.member}`);
+                                            }
+                                        }
+                                    });
+                                } catch (e) {
+                                    console.warn("Failed to parse mappings for", n.name || n.id, e);
+                                }
+                            }
+                        }
+                    });
+
+                    // 2. Collect required datastream topics from consumer nodes
+                    RED.nodes.eachNode(function (n) {
+                        // Apply tab filters
+                        if (n.z) {
+                            const tab = RED.nodes.workspace(n.z);
+                            if (tab && tab.disabled) return;
+                            const tabName = tab ? tab.label : n.z;
+                            if (includeTabs.length > 0 && !includeTabs.includes(tabName)) return;
+                            if (excludeTabs.length > 0 && excludeTabs.includes(tabName)) return;
+                        }
+
+                        // Check all *Topic and *Topics properties for datastream references
+                        Object.keys(n).forEach(key => {
+                            if (key.endsWith('Topic') || key.endsWith('Topics')) {
+                                const value = n[key];
+                                if (typeof value === 'string' && value.trim()) {
+                                    // Match datastream pattern: uppercase letters/numbers + W + optional .member
+                                    // Examples: TOUV.1, FG3W, FFYW.2, FCTW.1
+                                    if (/^[A-Z0-9]+W(\.\d+)?$/.test(value)) {
+                                        if (!requiredTopics.has(value)) {
+                                            requiredTopics.set(value, []);
+                                        }
+                                        const tab = n.z ? RED.nodes.workspace(n.z) : null;
+                                        const tabName = tab ? tab.label : n.z || "unknown";
+                                        requiredTopics.get(value).push({ node: n, tab: tabName });
+                                    }
+                                }
+                            }
+                        });
+                    });
+
+                    // 3. Check for missing datastreams
+                    const missingDatastreams = [];
+                    requiredTopics.forEach((nodeList, topic) => {
+                        if (!datastreamTopics.has(topic)) {
+                            missingDatastreams.push(`• Datastream '${topic}' required by ${nodeList.length} node(s) but not in any read/write node:`);
+                            // Group by tab for better readability
+                            const byTab = {};
+                            nodeList.forEach(item => {
+                                if (!byTab[item.tab]) byTab[item.tab] = [];
+                                byTab[item.tab].push(item.node.name || item.node.id);
+                            });
+                            Object.keys(byTab).forEach(tabName => {
+                                missingDatastreams.push(`  • [${tabName}]: ${byTab[tabName].join(', ')}`);
+                            });
+                        }
+                    });
+
+                    return missingDatastreams;
+                }
+
+                // Collect all existing tab names
+                const existingTabs = new Set();
+                RED.nodes.eachWorkspace(function (ws) {
+                    existingTabs.add(ws.label);
+                });
+
+                // Validate filter tab names exist
+                includeTabs.forEach((tabName) => {
+                    if (!existingTabs.has(tabName)) {
+                        errors.push(`• Include filter error: Tab "${tabName}" does not exist`);
+                    }
+                });
+
+                excludeTabs.forEach((tabName) => {
+                    if (!existingTabs.has(tabName)) {
+                        errors.push(`• Exclude filter error: Tab "${tabName}" does not exist`);
+                    }
+                });
+
+                // If there are filter errors, return early
+                if (errors.length > 0) {
+                    return { errors, warnings };
+                }
+
+                // Check node names that must not contain spaces or topic-forbidden chars (e.g. room-loop)
+                const nameForbiddenRegex = /[\s#+\x00-\x1F\x7F]/;
+                RED.nodes.eachNode(function (scanNode) {
+                    if (scanNode.z) {
+                        const tab = RED.nodes.workspace(scanNode.z);
+                        if (tab && tab.disabled) return;
+                        const tabName = tab ? tab.label : scanNode.z;
+                        if (includeTabs.length > 0 && !includeTabs.includes(tabName)) return;
+                        if (excludeTabs.length > 0 && excludeTabs.includes(tabName)) return;
+                    }
+                    if (scanNode.type === "uniflex-room-loop" && scanNode.name && nameForbiddenRegex.test(scanNode.name)) {
+                        const tab = scanNode.z ? RED.nodes.workspace(scanNode.z) : null;
+                        const tabName = tab ? tab.label : scanNode.z || "unknown";
+                        errors.push(`• room-loop "${scanNode.name}" (${tabName}): name must not contain spaces, #, +, or control characters. Use e.g. M3 or Kütte_M3.`);
+                    }
+                });
+
+                // Scan all nodes for publishers and listeners - UNIVERSAL APPROACH
+                RED.nodes.eachNode(function (scanNode) {
+                    // Skip disabled flows by default
+                    if (scanNode.z) {
+                        // scanNode.z is the tab ID
+                        const tab = RED.nodes.workspace(scanNode.z);
+                        if (tab && tab.disabled) {
+                            return; // Skip nodes in disabled flows
+                        }
+
+                        // Tab filtering: skip nodes not in included tabs or in excluded tabs
+                        const tabName = tab ? tab.label : scanNode.z;
+
+                        // Skip if includeTabs is specified and this tab is not included
+                        if (includeTabs.length > 0 && !includeTabs.includes(tabName)) {
+                            return;
+                        }
+
+                        // Skip if excludeTabs is specified and this tab is excluded
+                        if (excludeTabs.length > 0 && excludeTabs.includes(tabName)) {
+                            return;
+                        }
+                    }
+
+                    // Generic topic extraction - works for any node type
+                    const topics = [];
+
+                    // Extract topics from common node properties
+                    if (scanNode.topic) topics.push(scanNode.topic);
+                    if (scanNode.roomTickTopic) topics.push(scanNode.roomTickTopic);
+                    if (scanNode.globalTickTopic) topics.push(scanNode.globalTickTopic);
+                    if (scanNode.setpointTopic) topics.push(scanNode.setpointTopic);
+                    if (scanNode.returnTopic) topics.push(scanNode.returnTopic);
+                    if (scanNode.forceOpenTopic) topics.push(scanNode.forceOpenTopic);
+                    if (scanNode.forceCloseTopic) topics.push(scanNode.forceCloseTopic);
+                    if (scanNode.valveCmdTopic) topics.push(scanNode.valveCmdTopic);
+                    if (scanNode.coolingModeTopic) topics.push(scanNode.coolingModeTopic);
+                    if (scanNode.dewPointTopic) topics.push(scanNode.dewPointTopic);
+                    if (scanNode.tRetOut) topics.push(scanNode.tRetOut);
+
+                    // UNIVERSAL: Determine publisher/listener based on node configuration and wiring
+                    // A node is a PUBLISHER if:
+                    // 1. It has outputs (can send messages)
+                    // 2. It has topics configured (will publish to those topics)
+                    // 3. It's not a pure input node (has some output capability)
+
+                    // A node is a LISTENER if:
+                    // 1. It has inputs (can receive messages)
+                    // 2. It has topics configured (will listen to those topics)
+                    // 3. It's not a pure output node (has some input capability)
+
+                    const hasOutputs = scanNode.outputs > 0;
+                    const hasInputs = scanNode.inputs > 0;
+                    const hasTopics = topics.length > 0;
+
+                    // Universal logic: if it has outputs and topics, it's a publisher
+                    // if it has inputs and topics, it's a listener
+                    const isPublisher = hasOutputs && hasTopics;
+                    const isListener = hasInputs && hasTopics;
+
+                    // Add topics to appropriate maps
+                    topics.forEach((topic) => {
+                        if (topic && topic.trim()) {
+                            if (isPublisher) {
+                                publishers.set(topic, [...(publishers.get(topic) || []), scanNode]);
+                            }
+                            if (isListener) {
+                                listeners.set(topic, [...(listeners.get(topic) || []), scanNode]);
+                            }
+                        }
+                    });
+                });
+
+                // UNIVERSAL: Check for publisher-listener mismatches
+                const unlistenedTopics = [];
+                const unpublishedTopics = [];
+
+                publishers.forEach((nodes, topic) => {
+                    if (!listeners.has(topic)) {
+                        const nodeNames = nodes.map((n) => {
+                            const tab = n.z ? RED.nodes.workspace(n.z) : null;
+                            const tabName = tab ? tab.label : n.z || "unknown";
+                            return `${n.name || n.id} (${tabName})`;
+                        });
+
+                        unlistenedTopics.push(`• Topic '${topic}' is published by ${nodes.length} node(s), but has no listeners:`);
+                        nodeNames.forEach((nodeName) => {
+                            unlistenedTopics.push(`  • ${nodeName}`);
+                        });
+                    }
+                });
+
+                listeners.forEach((nodes, topic) => {
+                    if (!publishers.has(topic)) {
+                        const nodeNames = nodes.map((n) => {
+                            const tab = n.z ? RED.nodes.workspace(n.z) : null;
+                            const tabName = tab ? tab.label : n.z || "unknown";
+                            return `${n.name || n.id} (${tabName})`;
+                        });
+                        unpublishedTopics.push(`• Topic '${topic}' is listened by ${nodes.length} node(s), but has no publishers:`);
+                        nodeNames.forEach((nodeName) => {
+                            unpublishedTopics.push(`  • ${nodeName}`);
+                        });
+                    }
+                });
+
+                // NEW: Datastream-specific validation
+                const missingDatastreams = validateDatastreams();
+
+                // Add warnings in organized format
+                if (unlistenedTopics.length > 0) {
+                    warnings.push(`1) Unlistened topics published (${unlistenedTopics.length}):`);
+                    warnings.push(...unlistenedTopics.map((topic) => `    ${topic}`));
+                }
+
+                if (unpublishedTopics.length > 0) {
+                    warnings.push(`2) Unpublished topics listened (${unpublishedTopics.length}):`);
+                    warnings.push(...unpublishedTopics.map((topic) => `    ${topic}`));
+                }
+
+                if (missingDatastreams.length > 0) {
+                    warnings.push(`3) Missing datastream topics (${missingDatastreams.length}):`);
+                    warnings.push(...missingDatastreams.map((msg) => `    ${msg}`));
+                }
+
+                return { errors, warnings };
+            }
+
+            // Bind test button
+            testButton.on("click", runValidation);
+
+            // Re-run validation when filters change
+            $("#node-input-enabled").on("change", runValidation);
+
+            // Run initial validation
+            runValidation();
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .flow-validator-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .flow-validator-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .flow-validator-div .form-row div,
+    .flow-validator-div .form-row input,
+    .flow-validator-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .flow-validator-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .flow-validator-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .flow-validator-div #validation-results {
+        font-family: monospace;
+        font-size: 0.95em;
+        white-space: pre-wrap;
+    }
+
+    /* Style Validate button */
+    .flow-validator-div .red-ui-button-small {
+        height: 24px !important;
+        font-size: 14px !important;
+        border-radius: 5px !important;
+        padding: 0 5px !important;
+        background-color: #f9f9f9 !important;
+    }
+</style>
+
+<!-- Form fields for the node -->
+<script type="text/html" data-template-name="uniflex-flow-validator">
+    <div class="flow-validator-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+            <div class="help-text">Configuration name for this flow validator.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Validation Settings</b>
+
+        <div class="form-row">
+            <label for="node-input-enabled"><i class="fa fa-toggle-on"></i> Enabled</label>
+            <input type="checkbox" id="node-input-enabled" />
+            <div class="help-text">Enable flow validation.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Validation Scope</b>
+
+        <div class="form-row">
+            <label for="node-input-includeTabs"><i class="fa fa-filter"></i> Include tabs (optional)</label>
+            <input type="text" id="node-input-includeTabs" placeholder="tab1,tab2,tab3" />
+            <div class="help-text">Comma-separated list of tab names to include in validation. Leave empty to validate all enabled tabs.</div>
+            <div class="help-text"><b>Note:</b> Disabled flows are automatically excluded.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-excludeTabs"><i class="fa fa-ban"></i> Exclude tabs (optional)</label>
+            <input type="text" id="node-input-excludeTabs" placeholder="tab1,tab2,tab3" />
+            <div class="help-text">Comma-separated list of tab names to exclude from validation. Leave empty to validate all tabs.</div>
+        </div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-flow-validator">
+    <h3>Universal Flow Validator</h3>
+    <p>Validates any Node-RED flow to ensure proper publisher-listener relationships and datastream topic availability. Universal and reusable across different installations.</p>
+
+    <h4>Core Features</h4>
+    <ul>
+        <li><b>Universal Publisher-Listener Matching:</b> Ensures all topics have both publishers and listeners</li>
+        <li><b>Datastream Validation:</b> Checks that required datastream topics (e.g., TOUV.1, FG3W) are provided by read/write nodes</li>
+        <li><b>Automatic Topic Discovery:</b> Scans all node types and extracts topics automatically</li>
+        <li><b>Deploy-Time Validation:</b> Runs automatically during flow deployment</li>
+        <li><b>Custom Pattern Support:</b> Optional regex patterns for additional validation</li>
+    </ul>
+
+    <h4>Validation Types</h4>
+    <ul>
+        <li><b>1) Publisher-Listener Matching:</b> Detects topics with publishers but no listeners, or vice versa</li>
+        <li><b>2) Datastream Availability:</b> Ensures datastream topics referenced in node configs (like tOutTopic: "TOUV.1") are actually provided by uniflex-read-data-streams or uniflex-write-data-streams nodes</li>
+        <li><b>3) Node Name Validation:</b> Checks room-loop names don't contain forbidden characters</li>
+    </ul>
+
+    <h4>How It Works</h4>
+    <ul>
+        <li><b>Publisher Detection:</b> Identifies nodes that publish topics (inject, mqtt out, room-loop, etc.)</li>
+        <li><b>Listener Detection:</b> Identifies nodes that listen to topics (mqtt in, floor-loop, function, debug, etc.)</li>
+        <li><b>Datastream Detection:</b> Scans uniflex-read-data-streams and uniflex-write-data-streams mappings for provided topics</li>
+        <li><b>Topic Matching:</b> Ensures every published topic has at least one listener</li>
+        <li><b>Datastream Matching:</b> Ensures every required datastream topic is provided by a read/write node</li>
+        <li><b>Orphan Detection:</b> Finds topics with publishers but no listeners, or listeners but no publishers</li>
+    </ul>
+
+    <h4>Universal Application</h4>
+    <ul>
+        <li><b>Heating Systems:</b> Validates room-loop → floor-loop topic relationships and datastream availability</li>
+        <li><b>MQTT Networks:</b> Ensures MQTT publishers have subscribers</li>
+        <li><b>Sensor Networks:</b> Validates sensor data flow</li>
+        <li><b>Any Custom System:</b> Works with any Node-RED topic-based architecture</li>
+    </ul>
+
+    <h4>Usage</h4>
+    <ol>
+        <li>Add this configuration node to your flow</li>
+        <li>Configure validation settings (optional tab filters)</li>
+        <li>Test validation using the "Validate" button</li>
+        <li>Deploy flows - validation runs automatically if enabled</li>
+    </ol>
+
+    <h4>Validation Results</h4>
+    <ul>
+        <li><b>Warnings:</b> Topics with mismatched publishers/listeners, or missing datastream topics</li>
+        <li><b>Errors:</b> Invalid tab filter names or node name validation failures</li>
+        <li><b>Success:</b> All topics have proper publisher-listener relationships and all datastreams are available</li>
+    </ul>
+
+    <h4>Examples of Detected Issues</h4>
+    <ul>
+        <li><b>Missing Datastream:</b> "Datastream 'TOUV.1' required by 12 nodes but not in any read/write node"</li>
+        <li><b>Orphaned Publisher:</b> "Topic 'heating/unused' published by 1 node but has no listeners"</li>
+        <li><b>Missing Publisher:</b> "Topic 'sensor/missing' listened by 3 nodes but has no publishers"</li>
+    </ul>
+</script>

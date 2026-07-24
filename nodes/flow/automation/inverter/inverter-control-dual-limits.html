@@ -1,0 +1,437 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-inverter-control-dual-limits", {
+        category: "uniflex energy",
+        color: "#D7D7A0",
+        // Define the default values for the node configuration
+        defaults: {
+            name: { value: "" },
+            outputTopic: { value: "", required: true },
+
+            topicCurrentGrid1Power: { value: "", required: true },
+            topicCurrentGrid2Power: { value: "", required: true },
+            topicExternalSetpoint: { value: "", required: true },
+
+            topicMaxGrid1Import: { value: "", required: false },
+            topicMaxGrid1Export: { value: "", required: false },
+            topicMaxGrid2Import: { value: "", required: false },
+            topicMaxGrid2Export: { value: "", required: false },
+
+            topicMaxInverterImport: { value: "", required: false },
+            topicMaxInverterExport: { value: "", required: false },
+
+            topicDebug: { value: "", required: false }
+        },
+        // Define the inputs and outputs of the node
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-flash",
+        label: function () {
+            return this.name || "inverter control (dual limits)";
+        },
+        paletteLabel: function () {
+            return "inverter control (dual limits)";
+        },
+        // Update form fields
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-outputTopic").val(node.outputTopic);
+
+            $("#node-input-topicCurrentGrid1Power").val(node.topicCurrentGrid1Power);
+            $("#node-input-topicCurrentGrid2Power").val(node.topicCurrentGrid2Power);
+            $("#node-input-topicExternalSetpoint").val(node.topicExternalSetpoint);
+
+            $("#node-input-topicMaxGrid1Import").val(node.topicMaxGrid1Import);
+            $("#node-input-topicMaxGrid1Export").val(node.topicMaxGrid1Export);
+            $("#node-input-topicMaxGrid2Import").val(node.topicMaxGrid2Import);
+            $("#node-input-topicMaxGrid2Export").val(node.topicMaxGrid2Export);
+
+            $("#node-input-topicMaxInverterImport").val(node.topicMaxInverterImport);
+            $("#node-input-topicMaxInverterExport").val(node.topicMaxInverterExport);
+
+            $("#node-input-topicDebug").val(node.topicDebug);
+
+            // Define event listeners for form fields
+            $(
+                "#node-input-topicCurrentGrid1Power, #node-input-topicCurrentGrid2Power, #node-input-topicExternalSetpoint, #node-input-topicMaxGrid1Import, #node-input-topicMaxGrid1Export, #node-input-topicMaxGrid2Import, #node-input-topicMaxGrid2Export, #node-input-topicMaxInverterImport, #node-input-topicMaxInverterExport, #node-input-topicDebug"
+            ).on("input", function () {
+                updateTipText();
+            });
+
+            // Initialize topic dropdown and tip text
+            queryControllerConfig();
+            updateTipText();
+
+            // Query topics defined in read and write nodes
+            function queryControllerConfig() {
+                $.getJSON(`uniflex/controller-config`, function (data) {
+                    _controllers = data;
+
+                    initializeAutocomplete($("#node-input-outputTopic"));
+
+                    initializeAutocomplete($("#node-input-topicCurrentGrid1Power"));
+                    initializeAutocomplete($("#node-input-topicCurrentGrid2Power"));
+                    initializeAutocomplete($("#node-input-topicExternalSetpoint"));
+
+                    initializeAutocomplete($("#node-input-topicMaxGrid1Import"));
+                    initializeAutocomplete($("#node-input-topicMaxGrid1Export"));
+                    initializeAutocomplete($("#node-input-topicMaxGrid2Import"));
+                    initializeAutocomplete($("#node-input-topicMaxGrid2Export"));
+
+                    initializeAutocomplete($("#node-input-topicMaxInverterImport"));
+                    initializeAutocomplete($("#node-input-topicMaxInverterExport"));
+
+                    initializeAutocomplete($("#node-input-topicDebug"));
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            // Initialize autocomplete for topic inputs in the editable list
+            function initializeAutocomplete(element, onSelect = null) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+
+                            const matches = selection?.filter((obj) => {
+                                return obj.label.toLowerCase().indexOf(term) > -1;
+                            });
+
+                            response(matches);
+                        },
+                        focus: function (event, ui) {
+                            // Don't change the input value on hover/focus
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+
+                            // Call the onSelect callback if provided
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            // Return a list of topics from the controller configuration
+            // Structure: [ { key: "ABC", member: 1, topic: test/1, label: ... } ]
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+
+                return result;
+            }
+
+            // Update the tip text based on current settings
+            function updateTipText() {
+                const requiredTopics = [
+                    $("#node-input-topicCurrentGrid1Power").val(),
+                    $("#node-input-topicCurrentGrid2Power").val(),
+                    $("#node-input-topicExternalSetpoint").val()
+                ].filter((t) => t && t.trim());
+
+                const optionalTopics = [
+                    $("#node-input-topicMaxGrid1Import").val(),
+                    $("#node-input-topicMaxGrid1Export").val(),
+                    $("#node-input-topicMaxGrid2Import").val(),
+                    $("#node-input-topicMaxGrid2Export").val(),
+                    $("#node-input-topicMaxInverterImport").val(),
+                    $("#node-input-topicMaxInverterExport").val(),
+                    $("#node-input-topicDebug").val()
+                ].filter((t) => t && t.trim());
+
+                const tipText1 = `This dual limit inverter control requires 3 required topics and supports 7 optional topics.`;
+                const tipText2 = `Required topics configured: ${requiredTopics.length}/3 | Optional topics: ${optionalTopics.length}/7`;
+                const tipText3 = `Grid 1 has higher priority limits, Grid 2 has lower priority limits.`;
+                const tipText4 = `Power values are bipolar: positive for import, negative for export.`;
+                const tipText5 = `Input formats supported: single topic messages, object messages, and nested payload objects.`;
+                const tipText6 = `Incoming message formats:
+                1. { topic: "ic/inverter/setpoint", payload: 0.5 }
+                2. { "ic/inverter/setpoint": 0.5, "ic/grid/actual": 1.0, ... }
+                3. { payload: { "ic/inverter/setpoint": 0.5, "ic/grid/actual": 1.0, ... } }`;
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+                $("#node-input-tip-text-3").text(tipText3);
+                $("#node-input-tip-text-4").text(tipText4);
+                $("#node-input-tip-text-5").text(tipText5);
+                $("#node-input-tip-text-6").text(tipText6);
+            }
+        },
+        // Save the values from the UI to the node configuration
+        oneditsave: function () {
+            const node = this;
+
+            node.name = $("#node-input-name").val();
+            node.outputTopic = $("#node-input-outputTopic").val();
+
+            node.topicCurrentGrid1Power = $("#node-input-topicCurrentGrid1Power").val();
+            node.topicCurrentGrid2Power = $("#node-input-topicCurrentGrid2Power").val();
+            node.topicExternalSetpoint = $("#node-input-topicExternalSetpoint").val();
+
+            node.topicMaxGrid1Import = $("#node-input-topicMaxGrid1Import").val();
+            node.topicMaxGrid1Export = $("#node-input-topicMaxGrid1Export").val();
+            node.topicMaxGrid2Import = $("#node-input-topicMaxGrid2Import").val();
+            node.topicMaxGrid2Export = $("#node-input-topicMaxGrid2Export").val();
+
+            node.topicMaxInverterImport = $("#node-input-topicMaxInverterImport").val();
+            node.topicMaxInverterExport = $("#node-input-topicMaxInverterExport").val();
+
+            node.topicDebug = $("#node-input-topicDebug").val();
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .inverter-control-dual-limits-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .inverter-control-dual-limits-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .inverter-control-dual-limits-div .form-row div,
+    .inverter-control-dual-limits-div .form-row input,
+    .inverter-control-dual-limits-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .inverter-control-dual-limits-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .inverter-control-dual-limits-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .inverter-control-dual-limits-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    /* Autocomplete widget styling */
+    .inverter-control-dual-limits-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .inverter-control-dual-limits-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+        position: relative;
+    }
+
+    .inverter-control-dual-limits-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+</style>
+
+<!-- Form fields are defined in the template below -->
+<script type="text/html" data-template-name="uniflex-inverter-control-dual-limits">
+    <div class="inverter-control-dual-limits-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-comment"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="" />
+            <div class="help-text">Topic name for the calculated inverter setpoint output message</div>
+        </div>
+
+        <div class="form-divider"></div>
+
+        <div class="form-row">
+            <label for="node-input-topicCurrentGrid1Power"><i class="fa fa-bolt"></i> Grid 1 power topic</label>
+            <input type="text" id="node-input-topicCurrentGrid1Power" placeholder="" />
+            <div class="help-text">Topic for current grid 1 power (higher priority limits, required)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-topicCurrentGrid2Power"><i class="fa fa-bolt"></i> Grid 2 power topic</label>
+            <input type="text" id="node-input-topicCurrentGrid2Power" placeholder="" />
+            <div class="help-text">Topic for current grid 2 power (lower priority limits, required)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-topicExternalSetpoint"><i class="fa fa-bullseye"></i> External setpoint topic</label>
+            <input type="text" id="node-input-topicExternalSetpoint" placeholder="" />
+            <div class="help-text">Topic for external inverter setpoint (required)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-topicMaxGrid1Import"><i class="fa fa-arrow-up"></i> Max grid 1 import topic</label>
+            <input type="text" id="node-input-topicMaxGrid1Import" placeholder="" />
+            <div class="help-text">Topic for maximum grid 1 import power (default: 1200)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-topicMaxGrid1Export"><i class="fa fa-arrow-down"></i> Max grid 1 export topic</label>
+            <input type="text" id="node-input-topicMaxGrid1Export" placeholder="" />
+            <div class="help-text">Topic for maximum grid 1 export power (default: -1200)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-topicMaxGrid2Import"><i class="fa fa-arrow-up"></i> Max grid 2 import topic</label>
+            <input type="text" id="node-input-topicMaxGrid2Import" placeholder="" />
+            <div class="help-text">Topic for maximum grid 2 import power (default: 1500)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-topicMaxGrid2Export"><i class="fa fa-arrow-down"></i> Max grid 2 export topic</label>
+            <input type="text" id="node-input-topicMaxGrid2Export" placeholder="" />
+            <div class="help-text">Topic for maximum grid 2 export power (default: -1500)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-topicMaxInverterImport"><i class="fa fa-arrow-up"></i> Max inverter import topic</label>
+            <input type="text" id="node-input-topicMaxInverterImport" placeholder="" />
+            <div class="help-text">Topic for maximum inverter import power (default: 1000)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-topicMaxInverterExport"><i class="fa fa-arrow-down"></i> Max inverter export topic</label>
+            <input type="text" id="node-input-topicMaxInverterExport" placeholder="" />
+            <div class="help-text">Topic for maximum inverter export power (default: -1000)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-topicDebug"><i class="fa fa-bug"></i> Debug topic</label>
+            <input type="text" id="node-input-topicDebug" placeholder="" />
+            <div class="help-text">Topic to enable debug logging (optional)</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+        <div class="form-tips" id="node-input-tip-text-4"></div>
+        <div class="form-tips" id="node-input-tip-text-5"></div>
+        <div class="form-tips" id="node-input-tip-text-6" style="white-space: pre-line;"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-inverter-control-dual-limits">
+    <p>Calculate a new setpoint for the inverter with dual grid limits, taking into account the limitations for both grids and the inverter.</p>
+    <p>This node implements dual-limit inverter control logic with prioritized grid congestion management and anti-windup protection.</p>
+
+    <h3>Parameters</h3>
+    <dl class="message-properties">
+        <dt class="optional">name <span class="property-type">string</span></dt>
+        <dd>User-friendly name for the node</dd>
+
+        <dt>outputTopic <span class="property-type">string</span></dt>
+        <dd>The topic name for the output message containing the calculated inverter setpoint</dd>
+
+        <dt>topicCurrentGrid1Power <span class="property-type">string</span></dt>
+        <dd>Topic name for the current grid 1 power measurement (higher priority limits, required)</dd>
+
+        <dt>topicCurrentGrid2Power <span class="property-type">string</span></dt>
+        <dd>Topic name for the current grid 2 power measurement (lower priority limits, required)</dd>
+
+        <dt>topicExternalSetpoint <span class="property-type">string</span></dt>
+        <dd>Topic name for the external inverter setpoint (required)</dd>
+
+        <dt>topicMaxGrid1Import <span class="property-type">string</span></dt>
+        <dd>Topic name for the maximum grid 1 import power limit (optional, default: 1200)</dd>
+
+        <dt>topicMaxGrid1Export <span class="property-type">string</span></dt>
+        <dd>Topic name for the maximum grid 1 export power limit (optional, default: -1200)</dd>
+
+        <dt>topicMaxGrid2Import <span class="property-type">string</span></dt>
+        <dd>Topic name for the maximum grid 2 import power limit (optional, default: 1500)</dd>
+
+        <dt>topicMaxGrid2Export <span class="property-type">string</span></dt>
+        <dd>Topic name for the maximum grid 2 export power limit (optional, default: -1500)</dd>
+
+        <dt>topicMaxInverterImport <span class="property-type">string</span></dt>
+        <dd>Topic name for the maximum inverter import power limit (optional, default: 1000)</dd>
+
+        <dt>topicMaxInverterExport <span class="property-type">string</span></dt>
+        <dd>Topic name for the maximum inverter export power limit (optional, default: -1000)</dd>
+
+        <dt>topicDebug <span class="property-type">string</span></dt>
+        <dd>Topic name to enable debug logging (optional)</dd>
+    </dl>
+
+    <h3>Inputs</h3>
+    <p>This node accepts input messages in 3 different formats (using your configured topic names):</p>
+    <dl class="message-properties">
+        <dt>Single topic format</dt>
+        <dd><code>{ topic: "ic/grid/1/actual", payload: 150.5 }</code></dd>
+
+        <dt>Object format</dt>
+        <dd><code>{ "ic/grid/1/actual": 150.5, "ic/grid/2/actual": 200.0, "ic/inverter/setpoint": 100.0, ... }</code></dd>
+
+        <dt>Nested payload format</dt>
+        <dd><code>{ payload: { "ic/grid/1/actual": 150.5, "ic/grid/2/actual": 200.0, "ic/inverter/setpoint": 100.0, ... } }</code></dd>
+    </dl>
+
+    <h3>Output</h3>
+    <p>A successful output message includes the following properties:</p>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>The calculated inverter setpoint value</dd>
+
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>The output topic as configured in the node (if specified)</dd>
+
+        <dt>metadata <span class="property-type">object</span></dt>
+        <dd>
+            Internal variables and calculations for debugging, including separate objects for grid 1 and grid 2:
+            <ul>
+                <li><code>1.current_grid_power</code> - current grid 1 power measurement</li>
+                <li><code>1.max_grid_import, 1.max_grid_export</code> - grid 1 power limits</li>
+                <li><code>2.current_grid_power</code> - current grid 2 power measurement</li>
+                <li><code>2.max_grid_import, 2.max_grid_export</code> - grid 2 power limits</li>
+                <li><code>1.setpoint, 2.setpoint</code> - calculated setpoints for each grid</li>
+                <li><code>1.on_inverter_limit, 2.on_inverter_limit</code> - limitation status</li>
+            </ul>
+        </dd>
+    </dl>
+
+    <h3>Additional details</h3>
+    <p>The dual limit inverter control maintains internal state for both grid connections, with Grid 1 having higher priority over Grid 2.</p>
+    <p>Power values are bipolar: positive values represent import, negative values represent export.</p>
+    <p>Export limits must be negative or zero, import limits must be positive or zero.</p>
+    <p>The algorithm calculates setpoints for both grids and selects the most restrictive one, giving priority to Grid 1 limits.</p>
+    <p>Grid 1 is typically used for substation limits, Grid 2 for overall grid limits.</p>
+    <p><strong>Priority Logic:</strong> If Grid 1 setpoint differs from external setpoint, it takes precedence. Otherwise, Grid 2 setpoint is used.</p>
+
+    <p>Example output message:</p>
+    <code style="white-space: pre-wrap;">
+        { "payload": 75.5, "topic": "ic/inverter/out", "metadata": { "1": { "current_grid_power": 150.0, "max_grid_import": 1200, "max_grid_export": -1200, "setpoint": 75.5,
+        "on_inverter_limit": 0 }, "2": { "current_grid_power": 200.0, "max_grid_import": 1500, "max_grid_export": -1500, "setpoint": 85.5, "on_inverter_limit": 0 } } }
+    </code>
+</script>

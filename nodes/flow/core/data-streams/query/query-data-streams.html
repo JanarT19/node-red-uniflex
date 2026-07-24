@@ -1,0 +1,234 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-query-data-streams", {
+        category: "uniflex",
+        color: "#93b4f3",
+        // Define the default values for the node configuration
+        defaults: {
+            name: { value: "" },
+            controller: { value: "", type: "uniflex-controller", required: true },
+            protocol: {
+                value: "UDP",
+                validate: function (v) {
+                    return ["UDP", "HTTP"].includes(v);
+                }
+            },
+            queryInterval: {
+                value: 5,
+                validate: function (v) {
+                    return Number.isInteger(parseInt(v)) && parseInt(v) > 2;
+                }
+            }
+        },
+        // Define the inputs and outputs of the node
+        inputs: 0,
+        outputs: 1,
+        icon: "node-red/bridge-dash.svg",
+        label: function () {
+            const controller = this.controller;
+            const protocol = this.protocol;
+
+            let defaultName = `receive data streams`;
+            if (controller && protocol) defaultName = `receive data streams: ${protocol}`;
+
+            return this.name || defaultName;
+        },
+        paletteLabel: function () {
+            return "receive data streams";
+        },
+        // Update form fields
+        oneditprepare: function () {
+            const node = this;
+            let _controller = {};
+
+            // Define event listeners for form fields
+            $("#node-input-controller").on("change", function () {
+                queryControllerConfig();
+            });
+
+            $("#node-input-protocol").on("change", function () {
+                updateInterval();
+                validateProtocol();
+            });
+
+            $("#node-input-protocol, #node-input-queryInterval").on("change", function () {
+                updateTipText();
+            });
+
+            // Get the controller node configuration to show the tip text
+            function queryControllerConfig() {
+                const nodeId = $("#node-input-controller").val();
+
+                $.getJSON(`uniflex/controller-config?id=${nodeId}`, function (data) {
+                    _controller = data;
+
+                    // Execute functions after successful query
+                    updateTipText();
+                    validateProtocol();
+                }).fail(function () {
+                    console.error("Failed to get controller configuration!");
+                });
+            }
+
+            // Show the query interval field only when the protocol is HTTP
+            function updateInterval() {
+                const protocol = $("#node-input-protocol").val();
+                const el = $("#node-input-queryInterval-div");
+
+                if (protocol === "HTTP") {
+                    el.show();
+                } else {
+                    el.hide();
+                }
+            }
+
+            // Update the tip text on input change
+            function updateTipText() {
+                const protocol = $("#node-input-protocol").val();
+                const queryInterval = $("#node-input-queryInterval").val();
+                const uniqueId = _controller.uniqueId || "???";
+                const udpPort = _controller.udpPort || "???";
+
+                let tipText1 = "";
+                let tipText2 = `Output format: { payload: { name: { values: [...], status: int, timestamp: int } }, "controller": { ... } }`;
+
+                if (protocol === "HTTP") {
+                    tipText1 += `Controller (${uniqueId}) data will be queried using HTTP every ${queryInterval} seconds.`;
+                } else {
+                    tipText1 += `Controller (${uniqueId}) data will be sent in real-time to port ${udpPort} using a UDP channel.`;
+                }
+
+                $("#node-input-tip-text-1").text(tipText1);
+                $("#node-input-tip-text-2").text(tipText2);
+            }
+
+            function validateProtocol() {
+                const el = $("#node-input-protocol");
+                const protocol = el.val();
+
+                let valid;
+                valid = _controller.host && ["UDP", "HTTP"].includes(protocol);
+
+                if (_controller.host !== "127.0.0.1" && protocol === "UDP") {
+                    valid = false;
+                }
+
+                el.css("border-color", valid ? "" : "red");
+            }
+        },
+        // Save the values from the UI to the node configuration
+        oneditsave: function () {
+            const node = this;
+
+            node.controller = $("#node-input-controller").val();
+            node.protocol = $("#node-input-protocol").val();
+            node.queryInterval = $("#node-input-queryInterval").val();
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .query-data-streams-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .query-data-streams-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .query-data-streams-div .form-row div,
+    .query-data-streams-div .form-row input,
+    .query-data-streams-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .query-data-streams-div .form-row select {
+        width: 66% !important;
+    }
+
+    .query-data-streams-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+</style>
+
+<!-- Form fields are defined in the template below -->
+<script type="text/html" data-template-name="uniflex-query-data-streams">
+    <div class="query-data-streams-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-controller"><i class="fa fa-search"></i> Controller</label>
+            <select id="node-input-controller">
+                <option value="" disabled selected>Select controller...</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-protocol"><i class="fa fa-exchange"></i> Protocol</label>
+            <select id="node-input-protocol">
+                <option value="UDP">UDP</option>
+                <option value="HTTP">HTTP</option>
+            </select>
+        </div>
+
+        <div class="form-row" id="node-input-queryInterval-div" style="display:none;">
+            <label for="node-input-queryInterval"><i class="fa fa-clock-o"></i> Query interval (s)</label>
+            <input type="number" id="node-input-queryInterval" />
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-query-data-streams">
+    <p>
+        Listen (or query) for real-time local data stream data from a controller, outputting the values both as a <code>msg</code> and also saving the latest values to the global
+        context.
+    </p>
+    <p>This should be the source node of all data stream related flows.</p>
+
+    <h3>Parameters</h3>
+    <dl class="message-properties">
+        <dt class="optional">name <span class="property-type">string</span></dt>
+        <dd>User-friendly name for the node</dd>
+
+        <dt>controller <span class="property-type">controller</span></dt>
+        <dd>The source of the data streams on the local network. Localhost (127.0.0.1) for most cases.</dd>
+
+        <dt>protocol <span class="property-type">string</span></dt>
+        <dd>Specifies how data will be received. UDP enables real-time data, while HTTP makes periodical queries.</dd>
+
+        <dt class="optional">interval <span class="property-type">int</span></dt>
+        <dd>Required for the HTTP protocol, where a query is made every X seconds.</dd>
+    </dl>
+
+    <h3>Output</h3>
+    <dl class="message-properties">
+        <dt>controller <span class="property-type">object</span></dt>
+        <dd>Each output <code>msg</code> includes info about the source of the data, e.g. <code>uniqueId</code>, <code>host</code>, <code>protocol</code>.</dd>
+
+        <dt>payload <span class="property-type">object</span></dt>
+        <dd>
+            The data stream values, e.g. <code style="white-space: normal;">{ "ABCW": { "values": [...], "status": int, "timestamp": int } }</code>.
+            <br />
+            Each UDP output message includes only one data stream, while HTTP output can include multiple data streams, formatted as an array.
+        </dd>
+    </dl>
+
+    <h3>Additional details</h3>
+    <p>This node receives data streams from a specified controller and formats the output payload to include values, statuses, and timestamps for each data stream name.</p>
+    <p>This data is also saved to the global context, making it accessible to other nodes in any flow.</p>
+
+    <p>
+        Example output message:
+        <code style="white-space: pre-wrap;">
+            { "payload": { "key1": { "values": [...], "status": int, "timestamp": int }, "key2": {...}, }, "controller": { "name": "ABCW", "uniqueId": "local", "host": "127.0.0.1"
+            } }
+        </code>
+    </p>
+</script>

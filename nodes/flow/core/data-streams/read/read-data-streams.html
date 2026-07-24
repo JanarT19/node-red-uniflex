@@ -1,0 +1,1439 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-read-data-streams", {
+        category: "uniflex",
+        color: "#57db83",
+        defaults: {
+            name: { value: "" },
+            controller: { value: "", type: "uniflex-controller", required: true },
+            outputMode: { value: "", validate: (v) => ["all", "change"].includes(v) },
+            msgType: { value: "", validate: (v) => ["separate", "together", "split"].includes(v) },
+            mappings: { value: [] }, // Store multiple mappings
+            debugTopics: { value: "" }, // Comma-separated topic prefixes to log (empty = off)
+            outputs: { value: 1 } // Node output ports
+        },
+        // Define the inputs of the node
+        inputs: 1,
+        icon: "node-red/switch.svg",
+        label: function () {
+            const n = (this.mappings || []).length;
+            return this.name || (n ? `parse data streams: ${n}` : "parse data streams");
+        },
+        paletteLabel: () => "parse data streams",
+        outputLabels: function (i) {
+            return this.msgType === "split" && this.mappings && this.mappings[i] ? this.mappings[i].topic || `output #${i + 1}` : null;
+        },
+        // Update form fields
+        oneditprepare: function () {
+            const node = this;
+            let _controller = {};
+            let _lastControllerId = null;
+            const loadingSelector = "#read-ds-loading";
+            const mappingsSelector = "#mappings-container";
+            const mappingsOverlaySelector = "#read-ds-mappings-overlay";
+            let loadingStartedAt = 0;
+            let loadingHideTimer = null;
+            const MIN_LOADING_VISIBLE_MS = 450;
+
+            // Load existing mappings or initialize an empty array
+            const mappings = node.mappings || [];
+
+            // Populate form with node values
+            $("#node-input-name").val(node.name);
+            $("#node-input-controller").val(node.controller);
+            $("#node-input-msgType").val(node.msgType);
+            $("#node-input-outputMode").val(node.outputMode);
+            $("#node-input-debugTopics").val(node.debugTopics || "");
+
+            function setLoadingState(isLoading, text) {
+                const $loading = $(loadingSelector);
+                const $mappings = $(mappingsSelector);
+                const $overlay = $(mappingsOverlaySelector);
+                if (!$loading.length || !$mappings.length || !$overlay.length) return;
+                if (isLoading) {
+                    if (loadingHideTimer) {
+                        clearTimeout(loadingHideTimer);
+                        loadingHideTimer = null;
+                    }
+                    loadingStartedAt = Date.now();
+                    $loading.find(".read-ds-loading-text").text(text || "Loading...");
+                    $loading.show();
+                    $mappings.addClass("read-ds-loading-dim");
+                    $overlay.show();
+                } else {
+                    const elapsed = Date.now() - loadingStartedAt;
+                    const delay = Math.max(0, MIN_LOADING_VISIBLE_MS - elapsed);
+                    const hideNow = () => {
+                        $loading.hide();
+                        $mappings.removeClass("read-ds-loading-dim");
+                        $overlay.hide();
+                    };
+                    if (delay > 0) {
+                        loadingHideTimer = setTimeout(() => {
+                            loadingHideTimer = null;
+                            hideNow();
+                        }, delay);
+                    } else {
+                        hideNow();
+                    }
+                }
+            }
+
+            // Load controller data
+            $("#node-input-controller").change(queryControllerConfig);
+
+            // Define event listeners for form fields
+            $("#node-input-msgType").change(defineOutputPorts);
+            $("#mappings-container, #node-input-msgType, #node-input-outputMode").change(updateTipText);
+
+            // Initialize the form fields
+            initializeEditableList();
+            defineOutputPorts();
+
+            function defineOutputPorts() {
+                const msgType = $("#node-input-msgType").val();
+                const items = $("#mappings-container").editableList("items");
+                node.outputs = msgType === "split" ? items.length : 1;
+            }
+
+            // Query variables related to controller configuration
+            function queryControllerConfig() {
+                const controllerId = $("#node-input-controller").val();
+
+                if (_lastControllerId === controllerId) return;
+                _lastControllerId = controllerId;
+
+                if (!controllerId) {
+                    setLoadingState(false);
+                    $("#mappings-container").editableList("empty");
+                    $("#mappings-container").editableList("addItems", mappings);
+                    updateTipText();
+                    return;
+                }
+
+                setLoadingState(true, "Loading controller config...");
+
+                $.getJSON(`uniflex/controller-config?id=${controllerId}`)
+                    .done((d) => {
+                        _controller = d;
+                        node._controllerCache = d; // Store for access in oneditsave
+                    })
+                    .fail(() => {
+                        console.error("Failed to query controller configuration!");
+                        RED.notify("Failed to query controller configuration!", { type: "error", timeout: 3000 });
+                        _controller = {};
+                    })
+                    .always(function () {
+                        $("#mappings-container").editableList("empty");
+                        $("#mappings-container").editableList("addItems", mappings);
+                        updateTipText();
+                        setTimeout(() => {
+                            try {
+                                triggerSort();
+                                refreshAllPlusButtons();
+                            } finally {
+                                // Hide loading only after expensive list refresh work completes.
+                                requestAnimationFrame(() => setLoadingState(false));
+                            }
+                        }, 200);
+                    });
+            }
+
+            let currentSortColumn = "topic";
+
+            function initializeEditableList() {
+                $("#mappings-container").editableList({
+                    removable: true,
+                    sortable: true,
+                    header: $("<div>").append(
+                        $.parseHTML(`
+                        <div style="width:22px"></div>
+                        <div class="read-data-streams-list" style="text-align:center;white-space:normal;flex:1">
+                            <div class="checkbox-container">Manual entry</div>
+                            <div class="node-input-keyNameManual" id="sort-header-datastream" style="cursor:pointer;user-select:none;">
+                                Data stream name <span class="sort-triangle" id="sort-triangle-datastream">&#9650;</span>
+                            </div>
+                            <div class="node-input-dataType">Data type</div>
+                            <div class="node-input-index">Member index</div>
+                            <div class="node-input-coefficient">Coefficient</div>
+                            <span class="node-input-arrow">&nbsp;&nbsp;</span>
+                            <div class="node-input-topic" id="sort-header-topic" style="cursor:pointer;user-select:none;">
+                                Topic <span class="sort-triangle" id="sort-triangle-topic">&#9650;</span>
+                            </div>
+                            <div class="row-actions"></div>
+                        </div>
+                        <div style="width:28px"></div>
+                    `)
+                    ),
+                    buttons: [
+                        {
+                            label: "delete all",
+                            icon: "fa fa-trash",
+                            title: "delete all data stream mappings",
+                            click: function () {
+                                $("#mappings-container").editableList("empty");
+                                defineOutputPorts();
+                                updateTipText();
+                            }
+                        },
+                        {
+                            label: "auto-generate entries",
+                            icon: "fa fa-refresh",
+                            title: "automatically generate rows for all available controller data streams",
+                            click: function () {
+                                const hasServices = _controller.filteredServices && Object.keys(_controller.filteredServices).length > 0;
+                                if (!hasServices) {
+                                    RED.notify("No available data streams to auto-generate mappings!", { type: "warning", timeout: 3000 });
+                                    return;
+                                }
+
+                                autoGenerateMappings();
+                            }
+                        }
+                    ],
+                    addItem: function (container, index, row) {
+                        addRowElements(container, row);
+
+                        const el = getRowElements(container);
+                        formatRow(el, row);
+                        attachRowEvents(el, container);
+
+                        // Initialize autocomplete for the topic input in this row
+                        initializeAutocomplete(el.topicElement, onAutocompleteSelect);
+
+                        updateTipText();
+                        defineOutputPorts();
+                        refreshPlusButtonFor(container); // ensure button shows/updates
+                    },
+                    removeItem: function (data) {
+                        updateTipText();
+                        defineOutputPorts();
+                        refreshAllPlusButtons();
+                    }
+                });
+
+                setTimeout(function () {
+                    $("#sort-header-datastream").on("click", function () {
+                        currentSortColumn = "datastream";
+                        updateSortIndicators();
+                        triggerSort();
+                    });
+
+                    $("#sort-header-topic").on("click", function () {
+                        currentSortColumn = "topic";
+                        updateSortIndicators();
+                        triggerSort();
+                    });
+
+                    updateSortIndicators();
+                    triggerSort();
+                }, 100);
+            }
+
+            const initialControllerId = $("#node-input-controller").val();
+            if (initialControllerId) {
+                setLoadingState(true, "Loading controller config...");
+                queryControllerConfig();
+            } else {
+                setLoadingState(false);
+            }
+
+            function updateSortIndicators() {
+                $(".sort-triangle").removeClass("active");
+                $(`#sort-triangle-${currentSortColumn}`).addClass("active");
+            }
+
+            function triggerSort() {
+                const $items = $("#mappings-container").editableList("items");
+                if ($items.length === 0) return;
+
+                const sortedItems = [];
+                const incompleteItems = [];
+
+                $items.each(function () {
+                    const container = $(this);
+                    const $li = container.closest("li");
+                    const e = getRowElements(container);
+
+                    const manual = e.manualElement.is(":checked");
+                    const key = manual ? e.keyManualElement.val() : e.keySelectElement.val();
+                    const idx = parseInt(e.indexElement.val()) || 0;
+                    const topic = e.topicElement.val();
+
+                    // Build stable fallbacks so freshly-added rows sort correctly
+                    const normKey = key || (topic && topic.includes(".") ? topic.split(".")[0] : "");
+                    const normIdx = (idx > 0)
+                        ? idx
+                        : (topic && topic.includes(".") ? parseInt(topic.split(".")[1], 10) : 0);
+                    const normTopic = topic || (normKey && normIdx ? `${normKey}.${normIdx}` : "");
+
+                    const entry = { $li, key: normKey, index: normIdx || 0, topic: normTopic };
+
+                    if (!normTopic || !normKey) {
+                        incompleteItems.push(entry);
+                    } else {
+                        sortedItems.push(entry);
+                    }
+                });
+
+                sortedItems.sort((a, b) => {
+                    let cmp = 0;
+                    if (currentSortColumn === "datastream") {
+                        cmp = a.key.toLowerCase().localeCompare(b.key.toLowerCase());
+                    } else {
+                        cmp = (a.topic || "").toLowerCase().localeCompare((b.topic || "").toLowerCase());
+                    }
+                    if (cmp === 0) cmp = a.index - b.index;
+                    return cmp;
+                });
+
+                // Reorder DOM in-place -- avoids triggering addItem callbacks (no autocomplete re-init).
+                // Plus buttons travel with their rows so no refresh needed after a reorder.
+                const allItems = sortedItems.concat(incompleteItems);
+                if (allItems.length === 0) return;
+                const $listContainer = allItems[0].$li.parent();
+                allItems.forEach(entry => $listContainer.append(entry.$li));
+                try { $listContainer.sortable("refreshPositions"); } catch (e) { }
+            }
+
+            function initializeAutocomplete(element, onSelect) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (req, res) {
+                            const term = req.term.toLowerCase();
+                            const sel = getTopics();
+                            res(sel?.filter((o) => o.label.toLowerCase().includes(term)) || []);
+                        },
+                        focus: (e) => e.preventDefault(),
+                        select: function (e, ui) {
+                            e.preventDefault();
+                            element.val(ui.item.topic);
+                            if (onSelect) onSelect(element, ui.item);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const lab = term
+                            ? item.label.replace(
+                                new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig"),
+                                '<strong style="color:#e65;font-weight:bold">$1</strong>'
+                            )
+                            : item.label;
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${lab}</div>`).appendTo(ul);
+                    };
+            }
+
+            // Return a list of topics from the controller configuration
+            // Structure: [ { key: "ABC", member: 1, topic: test/1, label: ... } ]
+            function getTopics() {
+                const allTopics = _controller?.formattedTopics || [];
+
+                const rows = getListElements();
+                const topics = rows.map((row) => row.topicElement.val());
+
+                // Only include topics that are not already used
+                const filteredTopics = allTopics.filter((topic) => {
+                    return !topics.includes(topic.topic);
+                });
+
+                return filteredTopics;
+            }
+
+            // Further processing of a row after a topic is selected from the autocomplete
+            function onAutocompleteSelect(element, obj = {}) {
+                const container = element.closest(".red-ui-editableList-item-content");
+                let elements = getRowElements(container);
+                validateTopic(elements);
+
+                // Try to set the key and index fields according to the selected topic
+                const key = obj.key,
+                    member = obj.member;
+                const manual = elements.manualElement.is(":checked");
+                if (manual || !key || !member) return;
+
+                if (topicRelatedToService(`${key}.${member}`)) {
+                    elements.keySelectElement.val(key).trigger("change");
+                    elements.dataTypeElement.val("value").trigger("change");
+                    // NB! Because populateIndex() changes the element, find the latest
+                    elements = getRowElements(container);
+                    elements.indexElement.val(String(member)).trigger("input").trigger("change");
+                }
+            }
+
+            // Return true if the topic is related to a service
+            function topicRelatedToService(topic) {
+                const fs = _controller?.filteredServices;
+                if (!fs || !topic || !topic.includes(".")) return false;
+
+                const [key, mem] = topic.split(".");
+                const m = parseInt(mem);
+
+                return fs?.[key] && Number.isInteger(m) && m >= 1 && m <= 16;
+            }
+            function sanitizeServiceKey(rawKey) {
+                if (rawKey == null) return "";
+                return String(rawKey).trim().replace(/\.\d+$/, "");
+            }
+
+            // Append the row to the container
+            function addRowElements(container, row) {
+                const rowHtml = `
+                <div class="read-data-streams-list">
+                    <div class="checkbox-container">
+                        <input type="checkbox" class="node-input-manual" ${row.manual === true ? "checked" : ""}>
+                        <div class="helper-text"></div>
+                    </div>
+                    <select class="node-input-keyNameSelect"></select>
+                    <input type="text" class="node-input-keyNameManual" placeholder="Manual entry, e.g. ABCW" value="${row.keyNameManual || ""}">
+                    <select class="node-input-dataType">
+                        <option value="">Data type...</option>
+                        <option value="value" ${row.dataType === "value" ? "selected" : ""}>Value</option>
+                        <option value="status" ${row.dataType === "status" ? "selected" : ""}>Status</option>
+                        <option value="timestamp" ${row.dataType === "timestamp" ? "selected" : ""}>Timestamp</option>
+                    </select>
+                    <input type="number" class="node-input-index" placeholder="Member" value="${row.index || ""}" min="1" max="16">
+                    <input type="number" class="node-input-coefficient" placeholder="Coef." value="${row.coefficient || ""}" step="0.01">
+                    <span class="node-input-arrow">&#8594;</span>
+                    <input type="text" class="node-input-topic" placeholder="Topic" value="${row.topic || ""}">
+                    <div class="row-actions"></div>
+                </div>`;
+                container.append(rowHtml);
+            }
+
+            function refreshPlusButtonFor(container, usedByKey) {
+                // remove any existing
+                container.find(".add-member-dropdown").remove();
+
+                const el = getRowElements(container);
+                const manual = el.manualElement.is(":checked");
+                const key = manual ? el.keyManualElement.val() : el.keySelectElement.val();
+                const idx = parseInt(el.indexElement.val(), 10);
+                if (manual || !key || !Number.isInteger(idx)) return;
+
+                // Get all members for this datastream
+                const allUsedForThisKey = usedByKey?.[key] ?? getUsedIndicesForDataStream(key);
+                const allAvailableForThisKey = _controller?.channels?.[key]
+                    ? Object.values(_controller.channels[key])
+                        .map((m) => parseInt(m.member, 10))
+                        .sort((a, b) => a - b)
+                    : [];
+                const missingForThisKey = allAvailableForThisKey.filter((i) => !allUsedForThisKey.includes(i));
+
+                if (missingForThisKey.length === 0) return; // All members added, no plus button needed
+
+                // Only show plus button on the LAST member of this datastream
+                const maxUsedIndex = Math.max(...allUsedForThisKey);
+                if (idx !== maxUsedIndex) return; // Not the last member, no plus button
+
+                // Find the next missing member after the current index
+                const nextMissingIndex = missingForThisKey.find((i) => i > idx);
+                if (!nextMissingIndex) return; // No next member available
+
+                // Create dropdown for member selection
+                let dropdownHtml = '<select class="add-member-dropdown" title="Add members for ' + key + '">';
+                dropdownHtml += '<option value="" selected disabled>+</option>';
+                dropdownHtml += '<option value="next">Add next member (' + nextMissingIndex + ")</option>";
+
+                if (missingForThisKey.length > 1) {
+                    dropdownHtml += '<option value="all">Add all missing (' + missingForThisKey.length + ")</option>";
+                }
+
+                dropdownHtml += "</select>";
+
+                const dropdown = $(dropdownHtml);
+
+                container.find(".row-actions").append(dropdown);
+                dropdown.on("change", function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const action = $(this).val();
+                    if (action === "next") {
+                        // Find the member object for the next missing index
+                        const availableMembers = findAvailableMembers(key, idx);
+                        const nextMember = availableMembers.find((m) => m.index === nextMissingIndex);
+                        if (nextMember) {
+                            addNextMember(container, { keyNameSelect: key, dataType: el.dataTypeElement.val() }, nextMember);
+                        }
+                    } else if (action === "all") {
+                        // Use only the actually missing members
+                        const availableMembers = findAvailableMembers(key, idx);
+                        const allMissingMembers = missingForThisKey.map((index) => availableMembers.find((m) => m.index === index)).filter((m) => m); // Remove undefined entries
+
+                        addAllMissingMembers(container, { keyNameSelect: key, dataType: el.dataTypeElement.val() }, allMissingMembers);
+                    }
+                    $(this).val(""); // Reset dropdown
+                });
+            }
+
+            function refreshAllPlusButtons() {
+                const $items = $("#mappings-container").editableList("items");
+
+                // Pre-compute used indices per key once so refreshPlusButtonFor
+                // doesn't have to walk all rows again for each row (avoids O(N2)).
+                const usedByKey = {};
+                $items.each(function () {
+                    const c = $(this);
+                    const el = getRowElements(c);
+                    const manual = el.manualElement.is(":checked");
+                    const key = manual ? el.keyManualElement.val() : el.keySelectElement.val();
+                    const idx = parseInt(el.indexElement.val(), 10);
+                    if (key && Number.isInteger(idx) && idx > 0) {
+                        if (!usedByKey[key]) usedByKey[key] = [];
+                        usedByKey[key].push(idx);
+                    }
+                });
+                Object.keys(usedByKey).forEach(k => {
+                    usedByKey[k] = [...new Set(usedByKey[k])].sort((a, b) => a - b);
+                });
+
+                $items.each(function () {
+                    refreshPlusButtonFor($(this), usedByKey);
+                });
+            }
+
+            function findAvailableMembers(keyNameSelect, currentIndex) {
+                if (!keyNameSelect) return [];
+                const members = _controller?.channels?.[keyNameSelect] || {};
+                const avail = Object.values(members)
+                    .map((m) => parseInt(m.member, 10))
+                    .sort((a, b) => a - b);
+                const used = getUsedIndicesForDataStream(keyNameSelect);
+
+                // Find ALL missing members (not just those after current index)
+                const availableIndices = avail.filter((i) => !used.includes(i));
+
+                return availableIndices.map((index) => {
+                    const member = Object.values(members).find((m) => parseInt(m.member, 10) === index);
+                    return { index: index, desc: member?.desc || "" };
+                });
+            }
+
+            function findNextAvailableMember(keyNameSelect, currentIndex) {
+                const availableMembers = findAvailableMembers(keyNameSelect, currentIndex);
+                // Return the first available member (lowest index)
+                return availableMembers.length > 0 ? availableMembers[0] : null;
+            }
+
+            function getUsedIndicesForDataStream(key) {
+                const used = [];
+                $("#mappings-container")
+                    .editableList("items")
+                    .each(function () {
+                        const c = $(this),
+                            e = getRowElements(c);
+                        const manual = e.manualElement.is(":checked");
+                        const k = manual ? e.keyManualElement.val() : e.keySelectElement.val();
+                        const i = parseInt(e.indexElement.val(), 10);
+                        if (k === key && Number.isInteger(i)) used.push(i);
+                    });
+                return used;
+            }
+
+            function addNextMember(container, currentRow, nextMember) {
+                const key = currentRow.keyNameSelect;
+                const svc = _controller?.filteredServices?.[key];
+                if (!svc) {
+                    RED.notify(`Service not found for data stream: ${key}`, { type: "error", timeout: 3000 });
+                    return;
+                }
+
+                const newRow = {
+                    manual: false,
+                    keyNameSelect: key,
+                    keyNameManual: "",
+                    dataType: currentRow.dataType || "value",
+                    index: nextMember.index,
+                    coefficient: svc.conv_coef || 1,
+                    topic: `${key}.${nextMember.index}`
+                };
+                $("#mappings-container").editableList("addItems", [newRow]);
+                defineOutputPorts();
+                updateTipText();
+                setTimeout(() => {
+                    triggerSort();
+                    setTimeout(refreshAllPlusButtons, 200); // Additional delay after sorting
+                }, 100);
+
+                RED.notify(`Added member ${nextMember.index}${nextMember.desc ? ` (${nextMember.desc})` : ""} for ${key}`, { type: "success", timeout: 3000 });
+            }
+
+            function addAllMissingMembers(container, currentRow, availableMembers) {
+                const key = currentRow.keyNameSelect;
+                const svc = _controller?.filteredServices?.[key];
+                if (!svc) {
+                    RED.notify(`Service not found for data stream: ${key}`, { type: "error", timeout: 3000 });
+                    return;
+                }
+
+                // Double-check: only add members that are actually missing
+                const currentlyUsed = getUsedIndicesForDataStream(key);
+                const actuallyMissing = availableMembers.filter((member) => !currentlyUsed.includes(member.index));
+
+                if (actuallyMissing.length === 0) {
+                    RED.notify(`All members for ${key} are already added`, { type: "warning", timeout: 3000 });
+                    return;
+                }
+
+                const newRows = actuallyMissing.map((member) => ({
+                    manual: false,
+                    keyNameSelect: key,
+                    keyNameManual: "",
+                    dataType: currentRow.dataType || "value",
+                    index: member.index,
+                    coefficient: svc.conv_coef || 1,
+                    topic: `${key}.${member.index}`
+                }));
+
+                $("#mappings-container").editableList("addItems", newRows);
+                defineOutputPorts();
+                updateTipText();
+                setTimeout(() => {
+                    triggerSort();
+                    setTimeout(refreshAllPlusButtons, 200); // Additional delay after sorting
+                }, 100);
+
+                RED.notify(`Added ${newRows.length} members for ${key}`, { type: "success", timeout: 3000 });
+            }
+
+            // Get references to the created elements
+            function getRowElements(container) {
+                return {
+                    manualElement: container.find(".node-input-manual"),
+                    keySelectElement: container.find(".node-input-keyNameSelect"),
+                    keyManualElement: container.find(".node-input-keyNameManual"),
+                    dataTypeElement: container.find(".node-input-dataType"),
+                    indexElement: container.find(".node-input-index"),
+                    coefficientElement: container.find(".node-input-coefficient"),
+                    topicElement: container.find(".node-input-topic")
+                };
+            }
+
+            function resolveRowServiceKey(row) {
+                let key = sanitizeServiceKey(row?.keyNameSelect || row?.keyNameManual || "");
+                if (!key && row?.topic) {
+                    const parts = String(row.topic).trim().split(".");
+                    if (parts.length >= 2) {
+                        key = sanitizeServiceKey(parts[0]);
+                    }
+                }
+                return key;
+            }
+
+            // Format the newly created / intialized row's elements
+            function formatRow(e, row) {
+                const fs = _controller.filteredServices || {};
+                const allServices = _controller.services || {};
+                const keyNames = sortKeysByServiceNames(fs);
+
+                const sel = e.keySelectElement;
+                const selectedKey = resolveRowServiceKey(row);
+
+                sel.empty().append($(`<option value="">Select data stream...</option>`));
+                keyNames.forEach((key) => {
+                    const name = fs[key]?.servicename || allServices[key]?.servicename || "???";
+                    sel.append($(`<option value="${key}">${name} (${key})</option>`));
+                });
+                sel.removeClass("read-ds-missing-key").removeAttr("title");
+                if (selectedKey) {
+                    if (!fs[selectedKey]) {
+                        const name = allServices[selectedKey]?.servicename || selectedKey;
+                        sel.append($(`<option value="${selectedKey}">${name} (${selectedKey}) (not in sync list)</option>`));
+                        sel.addClass("read-ds-missing-key");
+                        sel.attr(
+                            "title",
+                            `Saved key '${selectedKey}' is not in controller filteredServices (needs /services and /allstates). Runtime may still work.`
+                        );
+                    }
+                    sel.val(selectedKey);
+                }
+
+                updateKeySelect(e);
+                validateKeyName(e);
+                populateIndex(e);
+                updateIndex(e, row);
+                validateIndex(e);
+                validateDataType(e);
+                updateCoefficient(e);
+                validateCoefficient(e);
+                validateTopic(e);
+            }
+
+            // Attach events to the row elements
+            function attachRowEvents(e, container) {
+                e.manualElement.on("change", function () {
+                    const isManual = e.manualElement.is(":checked");
+
+                    // Warn when enabling manual mode
+                    if (isManual) {
+                        RED.notify("Manual entry: coefficient and other settings will override controller configuration", { type: "warning", timeout: 4000 });
+                    }
+
+                    updateKeySelect(e);
+                    validateKeyName(e);
+                    populateIndex(e);
+                    updateIndex(e);
+                    validateIndex(e);
+                    updateCoefficient(e);
+                    validateCoefficient(e);
+                    refreshPlusButtonFor(container);
+                });
+
+                e.keySelectElement.on("change", function () {
+                    validateKeyName(e);
+                    populateIndex(e);
+                    validateIndex(e);
+                    updateCoefficient(e);
+                    validateCoefficient(e);
+                    updateTopic(e);
+                    validateTopic(e);
+                    refreshPlusButtonFor(container);
+                });
+
+                e.keyManualElement.on("change input", function () {
+                    const raw = e.keyManualElement.val();
+                    const sanitized = sanitizeServiceKey(raw);
+                    if (raw !== sanitized) {
+                        e.keyManualElement.val(sanitized);
+                    }
+                    validateKeyName(e);
+                    populateIndex(e);
+                    validateIndex(e);
+                    updateCoefficient(e);
+                    validateCoefficient(e);
+                    updateTopic(e);
+                    validateTopic(e);
+                    refreshPlusButtonFor(container);
+                });
+
+                e.dataTypeElement.on("change", function () {
+                    populateIndex(e);
+                    updateIndex(e);
+                    validateIndex(e);
+                    validateDataType(e);
+                    updateCoefficient(e);
+                    validateCoefficient(e);
+                    refreshPlusButtonFor(container);
+                });
+
+                e.indexElement.on("input", function () {
+                    validateIndex(e);
+                    refreshPlusButtonFor(container);
+                });
+
+                e.coefficientElement.on("input", function () {
+                    validateCoefficient(e);
+                });
+                e.topicElement.on("input", function () {
+                    validateTopic(e);
+                });
+            }
+
+            // Hide the service key selection dropdown if manual is checked
+            function updateKeySelect(e) {
+                const manual = e.manualElement.is(":checked");
+                const helper = e.manualElement.closest(".checkbox-container").find(".helper-text");
+
+                if (manual) {
+                    e.keySelectElement.val("").hide();
+                    e.keyManualElement.show();
+                    helper.text("manual");
+                } else {
+                    e.keyManualElement.val("").hide();
+                    e.keySelectElement.show();
+                    helper.text("from controller");
+                }
+            }
+
+            // Hide the index field if the type is not 'value'
+            function updateIndex(e, row = {}) {
+                const dt = e.dataTypeElement.val();
+                const prev = row.index || "";
+
+                if (dt === "value") {
+                    e.indexElement.prop("disabled", false).val(prev);
+                } else {
+                    e.indexElement.prop("disabled", true).val("");
+                }
+            }
+
+            // Update coefficient field based on the selected key
+            function updateCoefficient(e) {
+                const dt = e.dataTypeElement.val();
+                const ks = e.keySelectElement.val();
+                const km = e.keyManualElement.val();
+                const fs = _controller.filteredServices || {};
+                const k = ks || km;
+
+                if (k && fs[k]) {
+                    e.coefficientElement.val(fs[k]?.conv_coef || 1).prop("disabled", true);
+                } else {
+                    if (!e.coefficientElement.val()) {
+                        e.coefficientElement.val("1");
+                    }
+                    e.coefficientElement.prop("disabled", false);
+                }
+                if (dt !== "value") {
+                    e.coefficientElement.val("").prop("disabled", true);
+                }
+            }
+
+            // Update the index element based on the selected key
+            function populateIndex(e) {
+                const dt = e.dataTypeElement.val();
+                if (dt !== "value") return;
+
+                const manual = e.manualElement.is(":checked");
+                const ks = e.keySelectElement.val();
+                const km = e.keyManualElement.val();
+                const activeKey = manual ? km : ks;
+
+                let el = e.indexElement;
+                const prev = el.val();
+
+                // Check if element already has a data-id
+                const existingId = el.attr("data-id");
+
+                // Use existing ID if available, otherwise generate a new one
+                const id = existingId || Math.random().toString(36).substr(2, 9);
+
+                const members = !manual ? _controller?.channels?.[ks] : undefined;
+                if (!manual && ks && members) {
+                    const options = Object.values(members).map((m) => {
+                        const idx = m.member;
+                        const desc = findValueBySvcNameAndMember(_controller.channels, ks, idx, "desc");
+                        return `<option value="${idx}" ${prev == idx ? "selected" : ""}>${idx}${desc ? ` (${desc})` : ``}</option>`;
+                    });
+                    el.replaceWith(`<select data-id="${id}" class="node-input-index">${options.join("")}</select>`);
+                } else {
+                    const keyForLimits = activeKey || "";
+                    const minMax = keyForLimits.endsWith("S") ? 'min="1" max="1"' : 'min="1" max="32"';
+                    el.replaceWith(`<input data-id="${id}" type="number" class="node-input-index" placeholder="Member" value="${el.val()}" ${minMax}>`);
+                }
+
+                el = e.indexElement = $(`.node-input-index[data-id="${id}"]`); // Update the reference using the custom attribute
+
+                // Reattach the event listener to the new element
+                el.on("change", function () {
+                    updateTipText();
+                    updateTopic(e);
+                    validateTopic(e);
+                    refreshPlusButtonFor(el.closest(".red-ui-editableList-item-content"));
+                });
+
+                el.on("input", function () {
+                    validateIndex(e);
+                    const container = el.closest(".red-ui-editableList-item-content");
+
+                    if (container.length) {
+                        refreshPlusButtonFor(container);
+                    }
+                });
+            }
+
+            // Update the topic element based on the selected key and member
+            function updateTopic(e) {
+                const manual = e.manualElement.is(":checked");
+                const keyManual = e.keyManualElement.val();
+                const keySelect = e.keySelectElement.val();
+                const key = sanitizeServiceKey(manual ? keyManual : keySelect);
+                const idx = e.indexElement.val();
+                const t = e.topicElement.val();
+
+                if (!key || !idx) return;
+
+                // Default topic format: "key.member"
+                if (t === "" || (!manual && topicRelatedToService(t))) {
+                    e.topicElement.val(`${key}.${idx}`);
+                }
+            }
+
+            // Update tip text based on current settings
+            function updateTipText() {
+                const rows = getListElements();
+                const topics = rows.map((r) => r.topicElement.val());
+                const topic1 = topics[0] || "topic1";
+                const topic2 = topics[1] || "topic2";
+                const msgType = $("#node-input-msgType").val();
+
+                $("#node-input-tip-text-1").text(`Routing ${rows.length} values from controller (${_controller.uniqueId || "???"})'s data streams.`);
+                $("#node-input-tip-text-2").text(`The payload will be divided by the coefficient (if applicable).`);
+                $("#node-input-tip-text-3").text(
+                    `Outgoing message format: ${msgType === "together" ? `{"${topic1}": float, "${topic2}": int, ...}` : `{"topic": str, "payload": float}`}`
+                );
+            }
+
+            // Custom validation functions below
+            function validateKeyName(e) {
+                const manual = e.manualElement.is(":checked");
+                const ks = e.keySelectElement.val();
+                const km = sanitizeServiceKey(e.keyManualElement.val());
+                const invalid = ["", undefined, null];
+                let ok;
+
+                if (manual) {
+                    ok = !invalid.includes(km) && !km.includes(".");
+                    e.keyManualElement.css("border-color", ok ? "" : "red");
+                    e.keySelectElement.css("border-color", "");
+                } else {
+                    ok = !invalid.includes(ks);
+                    if (ok && e.keySelectElement.hasClass("read-ds-missing-key")) {
+                        e.keySelectElement.css("border-color", "#ff9800");
+                    } else {
+                        e.keySelectElement.css("border-color", ok ? "" : "red");
+                    }
+                    e.keyManualElement.css("border-color", "");
+                }
+            }
+            function validateIndex(e) {
+                const idx = e.indexElement.val(),
+                    dt = e.dataTypeElement.val();
+                const ok = dt !== "value" || isValidIndex(idx, e);
+                e.indexElement.css("border-color", ok ? "" : "red");
+            }
+
+            function validateCoefficient(e) {
+                const c = e.coefficientElement.val(),
+                    dt = e.dataTypeElement.val();
+                const ok = dt !== "value" || isValidFloat(c);
+                e.coefficientElement.css("border-color", ok ? "" : "red");
+            }
+
+            function validateDataType(e) {
+                const ok = ["value", "status", "timestamp"].includes(e.dataTypeElement.val());
+                e.dataTypeElement.css("border-color", ok ? "" : "red");
+            }
+
+            function validateTopic(e) {
+                const t = e.topicElement.val();
+                const ok = !(t === "" || t === undefined || t === null);
+                e.topicElement.css("border-color", ok ? "" : "red");
+            }
+
+            function isValidIndex(i, elements) {
+                const n = parseInt(i);
+                if (!Number.isInteger(n)) return false;
+
+                // Get the datastream key to check validation rules
+                const manual = elements.manualElement.is(":checked");
+                const key = manual ? elements.keyManualElement.val() : elements.keySelectElement.val();
+
+                if (!key) return false;
+
+                // If key ends with 'S', only index 0 is allowed
+                if (key.endsWith("S")) {
+                    return n === 1;
+                }
+
+                // For other keys, index must be 1-32
+                return n >= 1 && n <= 32;
+            }
+
+            function isValidFloat(v) {
+                return !isNaN(parseFloat(v));
+            }
+
+            // Data stream helper functions below
+
+            // Sort alphabetically, all keys starting with "_" are to be in the end
+            function sortKeysByServiceNames(obj) {
+                const ks = Object.keys(obj);
+                const a = ks.filter((k) => !obj[k]?.servicename.startsWith("_"));
+                const b = ks.filter((k) => obj[k]?.servicename.startsWith("_"));
+                a.sort((x, y) => obj[x]?.servicename?.localeCompare(obj[y]?.servicename));
+                b.sort((x, y) => obj[x]?.servicename?.localeCompare(obj[y]?.servicename));
+                return a.concat(b);
+            }
+
+            function findValueBySvcNameAndMember(ch = {}, name, member, key) {
+                return ch?.[name]?.[member]?.[key] ?? null;
+            }
+
+            // Auto-generate mappings for all available services
+            function autoGenerateMappings() {
+                const fs = _controller.filteredServices || {};
+                const keys = sortKeysByServiceNames(fs);
+                const list = [];
+
+                // Create a mapping for each key and its members
+                $("#mappings-container").editableList("empty");
+                keys.forEach((k) => {
+                    const svc = fs[k];
+                    if (!svc) return;
+                    // Get all members for this service key
+                    const members = _controller?.channels?.[k] || {};
+                    // Add an entry for each member
+                    Object.values(members).forEach((m) => {
+                        const idx = m.member;
+                        list.push({
+                            manual: false,
+                            keyNameSelect: k,
+                            keyNameManual: "",
+                            dataType: "value",
+                            index: idx,
+                            coefficient: svc?.conv_coef || 1,
+                            topic: `${k}.${idx}`
+                        });
+                    });
+                });
+
+                // Add all mappings to the list
+                $("#mappings-container").editableList("addItems", list);
+                defineOutputPorts();
+                updateTipText();
+
+                RED.notify("Generated " + list.length + " data stream mappings", { type: "success", timeout: 3000 });
+                refreshAllPlusButtons();
+            }
+
+            // Iterate over each mapping row and store the elements
+            function getListElements() {
+                const out = [];
+
+                $("#mappings-container")
+                    .editableList("items")
+                    .each(function () {
+                        out.push(getRowElements($(this)));
+                    });
+
+                return out;
+            }
+        },
+
+        oneditsave: function () {
+            const sanitizeServiceKey = (rawKey) => {
+                if (rawKey == null) return "";
+                return String(rawKey).trim().replace(/\.\d+$/, "");
+            };
+            const topicLooksServiceTopic = (topic, key) => {
+                if (!topic || !key) return false;
+                const t = String(topic).trim();
+                return t === key || t.startsWith(`${key}.`);
+            };
+            const node = this;
+            node.name = $("#node-input-name").val();
+            node.controller = $("#node-input-controller").val();
+            node.outputMode = $("#node-input-outputMode").val();
+            node.msgType = $("#node-input-msgType").val();
+            node.debugTopics = $("#node-input-debugTopics").val().trim();
+
+            const mappings = [];
+            const seen = new Set();
+            let dropped = 0;
+            $("#mappings-container")
+                .editableList("items")
+                .each(function () {
+                    const c = $(this);
+                    let keyNameSelect = sanitizeServiceKey(c.find(".node-input-keyNameSelect").val());
+                    let keyNameManual = sanitizeServiceKey(c.find(".node-input-keyNameManual").val());
+                    const topic = (c.find(".node-input-topic").val() || "").trim();
+                    const manual = c.find(".node-input-manual").is(":checked");
+                    if (!manual && !keyNameSelect && topic.includes(".")) {
+                        keyNameSelect = sanitizeServiceKey(topic.split(".")[0]);
+                    }
+                    if (manual && !keyNameManual && topic.includes(".")) {
+                        keyNameManual = sanitizeServiceKey(topic.split(".")[0]);
+                    }
+                    const row = {
+                        manual: manual,
+                        keyNameSelect: keyNameSelect,
+                        keyNameManual: keyNameManual,
+                        dataType: c.find(".node-input-dataType").val(),
+                        index: parseInt(c.find(".node-input-index").val()),
+                        coefficient: parseFloat(c.find(".node-input-coefficient").val()),
+                        topic: topic
+                    };
+                    const activeSvcKey = row.manual ? row.keyNameManual : row.keyNameSelect;
+                    if (!row.manual && row.dataType === "value" && activeSvcKey && Number.isInteger(row.index)) {
+                        const currentTopic = (row.topic || "").trim();
+                        if (currentTopic === "" || topicLooksServiceTopic(currentTopic, activeSvcKey)) {
+                            row.topic = `${activeSvcKey}.${row.index}`;
+                        }
+                    }
+                    const svcKey = row.keyNameSelect || row.keyNameManual || "";
+                    const sig = `${svcKey}|${row.dataType || ""}|${Number.isInteger(row.index) ? row.index : ""}|${row.topic || ""}`;
+                    if (seen.has(sig)) {
+                        dropped += 1;
+                        return;
+                    }
+                    seen.add(sig);
+                    mappings.push(row);
+                });
+            node.mappings = mappings;
+            if (dropped > 0) {
+                RED.notify(`Removed ${dropped} duplicate read mapping(s).`, { type: "warning", timeout: 4000 });
+            }
+
+            // Check for manual entries that conflict with controller keys
+            const controllerServices = node._controllerCache?.services || {};
+            const manualConflicts = mappings
+                .filter(m => m.manual && m.keyNameManual && controllerServices[m.keyNameManual])
+                .map(m => m.keyNameManual);
+
+            if (manualConflicts.length > 0) {
+                const uniqueConflicts = [...new Set(manualConflicts)];
+                RED.notify(`Warning: Manual entries override controller config for: ${uniqueConflicts.join(", ")}`, { type: "warning", timeout: 5000 });
+            }
+        }
+    });
+</script>
+
+<!-- Define style for the form fields -->
+<style type="text/css">
+    .read-data-streams-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .read-data-streams-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .read-data-streams-div .form-row div,
+    .read-data-streams-div .form-row input,
+    .read-data-streams-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .read-data-streams-div .form-row select {
+        width: 66% !important;
+    }
+
+    .read-data-streams-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .read-data-streams-list {
+        overflow: hidden;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+    }
+
+    .read-data-streams-list .checkbox-container {
+        text-align: center;
+        min-width: 35px;
+        width: 10%;
+    }
+
+    .read-data-streams-list .helper-text {
+        font-size: 10px;
+        line-height: 12px;
+        text-wrap: wrap;
+        color: #666;
+    }
+
+    .read-data-streams-list .node-input-manual {
+        min-width: 16px;
+        min-height: 16px;
+    }
+
+    .read-data-streams-list .node-input-keyNameManual {
+        font-size: 12px !important;
+        min-width: 150px;
+        width: 35%;
+    }
+
+    .read-data-streams-list .node-input-keyNameSelect {
+        font-size: 12px;
+        min-width: 150px;
+        width: 35%;
+    }
+
+    .read-data-streams-list .node-input-dataType {
+        font-size: 12px;
+        min-width: 100px;
+        width: 15%;
+    }
+
+    .read-data-streams-list .node-input-index {
+        font-size: 12px !important;
+        min-width: 225px;
+        width: 30%;
+    }
+
+    .read-data-streams-list .node-input-coefficient {
+        font-size: 12px !important;
+        min-width: 65px;
+        width: 10%;
+    }
+
+    .read-data-streams-list .node-input-arrow {
+        font-size: 18px;
+        margin-left: 10px;
+        margin-right: 5px;
+    }
+
+    .read-data-streams-list .node-input-topic {
+        font-size: 12px !important;
+        min-width: 100px;
+        width: 15%;
+    }
+
+    .read-data-streams-div .row-actions {
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 4px !important;
+        margin-left: 4px !important;
+        width: 40px !important;
+        justify-content: flex-start !important;
+    }
+
+    /* Style for header sort triangles */
+    .read-data-streams-list .sort-triangle {
+        font-size: 10px;
+        color: #999;
+        transition: color 0.2s ease;
+    }
+
+    .read-data-streams-list .sort-triangle.active {
+        color: #2196f3;
+        font-weight: bold;
+    }
+
+    .read-data-streams-list .sort-triangle:hover {
+        color: #666;
+    }
+
+    /* Saved key exists but controller-config filteredServices omitted it */
+    .read-data-streams-div select.read-ds-missing-key {
+        border-color: #ff9800 !important;
+        box-shadow: 0 0 0 1px rgba(255, 152, 0, 0.25);
+    }
+
+    /* Autocomplete widget styling */
+    .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+        position: relative;
+    }
+
+    .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+
+    /* Style the add member button and dropdown */
+    .read-data-streams-div .add-member-dropdown {
+        background: #4caf50 !important;
+        border: none !important;
+        color: white !important;
+        padding: 0px 1px !important;
+        border-radius: 2px !important;
+        cursor: pointer !important;
+        font-size: 12px !important;
+        font-weight: bold !important;
+        margin-right: 4px !important;
+        width: 24px !important;
+        min-width: 4px !important;
+        text-align: center !important;
+        height: 20px !important;
+        line-height: 20px !important;
+        -webkit-appearance: none !important;
+        -moz-appearance: none !important;
+        appearance: none !important;
+    }
+
+    .read-data-streams-div .add-member-dropdown option {
+        background: white !important;
+        color: black !important;
+    }
+
+    .read-data-streams-div .add-member-dropdown:hover {
+        background: #45a049 !important;
+    }
+
+    /* Editable list style */
+    .read-data-streams-div .red-ui-editableList-header {
+        background-color: #80808014;
+        font-weight: bold;
+        display: flex;
+    }
+
+    .read-data-streams-div .red-ui-editableList-container {
+        min-height: 50px;
+    }
+
+    .read-data-streams-div .red-ui-editableList {
+        margin-bottom: 10px;
+        min-width: 650px;
+    }
+
+    /* Style row remove button: red with white X */
+    .read-data-streams-div .red-ui-editableList-item-remove {
+        background: #d32f2f !important;
+        color: white !important;
+    }
+
+    .read-data-streams-div .red-ui-editableList-item-remove:hover {
+        background: #b71c1c !important;
+    }
+
+    .read-data-streams-div .red-ui-editableList-item-remove i {
+        color: white !important;
+    }
+
+    /* Style buttons below the table */
+    .read-data-streams-div .red-ui-editableList-addButton {
+        height: 30px !important;
+        line-height: 20px !important;
+        font-size: 12px !important;
+        border-radius: 5px !important;
+        padding: 0 10px !important;
+    }
+
+    .read-ds-loading {
+        display: none;
+        margin: 6px 0 10px 0;
+        padding: 8px 10px;
+        border: 1px solid #f3b2b2;
+        border-radius: 4px;
+        background: #ffe9e9;
+        color: #7a1f1f;
+        font-size: 13px;
+        font-weight: 700;
+    }
+
+    .read-ds-loading i {
+        margin-right: 6px;
+    }
+
+    .read-ds-loading-dim {
+        opacity: 0.55;
+        pointer-events: none;
+    }
+
+    .read-ds-mappings-wrap {
+        position: relative;
+    }
+
+    .read-ds-mappings-overlay {
+        display: none;
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(255, 170, 170, 0.22);
+        z-index: 5;
+        pointer-events: all;
+    }
+</style>
+
+<!-- Form fields for the node -->
+<script type="text/html" data-template-name="uniflex-read-data-streams">
+    <div class="read-data-streams-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-controller"><i class="fa fa-search"></i> Controller</label>
+            <select id="node-input-controller">
+                <option value="" disabled selected>Select controller...</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-outputMode"><i class="fa fa-sign-out"></i> Output mode</label>
+            <select id="node-input-outputMode">
+                <option value="" disabled selected>Select output mode...</option>
+                <option value="all">Output data every time</option>
+                <option value="change">Output data on change</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-debugTopics"><i class="fa fa-filter"></i> Debug topics (comma)</label>
+            <input type="text" id="node-input-debugTopics" placeholder="e.g. IMODW,THFW" />
+            <div class="form-tips">Log only matching topic prefixes to Node-RED log; leave empty to disable.</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-msgType"><i class="fa fa-sign-out"></i> Message type</label>
+            <select id="node-input-msgType">
+                <option value="" disabled selected>Select message type...</option>
+                <option value="separate">Separate 'msg' objects (one output port)</option>
+                <option value="split">Separate 'msg' objects (multiple output ports)</option>
+                <option value="together">One comprehensive 'msg' object</option>
+            </select>
+        </div>
+
+        <div id="read-ds-loading" class="read-ds-loading">
+            <i class="fa fa-spinner fa-spin"></i><span class="read-ds-loading-text">Loading...</span>
+        </div>
+
+        <div class="read-ds-mappings-wrap">
+            <ol id="mappings-container"></ol>
+            <div id="read-ds-mappings-overlay" class="read-ds-mappings-overlay"></div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <div class="form-tips" id="node-input-tip-text-3"></div>
+        <br />
+    </div>
+</script>
+
+<!-- Define node description -->
+<script type="text/html" data-help-name="uniflex-read-data-streams">
+    <p>Output the formatted values of one or more data streams to user-specified topics. Widely customizable node that can output data in various formats.</p>
+    <p>Often used to route values to some flow in order to process them further.</p>
+
+    <h3>Parameters</h3>
+    <dl class="message-properties">
+        <dt class="optional">name <span class="property-type">string</span></dt>
+        <dd>User-friendly name for the node</dd>
+
+        <dt>controller <span class="property-type">controller</span></dt>
+        <dd>The source of the data streams on the local network. Localhost (127.0.0.1) for most cases.</dd>
+
+        <dt>output mode <span class="property-type">string</span></dt>
+        <dd>Specifies the conditions when data will be output. Selecting <code>change</code> will output data only when the data stream differs from the previous value.</dd>
+
+        <dt>message type <span class="property-type">string</span></dt>
+        <dd>Specifies the output format of messages. Messages can be output separately, together, or split to multiple ports.</dd>
+
+        <dt>mappings <span class="property-type">object</span></dt>
+        <dd>
+            Each row specifies a data stream member, data type (value, status, or timestamp), and a topic to use when outputting the message. Manual data stream entries are also
+            allowed.
+        </dd>
+    </dl>
+
+    <h3>Output</h3>
+    <dl class="message-properties">
+        <dt>controller <span class="property-type">object</span></dt>
+        <dd>Each output <code>msg</code> includes info about the source of the data, e.g. <code>uniqueId</code>, <code>host</code>, <code>protocol</code>.</dd>
+
+        <dt>payload <span class="property-type">float</span></dt>
+        <dd>The formatted data stream value, status, or timestamp.</dd>
+
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>The topic associated with the routed data stream, used to differentiate between different values.</dd>
+    </dl>
+
+    <h3>Additional details</h3>
+    <p>This node gets its data from the controller configuration and the global context (set by the 'receive data streams' node).</p>
+    <p>In order to preserve the unit of the defined data stream, the payload is divided by the coefficient (if applicable).</p>
+
+    <p>The exact payload format depends on the message type. Example output messages:</p>
+    <p>
+        In case of <code>separate</code> message types: <code style="white-space: normal;">{"topic": string, "payload": float}</code>.
+        <br />
+        In case of <code>comprehensive</code> message type: <code style="white-space: normal;">{"payload": {"topic1": float, "topic2": float, ...}}</code>.
+    </p>
+
+    <p>Any other incoming <code>msg</code> properties will be preserved.</p>
+</script>

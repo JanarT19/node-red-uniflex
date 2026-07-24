@@ -1,0 +1,437 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-collector-supervisor", {
+        category: "uniflex home",
+        color: "#B3D9FF",
+        icon: "font-awesome/fa-sitemap",
+        defaults: {
+            name: { value: "" },
+            testControlTopic: { value: "" },
+            onflowTopic: { value: "" },
+            testCooldownSec: { value: 60, validate: RED.validators.number() },
+            testOpenSec: { value: 120, validate: RED.validators.number() },
+            testInterLoopSec: { value: 15, validate: RED.validators.number() },
+            testMinRiseC: { value: 0.2, validate: RED.validators.number() },
+            testReportPath: { value: "" },
+            emergencyGasTopic: { value: "" },
+            emergencyCoolingTopic: { value: "" },
+            verboseLogging: { value: false },
+            verboseLoggingTopic: { value: "" },
+            roomFcwTopics: { value: [] },
+            loops: { value: [] }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "collector supervisor";
+        },
+        paletteLabel: "collector supervisor",
+
+        oneditprepare: function () {
+            const node = this;
+            const loops = node.loops || [];
+            const roomFcwTopics = node.roomFcwTopics || [];
+            let headerTooltip = $("#collector-header-tooltip");
+            if (!headerTooltip.length) {
+                headerTooltip = $('<div id="collector-header-tooltip" class="collector-header-tooltip"></div>').hide();
+                $("body").append(headerTooltip);
+            }
+            const moveHeaderTooltip = (e) => {
+                headerTooltip.css({
+                    left: `${(e.pageX || 0) + 12}px`,
+                    top: `${(e.pageY || 0) + 12}px`
+                });
+            };
+            $(document)
+                .off(".collectorHeaderTip")
+                .on("mouseenter.collectorHeaderTip", ".collector-header-help", function (e) {
+                    const text = String($(this).attr("data-help") || "").trim();
+                    if (!text) return;
+                    headerTooltip.text(text).show();
+                    moveHeaderTooltip(e);
+                })
+                .on("mousemove.collectorHeaderTip", ".collector-header-help", function (e) {
+                    moveHeaderTooltip(e);
+                })
+                .on("mouseleave.collectorHeaderTip", ".collector-header-help", function () {
+                    headerTooltip.hide();
+                });
+
+            $("#node-input-name").val(node.name);
+            $("#node-input-testControlTopic").val(node.testControlTopic || "");
+            $("#node-input-onflowTopic").val(node.onflowTopic || "");
+            $("#node-input-testCooldownSec").val(node.testCooldownSec ?? 60);
+            $("#node-input-testOpenSec").val(node.testOpenSec ?? 120);
+            $("#node-input-testInterLoopSec").val(node.testInterLoopSec ?? 15);
+            $("#node-input-testMinRiseC").val(node.testMinRiseC ?? 0.2);
+            $("#node-input-testReportPath").val(node.testReportPath || "");
+            $("#node-input-verboseLogging").prop("checked", node.verboseLogging === true);
+            $("#node-input-verboseLoggingTopic").val(node.verboseLoggingTopic || "");
+            let _controllers = {};
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (let i = 0; i < controllers.length; i++) {
+                    result.push.apply(result, controllers[i].formattedTopics || []);
+                }
+                return result;
+            }
+            function getTopicKey(item) {
+                return String(item?.topic || item?.value || "").trim();
+            }
+            function getTopicDescription(item) {
+                if (!item) return "";
+                const raw = item.description || item.desc || item.serviceDescription || item?.meta?.description || "";
+                if (raw) return String(raw).trim();
+                const key = getTopicKey(item);
+                const label = String(item.label || "").trim();
+                if (label && key && label !== key) return label;
+                return "";
+            }
+            function buildTopicIndex() {
+                const index = {};
+                getTopics().forEach((item) => {
+                    const k = getTopicKey(item);
+                    if (k) index[k] = item;
+                });
+                return index;
+            }
+            function bindTopicDescription(inputEl, descEl, titleOnly) {
+                function refresh() {
+                    const topic = String(inputEl.val() || "").trim();
+                    if (!topic) {
+                        if (descEl && descEl.length) descEl.text("");
+                        inputEl.attr("title", "");
+                        return;
+                    }
+                    const idx = buildTopicIndex();
+                    const item = idx[topic];
+                    const desc = getTopicDescription(item);
+                    if (descEl && descEl.length && !titleOnly) {
+                        descEl.text(desc || "");
+                    }
+                    inputEl.attr("title", desc || "");
+                }
+                inputEl.on("change keyup blur", refresh);
+                refresh();
+            }
+
+            function initializeAutocomplete(el) {
+                if (!el || !el.length) return;
+                el.autocomplete({
+                    minLength: 0,
+                    source: function (req, res) {
+                        const term = req.term.toLowerCase();
+                        const topics = getTopics();
+                        res((topics || []).filter((o) => (o.label || o.topic || "").toLowerCase().indexOf(term) > -1));
+                    },
+                    focus: function (e) { e.preventDefault(); },
+                    select: function (e, ui) {
+                        e.preventDefault();
+                        el.val(ui.item.topic || ui.item.value);
+                        el.trigger("change");
+                    }
+                }).on("focus", function () {
+                    el.autocomplete("search", el.val() || "");
+                });
+            }
+
+            $("#room-fcw-topics-container").editableList({
+                removable: true,
+                sortable: true,
+                addItem: function (container, index, data) {
+                    const row = $('<div class="collector-supervisor-row collector-supervisor-row-fcw"></div>');
+                    row.append('<input type="text" class="node-input-roomfcw-topic" placeholder="e.g. FCW.2" style="min-width:220px;" />');
+                    row.append('<input type="text" class="node-input-roomfow-topic" placeholder="e.g. FOW.2 (optional)" style="min-width:220px;" />');
+                    container.append(row);
+                    const d = data || {};
+                    const fcwInput = row.find(".node-input-roomfcw-topic");
+                    const fowInput = row.find(".node-input-roomfow-topic");
+                    fcwInput.val((d.topic || d.roomFcwTopic || "").trim());
+                    fowInput.val((d.forceOpenTopic || d.roomForceOpenTopic || "").trim());
+                    initializeAutocomplete(fcwInput);
+                    initializeAutocomplete(fowInput);
+                    bindTopicDescription(fcwInput, null, true);
+                    bindTopicDescription(fowInput, null, true);
+                },
+                header: $("<div></div>").append(
+                    $('<div class="collector-supervisor-row" style="font-weight:600;"></div>')
+                        .append('<span class="collector-header-help" style="min-width:220px;" data-help="INPUT: room forced-close signal for this collector domain. If active, collector test is blocked/aborted.">Forced-close topic</span>')
+                        .append('<span class="collector-header-help" style="min-width:220px;" data-help="INPUT: room forced-open signal for this collector domain. If active, collector test is blocked/aborted.">Forced-open topic (optional)</span>')
+                )
+            });
+
+            $("#loops-container").editableList({
+                removable: true,
+                sortable: true,
+                addItem: function (container, index, data) {
+                    const row = $('<div class="collector-supervisor-row collector-supervisor-row-grid4"></div>');
+                    row.append('<div class="collector-supervisor-cell"><input type="text" class="node-input-measuring" placeholder="e.g. CME2W.3" style="min-width:150px;" /></div>');
+                    row.append('<div class="collector-supervisor-cell"><input type="text" class="node-input-forceopen" placeholder="e.g. CFO2W.3" style="min-width:150px;" /></div>');
+                    row.append('<div class="collector-supervisor-cell"><input type="text" class="node-input-return" placeholder="e.g. TF3W.2" style="min-width:130px;" /></div>');
+                    row.append('<div class="collector-supervisor-cell"><input type="text" class="node-input-fault" placeholder="e.g. FLTW.2" style="min-width:130px;" /></div>');
+                    container.append(row);
+                    const d = data || {};
+                    const measuring = row.find(".node-input-measuring");
+                    const forceOpen = row.find(".node-input-forceopen");
+                    const ret = row.find(".node-input-return");
+                    const fault = row.find(".node-input-fault");
+                    measuring.val(d.measuringTopic || "");
+                    forceOpen.val(d.forceOpenTopic || "");
+                    ret.val(d.returnTopic || "");
+                    fault.val(d.faultTopic || "");
+                    initializeAutocomplete(measuring);
+                    initializeAutocomplete(forceOpen);
+                    initializeAutocomplete(ret);
+                    initializeAutocomplete(fault);
+                    // Keep testing rows compact: description is available as tooltip on focus/hover.
+                    bindTopicDescription(measuring, null, true);
+                    bindTopicDescription(forceOpen, null, true);
+                    bindTopicDescription(ret, null, true);
+                    bindTopicDescription(fault, null, true);
+                },
+                removeItem: function (data) {
+                    return confirm("Remove this loop?");
+                },
+                header: $("<div></div>").append(
+                    $('<div class="collector-supervisor-row collector-supervisor-row-grid4" style="font-weight:600;"></div>')
+                        .append('<span class="collector-header-help" style="min-width:120px;" data-help="INPUT: from mpc-floor. Loop sends 1/0 when doing emergency measuring.">Emergency measuring topic</span>')
+                        .append('<span class="collector-header-help" style="min-width:120px;" data-help="OUTPUT: to mpc-floor force-open input for loop-by-loop test orchestration.">Forced-open topic</span>')
+                        .append('<span class="collector-header-help" style="min-width:90px;" data-help="INPUT: loop return temperature topic used by supervisor validation logic.">Return topic</span>')
+                        .append('<span class="collector-header-help" style="min-width:90px;" data-help="OUTPUT: per-loop fault status (typically to iolayer/monitoring), e.g. 0=OK, 1=fault.">Fault topic</span>')
+                ),
+                buttons: [{
+                    label: "delete all",
+                    icon: "fa fa-trash",
+                    click: function () {
+                        if (confirm("Delete all loops?")) $("#loops-container").editableList("empty");
+                    }
+                }]
+            });
+
+            if (loops.length > 0) {
+                $("#loops-container").editableList("addItems", loops);
+            }
+            if (roomFcwTopics.length > 0) {
+                $("#room-fcw-topics-container").editableList("addItems", roomFcwTopics);
+            }
+            $.getJSON("uniflex/controller-config").done(function (data) {
+                _controllers = data;
+                initializeAutocomplete($("#node-input-testControlTopic"));
+                initializeAutocomplete($("#node-input-onflowTopic"));
+                initializeAutocomplete($("#node-input-emergencyGasTopic"));
+                initializeAutocomplete($("#node-input-emergencyCoolingTopic"));
+                initializeAutocomplete($("#node-input-verboseLoggingTopic"));
+            }).fail(function () {
+                _controllers = {};
+            });
+        },
+
+        oneditsave: function () {
+            const node = this;
+            node.name = $("#node-input-name").val();
+            node.testControlTopic = $("#node-input-testControlTopic").val();
+            node.onflowTopic = $("#node-input-onflowTopic").val();
+            node.testCooldownSec = $("#node-input-testCooldownSec").val();
+            node.testOpenSec = $("#node-input-testOpenSec").val();
+            node.testInterLoopSec = $("#node-input-testInterLoopSec").val();
+            node.testMinRiseC = $("#node-input-testMinRiseC").val();
+            node.testReportPath = ($("#node-input-testReportPath").val() || "").trim();
+            node.emergencyGasTopic = ($("#node-input-emergencyGasTopic").val() || "").trim();
+            node.emergencyCoolingTopic = ($("#node-input-emergencyCoolingTopic").val() || "").trim();
+            node.verboseLogging = $("#node-input-verboseLogging").prop("checked");
+            node.verboseLoggingTopic = ($("#node-input-verboseLoggingTopic").val() || "").trim();
+            const roomFcwTopics = [];
+            $("#room-fcw-topics-container").editableList("items").each(function () {
+                const row = $(this);
+                const topic = String(row.find(".node-input-roomfcw-topic").val() || "").trim();
+                const forceOpenTopic = String(row.find(".node-input-roomfow-topic").val() || "").trim();
+                if (topic || forceOpenTopic) {
+                    roomFcwTopics.push({ topic, forceOpenTopic });
+                }
+            });
+            node.roomFcwTopics = roomFcwTopics;
+            const loops = [];
+            $("#loops-container").editableList("items").each(function () {
+                const row = $(this);
+                loops.push({
+                    measuringTopic: row.find(".node-input-measuring").val(),
+                    forceOpenTopic: row.find(".node-input-forceopen").val(),
+                    returnTopic: row.find(".node-input-return").val(),
+                    faultTopic: row.find(".node-input-fault").val()
+                });
+            });
+            node.loops = loops;
+            $("#collector-header-tooltip").hide();
+            $(document).off(".collectorHeaderTip");
+        },
+        oneditcancel: function () {
+            $("#collector-header-tooltip").hide();
+            $(document).off(".collectorHeaderTip");
+        }
+    });
+</script>
+
+<style>
+    .collector-supervisor-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+    }
+
+    .collector-supervisor-row-grid4 {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) minmax(180px, 1fr) minmax(180px, 1fr);
+        gap: 8px;
+        align-items: start;
+    }
+
+    .collector-supervisor-row-fcw {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr);
+        gap: 8px;
+        align-items: center;
+    }
+
+    .collector-supervisor-cell {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+    }
+
+    .collector-topic-desc {
+        font-size: 11px;
+        color: #666;
+        min-height: 14px;
+        margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .collector-topic-desc-inline {
+        font-size: 11px;
+        color: #666;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .collector-section-title {
+        font-weight: 600;
+        margin-top: 8px;
+        margin-bottom: 4px;
+        white-space: nowrap;
+    }
+
+    .collector-supervisor-row label,
+    .collector-supervisor-row span {
+        flex-shrink: 0;
+    }
+
+    .collector-supervisor-row input {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .collector-header-help {
+        cursor: default;
+    }
+
+    .collector-header-tooltip {
+        position: absolute;
+        z-index: 5000;
+        max-width: 420px;
+        background: #fff8c6;
+        border: 1px solid #d6c76b;
+        border-radius: 3px;
+        padding: 6px 8px;
+        font-size: 12px;
+        color: #333;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+        pointer-events: none;
+        white-space: normal;
+    }
+
+    .collector-timing-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(120px, 1fr));
+        gap: 8px 12px;
+        width: 100%;
+    }
+
+    .collector-timing-grid .collector-timing-head {
+        font-size: 12px;
+        color: #444;
+        font-weight: 600;
+    }
+
+    .collector-timing-grid input {
+        width: 100%;
+        box-sizing: border-box;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-collector-supervisor">
+    <div class="collector-supervisor-form">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g. Kitchen collector" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-testControlTopic" class="collector-header-help" data-help="IN/OUT control topic for collector test sequence: send 1 to start, 0 to cancel. Supervisor writes 0 on completion/cancel."><i class="fa fa-play"></i> Test control datastream (in/out)</label>
+            <input type="text" id="node-input-testControlTopic" placeholder="1=start, 0=cancel; node writes 0 on completion" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-onflowTopic"><i class="fa fa-thermometer-three-quarters"></i> Collector inlet temperature</label>
+            <input type="text" id="node-input-onflowTopic" placeholder="collector inlet temperature datastream" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-verboseLogging"><i class="fa fa-bug"></i> Verbose logging</label>
+            <input type="checkbox" id="node-input-verboseLogging" style="width:auto;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-verboseLoggingTopic"><i class="fa fa-toggle-on"></i> Verbose topic (0/1)</label>
+            <input type="text" id="node-input-verboseLoggingTopic" placeholder="optional runtime verbose toggle topic" />
+        </div>
+        <div class="form-row">
+            <div class="collector-timing-grid">
+                <div class="collector-timing-head">Test cooldown (s)</div>
+                <div class="collector-timing-head">Open per loop (s)</div>
+                <div class="collector-timing-head">Inter-loop (s)</div>
+                <div class="collector-timing-head">Min detect change (C)</div>
+                <input type="number" id="node-input-testCooldownSec" min="0" />
+                <input type="number" id="node-input-testOpenSec" min="1" />
+                <input type="number" id="node-input-testInterLoopSec" min="0" />
+                <input type="number" id="node-input-testMinRiseC" step="0.05" min="0" />
+            </div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-testReportPath"><i class="fa fa-file-text-o"></i> Test report path</label>
+            <input type="text" id="node-input-testReportPath" placeholder="/home/nodered/heating_state/collector-supervisor-report.json" />
+        </div>
+        <div class="form-row collector-section-title"><i class="fa fa-fire"></i> Emergency heating (forced gas / cooling)</div>
+        <div class="form-row">
+            <label for="node-input-emergencyGasTopic" class="collector-header-help" data-help="OUTPUT: e.g. HEW.2. When tank heat-up is used, node writes 1 to force gas; writes 0 on test end. Connect to write-data-streams."><i class="fa fa-bolt"></i> Forced gas topic (e.g. HEW.2)</label>
+            <input type="text" id="node-input-emergencyGasTopic" placeholder="e.g. HEW.2" style="min-width:180px;" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-emergencyCoolingTopic" class="collector-header-help" data-help="OUTPUT: e.g. HEW.3. When forcing gas, node writes 0 here so gas and cooling are never both on. Writes 0 on test end."><i class="fa fa-snowflake-o"></i> Clear cooling topic (e.g. HEW.3)</label>
+            <input type="text" id="node-input-emergencyCoolingTopic" placeholder="e.g. HEW.3" style="min-width:180px;" />
+        </div>
+        <div class="form-row collector-section-title"><i class="fa fa-list"></i> Forced close datastreams for all rooms related to this collector</div>
+        <ol id="room-fcw-topics-container"></ol>
+        <div class="form-row collector-section-title"><i class="fa fa-list"></i> Floor loop related datastreams needed for testing</div>
+        <ol id="loops-container"></ol>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-collector-supervisor">
+    <p>One node per heating collector. Runs collector test sequence: close related room loops, open loops one-by-one, validate return response.</p>
+    <h3>Input</h3>
+    <p>Connect test control datastream, collector inlet temperature, loop return temperatures, and per-loop emergency measuring topics to this node input.</p>
+    <h3>Output</h3>
+    <p>Outputs room force-close, per-loop forced-open, and per-loop fault topics. Use one shared bus/write node that routes by <code>msg.topic</code>.</p>
+    <h3>Behaviour</h3>
+    <p>Per-loop emergency measuring payload <code>1</code> means loop is in emergency measuring window, <code>0</code> means not measuring. Room force-close outputs are driven only while collector test is running (test control <code>1</code>); measuring signals alone do not start force-close. Test control payload <code>1</code> starts test, <code>0</code> cancels. On successful end, node writes <code>0</code> to the same control datastream.</p>
+</script>

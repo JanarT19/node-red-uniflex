@@ -1,0 +1,562 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-averager-gated", {
+        category: "uniflex utils",
+        color: "#E8A87C",
+        defaults: {
+            name: { value: "" },
+            controller: { value: "", type: "uniflex-controller", required: true },
+            gateTopic: { value: "" },
+            inputTopics: { value: [] },
+            outputTopic: { value: "" },
+            outputMode: { value: "any-input" },
+            selectedInputTopic: { value: "" },
+            timeoutSec: { value: 300 },
+            minValues: { value: 1 },
+            precision: { value: 2 },
+            repeatWhenGateMissing: { value: true },
+            missingValueBehavior: { value: "no-output" },
+            enableLogging: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-calculator",
+        label: function () {
+            return this.name || `gated averager (${this.inputTopics?.length || 0} topics)`;
+        },
+        paletteLabel: "gated averager",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controller = {};
+            let _lastControllerId = null;
+
+            // Migrate old config: single gate from first row if present
+            if (!node.gateTopic && node.inputTopics && node.inputTopics.length > 0) {
+                const first = node.inputTopics[0];
+                node.gateTopic = first.gateManual ? (first.gateManualInput || "").trim() : (first.gateSelect || "").trim();
+                node.gateManual = !!first.gateManual;
+            }
+            const inputTopics = (node.inputTopics || []).map((row) => ({
+                valueManual: row.valueManual,
+                valueSelect: row.valueSelect,
+                valueManualInput: row.valueManualInput
+            }));
+
+            $("#node-input-name").val(node.name);
+            $("#node-input-controller").val(node.controller);
+            $("#node-input-gateManualCheck").prop("checked", node.gateManual === true);
+            $("#node-input-outputTopic").val(node.outputTopic);
+            $("#node-input-outputMode").val(node.outputMode);
+            $("#node-input-selectedInputTopic").val(node.selectedInputTopic);
+            $("#node-input-timeoutSec").val(node.timeoutSec);
+            $("#node-input-minValues").val(node.minValues);
+            $("#node-input-precision").val(node.precision);
+            $("#node-input-repeatWhenGateMissing").prop("checked", node.repeatWhenGateMissing !== false);
+            $("#node-input-missingValueBehavior").val(node.missingValueBehavior || "no-output");
+            $("#node-input-enableLogging").prop("checked", node.enableLogging !== false);
+
+            $("#node-input-controller").change(queryControllerConfig);
+            $("#node-input-outputMode").change(updateOutputModeFields);
+            $("#node-input-gateManualCheck").on("change", updateGateTopicVisibility);
+            $("#input-topics-container").change(updateTipText);
+
+            initializeEditableList();
+            updateOutputModeFields();
+            updateTipText();
+
+            function updateGateTopicVisibility() {
+                const manual = $("#node-input-gateManualCheck").is(":checked");
+                if (manual) {
+                    $("#node-input-gateTopicSelect").hide();
+                    $("#node-input-gateTopicManual").show().val(node.gateTopic || "");
+                } else {
+                    $("#node-input-gateTopicManual").hide();
+                    $("#node-input-gateTopicSelect").show().val(node.gateTopic || "");
+                }
+            }
+
+            function queryControllerConfig() {
+                const controllerId = $("#node-input-controller").val();
+                if (_lastControllerId === controllerId) return;
+                _lastControllerId = controllerId;
+
+                $.getJSON(`uniflex/controller-config?id=${controllerId}`)
+                    .done((d) => {
+                        _controller = d;
+                    })
+                    .fail(() => {
+                        console.error("Failed to query controller configuration!");
+                        RED.notify("Failed to query controller configuration!", { type: "error", timeout: 3000 });
+                        _controller = {};
+                    })
+                    .always(function () {
+                        const formattedTopics = _controller.formattedTopics || [];
+                        const sortedTopics = formattedTopics.slice().sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+                        const gateSel = $("#node-input-gateTopicSelect");
+                        gateSel.empty().append($("<option value=\"\">Select topic...</option>"));
+                        sortedTopics.forEach((item) => {
+                            const topic = item.topic;
+                            const label = item.label || topic;
+                            gateSel.append($(`<option value="${topic}">${label}</option>`));
+                        });
+                        gateSel.val(node.gateTopic || "");
+                        $("#node-input-gateTopicManual").val(node.gateTopic || "");
+                        updateGateTopicVisibility();
+
+                        $("#input-topics-container").editableList("empty");
+                        $("#input-topics-container").editableList("addItems", inputTopics);
+                        initializeAutocomplete($("#node-input-outputTopic"));
+                        initializeAutocomplete($("#node-input-selectedInputTopic"));
+                        updateTipText();
+                    });
+            }
+
+            function initializeEditableList() {
+                $("#input-topics-container").editableList({
+                    removable: true,
+                    sortable: true,
+                    addItem: function (container, index, row) {
+                        addRowElements(container, row);
+                        const el = getRowElements(container);
+                        formatRow(el, row);
+                        attachRowEvents(el, container);
+                        updateTipText();
+                    },
+                    removeItem: function (data) {
+                        const confirmed = confirm("Remove this input topic?");
+                        if (!confirmed) return false;
+                        updateTipText();
+                    },
+                    header: $("<div>").append(
+                        $.parseHTML(`
+                        <div style="width:22px"></div>
+                        <div class="uniflex-averager-gated-list" style="text-align:center;white-space:normal;flex:1">
+                            <div class="checkbox-container">Manual</div>
+                            <div class="node-input-topic">Value topic</div>
+                        </div>
+                        <div style="width:28px"></div>
+                    `)
+                    ),
+                    buttons: [
+                        {
+                            label: "delete all",
+                            icon: "fa fa-trash",
+                            title: "delete all input topics",
+                            click: function () {
+                                if (confirm("Delete all input topics?")) {
+                                    $("#input-topics-container").editableList("empty");
+                                    updateTipText();
+                                }
+                            }
+                        }
+                    ]
+                });
+            }
+
+            function addRowElements(container, row) {
+                const rowHtml = `
+                <div class="uniflex-averager-gated-list">
+                    <div class="checkbox-container">
+                        <input type="checkbox" class="node-input-valueManualCheck" ${row.valueManual === true ? "checked" : ""}>
+                        <div class="helper-text"></div>
+                    </div>
+                    <select class="node-input-valueSelect"></select>
+                    <input type="text" class="node-input-valueManualInput" placeholder="Value topic, e.g. TBW.3" value="${(row.valueManualInput || "").replace(/"/g, "&quot;")}">
+                </div>`;
+                container.append(rowHtml);
+            }
+
+            function getRowElements(container) {
+                return {
+                    valueManualCheckElement: container.find(".node-input-valueManualCheck"),
+                    valueSelectElement: container.find(".node-input-valueSelect"),
+                    valueManualInputElement: container.find(".node-input-valueManualInput")
+                };
+            }
+
+            function formatRow(e, row) {
+                const formattedTopics = _controller.formattedTopics || [];
+
+                // Sort topics alphabetically by label
+                const sortedTopics = formattedTopics.slice().sort((a, b) => {
+                    return (a.label || "").localeCompare(b.label || "");
+                });
+
+                // Format value topic select
+                const valueSel = e.valueSelectElement;
+                const selectedValueTopic = row.valueSelect || row.valueManualInput;
+                valueSel.empty().append($(`<option value="">Select topic...</option>`));
+                sortedTopics.forEach((item) => {
+                    const topic = item.topic;
+                    const label = item.label || topic;
+                    valueSel.append($(`<option value="${topic}" ${selectedValueTopic === topic ? "selected" : ""}>${label}</option>`));
+                });
+
+                updateTopicSelect(e);
+                validateTopic(e);
+            }
+
+            function attachRowEvents(e, container) {
+                e.valueManualCheckElement.on("change", function () {
+                    updateTopicSelect(e);
+                    validateTopic(e);
+                });
+
+                e.valueSelectElement.on("change", function () {
+                    validateTopic(e);
+                });
+
+                e.valueManualInputElement.on("change input", function () {
+                    validateTopic(e);
+                });
+            }
+
+            function updateTopicSelect(e) {
+                const valueManual = e.valueManualCheckElement.is(":checked");
+                const valueHelper = e.valueManualCheckElement.closest(".checkbox-container").find(".helper-text");
+                if (valueManual) {
+                    e.valueSelectElement.val("").hide();
+                    e.valueManualInputElement.show();
+                    valueHelper.text("manual");
+                } else {
+                    e.valueManualInputElement.val("").hide();
+                    e.valueSelectElement.show();
+                    valueHelper.text("from list");
+                }
+            }
+
+            function validateTopic(e) {
+                const valueManual = e.valueManualCheckElement.is(":checked");
+                const valueSelect = e.valueSelectElement.val();
+                const valueManualInput = e.valueManualInputElement.val();
+                const invalid = ["", undefined, null];
+
+                const valueOk = valueManual
+                    ? !invalid.includes(valueManualInput)
+                    : !invalid.includes(valueSelect);
+                e.valueManualInputElement.css("border-color", valueManual ? (valueOk ? "" : "red") : "");
+                e.valueSelectElement.css("border-color", !valueManual ? (valueOk ? "" : "red") : "");
+            }
+
+            function initializeAutocomplete(element) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (req, res) {
+                            const term = req.term.toLowerCase();
+                            const topics = getTopics();
+                            res(topics.filter((o) => o.label.toLowerCase().includes(term)));
+                        },
+                        focus: (e) => e.preventDefault(),
+                        select: function (e, ui) {
+                            e.preventDefault();
+                            element.val(ui.item.topic);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const lab = term
+                            ? item.label.replace(
+                                new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig"),
+                                '<strong style="color:#e65;font-weight:bold">$1</strong>'
+                            )
+                            : item.label;
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${lab}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                return _controller?.formattedTopics || [];
+            }
+
+            function updateOutputModeFields() {
+                const mode = $("#node-input-outputMode").val();
+                $(".selected-input-row").toggle(mode === "selected-input");
+            }
+
+            function updateTipText() {
+                const rows = getListElements();
+                const count = rows.length;
+                $("#node-input-tip-text-1").text(`One gate topic; averaging ${count} value topic${count !== 1 ? "s" : ""}.`);
+                $("#node-input-tip-text-2").text(`Output mode: ${$("#node-input-outputMode option:selected").text()}`);
+            }
+
+            function getListElements() {
+                const out = [];
+                $("#input-topics-container")
+                    .editableList("items")
+                    .each(function () {
+                        out.push(getRowElements($(this)));
+                    });
+                return out;
+            }
+
+            // Initialize controller config on load
+            queryControllerConfig();
+        },
+
+        oneditsave: function () {
+            const node = this;
+            node.name = $("#node-input-name").val();
+            node.controller = $("#node-input-controller").val();
+            node.outputTopic = $("#node-input-outputTopic").val();
+            node.outputMode = $("#node-input-outputMode").val();
+            node.selectedInputTopic = $("#node-input-selectedInputTopic").val();
+            node.timeoutSec = parseInt($("#node-input-timeoutSec").val()) || 300;
+            node.minValues = parseInt($("#node-input-minValues").val()) || 1;
+            node.precision = parseInt($("#node-input-precision").val()) || 2;
+            node.repeatWhenGateMissing = $("#node-input-repeatWhenGateMissing").is(":checked");
+            node.missingValueBehavior = $("#node-input-missingValueBehavior").val() || "no-output";
+            node.enableLogging = $("#node-input-enableLogging").is(":checked");
+
+            const gateManual = $("#node-input-gateManualCheck").is(":checked");
+            node.gateTopic = gateManual
+                ? ($("#node-input-gateTopicManual").val() || "").trim()
+                : ($("#node-input-gateTopicSelect").val() || "").trim();
+            node.gateManual = gateManual;
+
+            const inputTopics = [];
+            $("#input-topics-container")
+                .editableList("items")
+                .each(function () {
+                    const c = $(this);
+                    inputTopics.push({
+                        valueManual: c.find(".node-input-valueManualCheck").is(":checked"),
+                        valueSelect: c.find(".node-input-valueSelect").val(),
+                        valueManualInput: c.find(".node-input-valueManualInput").val()
+                    });
+                });
+            node.inputTopics = inputTopics;
+        }
+    });
+</script>
+
+<style type="text/css">
+    .uniflex-averager-gated-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .uniflex-averager-gated-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .uniflex-averager-gated-div .form-row div,
+    .uniflex-averager-gated-div .form-row input,
+    .uniflex-averager-gated-div .form-row select {
+        max-width: 66% !important;
+    }
+
+    .uniflex-averager-gated-div .form-row select {
+        width: 66% !important;
+    }
+
+    .uniflex-averager-gated-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .uniflex-averager-gated-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 2px;
+        margin-bottom: 6px;
+    }
+
+    .uniflex-averager-gated-div .red-ui-editableList {
+        margin-bottom: 10px;
+        min-width: 700px;
+    }
+
+    .input-topic-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+        margin-bottom: 5px;
+    }
+
+    .uniflex-averager-gated-list {
+        overflow: hidden;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .uniflex-averager-gated-list .checkbox-container {
+        text-align: center;
+        min-width: 35px;
+        width: 10%;
+    }
+
+    .uniflex-averager-gated-list .helper-text {
+        font-size: 10px;
+        line-height: 12px;
+        text-wrap: wrap;
+        color: #666;
+    }
+
+    .uniflex-averager-gated-list .node-input-valueManualCheck,
+    .uniflex-averager-gated-list .node-input-gateManualCheck {
+        min-width: 16px;
+        min-height: 16px;
+    }
+
+    .uniflex-averager-gated-list .node-input-valueManualInput,
+    .uniflex-averager-gated-list .node-input-gateManualInput {
+        font-size: 12px !important;
+        min-width: 150px;
+        width: 35%;
+    }
+
+    .uniflex-averager-gated-list .node-input-valueSelect,
+    .uniflex-averager-gated-list .node-input-gateSelect {
+        font-size: 12px;
+        min-width: 150px;
+        width: 35%;
+    }
+
+    .red-ui-editableList-header {
+        background-color: #80808014;
+        font-weight: bold;
+        display: flex;
+    }
+
+    .red-ui-editableList-container {
+        min-height: 50px;
+    }
+
+    .ui-autocomplete {
+        max-height: 300px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 1000 !important;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-averager-gated">
+    <div class="uniflex-averager-gated-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="Name" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-controller"><i class="fa fa-search"></i> Controller</label>
+            <select id="node-input-controller">
+                <option value="" disabled selected>Select controller...</option>
+            </select>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-gateTopicSelect"><i class="fa fa-lock"></i> Gate topic</label>
+            <div class="uniflex-averager-gated-list" style="flex-wrap:wrap;">
+                <div class="checkbox-container">
+                    <input type="checkbox" id="node-input-gateManualCheck" />
+                    <span class="helper-text">Manual</span>
+                </div>
+                <select id="node-input-gateTopicSelect" style="min-width:180px;"></select>
+                <input type="text" id="node-input-gateTopicManual" placeholder="e.g. HV4W.4" style="display:none; min-width:180px;" />
+            </div>
+            <div class="help-text">Single gate for the node. No output when gate is closed or missing (status shows reason).</div>
+        </div>
+
+        <div class="form-row">
+            <label style="width: 100% !important; font-weight: bold;"><i class="fa fa-list"></i> Value topics (to average)</label>
+        </div>
+
+        <ol id="input-topics-container"></ol>
+
+        <div class="form-row">
+            <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+            <input type="text" id="node-input-outputTopic" placeholder="e.g. Tf_avg_gated" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-outputMode"><i class="fa fa-clock-o"></i> Output mode</label>
+            <select id="node-input-outputMode">
+                <option value="any-input">On any input update</option>
+                <option value="selected-input">On selected input update</option>
+            </select>
+        </div>
+
+        <div class="form-row selected-input-row">
+            <label for="node-input-selectedInputTopic"><i class="fa fa-bullseye"></i> Selected input topic</label>
+            <input type="text" id="node-input-selectedInputTopic" placeholder="e.g. TKW.1" />
+            <div class="help-text">Output only when this specific input topic updates (value change or no change)</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-timeoutSec"><i class="fa fa-times-circle"></i> Repeat timeout (sec)</label>
+            <input type="number" id="node-input-timeoutSec" placeholder="300" min="1" />
+            <div class="help-text">When gate is closed and "Repeat last value" is enabled, repeats stop if stored lastValidValue becomes older than this timeout. No age check for incoming values when gate is open.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-minValues"><i class="fa fa-sort-numeric-asc"></i> Min values</label>
+            <input type="number" id="node-input-minValues" placeholder="1" min="0" />
+            <div class="help-text">Minimum number of usable inputs (post-gate, non-stale/held) required to publish. If fewer, no output is sent and status shows insufficient data.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-precision"><i class="fa fa-hashtag"></i> Precision</label>
+            <input type="number" id="node-input-precision" placeholder="2" min="0" max="10" />
+            <div class="help-text">Decimal places for the published average (value is rounded to this precision).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-repeatWhenGateMissing"><i class="fa fa-repeat"></i> Repeat last value when gate closed</label>
+            <input type="checkbox" id="node-input-repeatWhenGateMissing" checked />
+            <div class="help-text">If checked, when gate is 0 we still output using last valid values (within timeout). If unchecked, no output when gate is closed.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-missingValueBehavior"><i class="fa fa-exclamation-triangle"></i> When a value topic is missing or stale</label>
+            <select id="node-input-missingValueBehavior">
+                <option value="no-output">No output (show in status)</option>
+                <option value="average-remaining">Output average of remaining (soft warning)</option>
+            </select>
+            <div class="help-text">No output: require all value topics; status lists which are stale. Average remaining: send average of valid topics and show partial warning in status.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-enableLogging"><i class="fa fa-file-text-o"></i> Enable logging</label>
+            <input type="checkbox" id="node-input-enableLogging" checked />
+            <div class="help-text" style="font-size: 0.8em; color: #666; margin-top: 2px;">Log average results to node-red-log</div>
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text-1"></div>
+        <div class="form-tips" id="node-input-tip-text-2"></div>
+        <br />
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-averager-gated">
+    <p>Gated Averager: one gate topic; multiple value topics to average.</p>
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Numeric values from configured value topics.</dd>
+        <dt>payload <span class="property-type">number (0 or 1)</span></dt>
+        <dd>Single gate topic: 1 = output allowed, 0 = no output (unless "Repeat last value when gate closed" is on).</dd>
+    </dl>
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Average of the configured value topics (subject to gate and missing-value behavior).</dd>
+    </dl>
+    <h3>Details</h3>
+    <p><b>Gate:</b> One gate topic for the node. No output when gate is closed or when the gate topic has not been seen for longer than the timeout (status shows "Gate missing" or "Gate closed").</p>
+    <p><b>Value topics:</b> List of topics to average. If a value topic has no recent data (stale &gt; timeout), behavior is selectable:</p>
+    <ul>
+        <li><b>No output (show in status):</b> Do not send output if any value topic is missing/stale; status lists which.</li>
+        <li><b>Output average of remaining (soft warning):</b> Send the average of the valid value topics and show a partial warning in status (e.g. "Partial (missing: topicX): 22.5").</li>
+    </ul>
+    <h4>Output Modes:</h4>
+    <ul>
+        <li><b>On any input update:</b> Recalculate and publish when any value or gate message arrives.</li>
+        <li><b>On selected input update:</b> Publish only when the selected topic updates.</li>
+    </ul>
+</script>

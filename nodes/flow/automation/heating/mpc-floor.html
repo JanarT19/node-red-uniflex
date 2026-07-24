@@ -1,0 +1,291 @@
+<script type="text/html" data-template-name="uniflex-mpc-floor">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="e.g. 2k_M2" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-setpointTopic"><i class="fa fa-thermometer-half"></i> Floor setpoint (in)</label>
+        <input type="text" id="node-input-setpointTopic" placeholder="e.g. from mpc-room" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-returnTopic"><i class="fa fa-thermometer-half"></i> Floor return / actual (in)</label>
+        <input type="text" id="node-input-returnTopic" placeholder="return temp sensor" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomTickTopic"><i class="fa fa-clock-o"></i> Room tick (in)</label>
+        <input type="text" id="node-input-roomTickTopic" placeholder="e.g. heating/roomName/tick" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-valveCmdTopic"><i class="fa fa-toggle-on"></i> Valve command (out)</label>
+        <input type="text" id="node-input-valveCmdTopic" placeholder="DO topic 0/1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomSetpointTopic"><i class="fa fa-bullseye"></i> Room setpoint (in, optional)</label>
+        <input type="text" id="node-input-roomSetpointTopic" placeholder="Tset for feedforward" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomActualTopic"><i class="fa fa-thermometer-half"></i> Room actual (in, optional)</label>
+        <input type="text" id="node-input-roomActualTopic" placeholder="Ti for feedforward" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomErrorTopic"><i class="fa fa-sliders"></i> Room error (in, optional)</label>
+        <input type="text" id="node-input-roomErrorTopic" placeholder="Or use setpoint + actual above" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-forceOpenTopic">Force open topic (room)</label>
+        <input type="text" id="node-input-forceOpenTopic" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Per-room FOW.x. Either this or supervisor topic active ⇒ valve forced open.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-supervisorForceOpenTopic">Force open topic (test/individual)</label>
+        <input type="text" id="node-input-supervisorForceOpenTopic" placeholder="e.g. CFO3W.1" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Optional. Per-loop CFOyW.z for collector-supervisor test or manual override.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-forceCloseTopic">Force close topic</label>
+        <input type="text" id="node-input-forceCloseTopic" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-measurementNotifyTopic">Measurement notify topic</label>
+        <input type="text" id="node-input-measurementNotifyTopic" placeholder="e.g. CME2W.3" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Optional. Emergency-measuring signal for collector-supervisor (third-tick min-open only): payload 1=start, 0=inactive. Recommended multi-member format: CME&lt;collector&gt;W.&lt;loopMember&gt; (e.g. CME2W.3).</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-verboseLoggingTopic">Verbose logging topic</label>
+        <input type="text" id="node-input-verboseLoggingTopic" placeholder="payload 1=ON 0=OFF" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-verboseLogging">Verbose logging</label>
+        <input type="checkbox" id="node-input-verboseLogging" style="width:auto;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolingModeTopic">Cooling mode topic</label>
+        <input type="text" id="node-input-coolingModeTopic" placeholder="heating/mode/cooling" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-dewPointTopic">Dew point topic</label>
+        <input type="text" id="node-input-dewPointTopic" placeholder="optional" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-dewPointFixed">Dew point fixed (°C)</label>
+        <input type="number" id="node-input-dewPointFixed" step="0.5" placeholder="e.g. 15" style="width:80px;" />
+    </div>
+    <hr />
+    <div class="form-row">
+        <label for="node-input-Kp">Kp</label>
+        <input type="number" id="node-input-Kp" step="0.01" style="width:80px;" placeholder="0.3" title="Suggested 0.2–0.5: sets requested duty from floor error; model caps open time." />
+    </div>
+    <div class="form-row">
+        <label for="node-input-Kff">Kff (room error feedforward)</label>
+        <input type="number" id="node-input-Kff" step="0.01" style="width:80px;" placeholder="0" title="Initial/ fixed value. When adaptive on, Kff_adapted is used and persisted." />
+    </div>
+    <div class="form-row">
+        <label for="node-input-enableAdaptiveKff">Adaptive Kff</label>
+        <input type="checkbox" id="node-input-enableAdaptiveKff" style="width:auto;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-etaKff">η Kff</label>
+        <input type="number" id="node-input-etaKff" step="0.005" min="0" style="width:80px;" placeholder="0.02" title="Adaptation rate: Kff_adapted += η × roomErr × dtHours. Suppressed when forced." />
+    </div>
+    <div class="form-row">
+        <label for="node-input-KffMin">Kff min</label>
+        <input type="number" id="node-input-KffMin" step="0.01" style="width:80px;" title="Suggested 0. Avoid negative feedforward." />
+    </div>
+    <div class="form-row">
+        <label for="node-input-KffMax">Kff max</label>
+        <input type="number" id="node-input-KffMax" step="0.01" style="width:80px;" title="Suggested 0.3–0.5. Caps how strong room error drives duty." />
+    </div>
+    <div class="form-row">
+        <label for="node-input-Ki_room">Ki_room (slow I on room error)</label>
+        <input type="number" id="node-input-Ki_room" step="0.01" min="0" style="width:80px;" placeholder="0" title="Optional; trims residual room error. Integral capped ±1. Suggested 0.05–0.15 if residual noticeable (docs/brainstorms/heating/mpc.md §3.0.3)." />
+    </div>
+    <div class="form-row" style="margin-top:2px;">
+        <span style="font-size:11px; color:#666;">Kp/Kff set requested duty (u); model-based close caps open time. Adaptive Kff: Kff_adapted += η×roomErr×dtHours (clamped), persisted; suppressed when force open/close active.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-deadbandC">Deadband (°C)</label>
+        <input type="number" id="node-input-deadbandC" step="0.1" style="width:80px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-minOpenSec">Min open (s)</label>
+        <input type="number" id="node-input-minOpenSec" min="0" style="width:80px;" />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Below this: carryover to next tick (like floor-loop).</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-maxTicksWithoutOutput">Max ticks without output</label>
+        <input type="number" id="node-input-maxTicksWithoutOutput" min="0" style="width:60px;" title="After this many consecutive ticks with only carryover (no valve open), force open for min open time so return-water averager gate gets an update." />
+        <span style="font-size:11px; color:#666; margin-left:8px;">Default 2: on 3rd tick with carryover only, open for min open (s). Valve output gates return-water averagers.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-valveType">Valve type</label>
+        <select id="node-input-valveType" style="width:100px;">
+            <option value="NC">NC</option>
+            <option value="NO">NO</option>
+        </select>
+        <span style="font-size:11px; color:#666; margin-left:8px;">NO: closed→payload 1, open→0</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-dewMarginC">Dew margin (°C)</label>
+        <input type="number" id="node-input-dewMarginC" step="0.1" style="width:80px;" />
+    </div>
+    <hr />
+    <div class="form-row">
+        <label for="node-input-tauPipeSurfaceSec">τ pipe→surface (s)</label>
+        <input type="number" id="node-input-tauPipeSurfaceSec" min="60" style="width:100px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-closeMarginC">Close margin (°C)</label>
+        <input type="number" id="node-input-closeMarginC" step="0.1" style="width:80px;" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-useModelBasedClose">Model-based close</label>
+        <input type="checkbox" id="node-input-useModelBasedClose" style="width:auto;" />
+    </div>
+    <div class="form-row" style="margin-top:8px;">
+        <span style="font-size:11px; color:#666;">Valve on/off: slow PWM (open Xs per tick). P + feedforward, no integral. Rough floor model (docs/brainstorms/heating/mpc.md §3.0.2): T_surface follows T_return with τ; model-based close limits open time so predicted surface reaches setpoint − margin without overshoot. τ ≈ 3600 s for 40 mm concrete.</span>
+    </div>
+</script>
+
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-mpc-floor", {
+        category: "uniflex home",
+        color: "#C7E9C0",
+        icon: "font-awesome/fa-thermometer-half",
+        defaults: {
+            name: { value: "" },
+            setpointTopic: { value: "" },
+            returnTopic: { value: "" },
+            roomTickTopic: { value: "" },
+            valveCmdTopic: { value: "" },
+            roomSetpointTopic: { value: "" },
+            roomActualTopic: { value: "" },
+            roomErrorTopic: { value: "" },
+            forceOpenTopic: { value: "" },
+            supervisorForceOpenTopic: { value: "" },
+            forceCloseTopic: { value: "" },
+            measurementNotifyTopic: { value: "" },
+            verboseLoggingTopic: { value: "" },
+            verboseLogging: { value: false },
+            coolingModeTopic: { value: "heating/mode/cooling" },
+            dewPointTopic: { value: "" },
+            dewPointFixed: { value: "" },
+            Kp: { value: 0.3, validate: RED.validators.number() },
+            Kff: { value: 0, validate: RED.validators.number() },
+            enableAdaptiveKff: { value: false },
+            etaKff: { value: 0.02, validate: RED.validators.number() },
+            KffMin: { value: 0, validate: RED.validators.number() },
+            KffMax: { value: 0.5, validate: RED.validators.number() },
+            Ki_room: { value: 0, validate: RED.validators.number() },
+            deadbandC: { value: 0, validate: RED.validators.number() },
+            minOpenSec: { value: 180, validate: RED.validators.number() },
+            maxTicksWithoutOutput: { value: 2, validate: RED.validators.number() },
+            valveType: { value: "NC" },
+            dewMarginC: { value: 1.0, validate: RED.validators.number() },
+            closeMarginC: { value: 0.5, validate: RED.validators.number() },
+            tauPipeSurfaceSec: { value: 3600, validate: RED.validators.number() },
+            useModelBasedClose: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "mpc floor";
+        },
+        paletteLabel: "mpc floor",
+
+        oneditprepare: function () {
+            let _controllers = {};
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (let i = 0; i < controllers.length; i++) {
+                    result.push.apply(result, controllers[i].formattedTopics || []);
+                }
+                return result;
+            }
+            function initializeAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const selection = getTopics();
+                        const matches = selection ? selection.filter(function (obj) {
+                            return (obj.label || "").toLowerCase().indexOf(term) > -1;
+                        }) : [];
+                        response(matches);
+                    },
+                    focus: function (event, ui) {
+                        event.preventDefault();
+                    },
+                    select: function (event, ui) {
+                        event.preventDefault();
+                        element.val(ui.item.topic || ui.item.value);
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", element.val() || "");
+                });
+                element.autocomplete("instance")._renderItem = function (ul, item) {
+                    const term = (this.term || "").trim();
+                    const label = item.label || item.value || "";
+                    let highlightedLabel = label;
+                    if (term) {
+                        const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                        highlightedLabel = label.replace(regex, "<strong style=\"color:#e65; font-weight:bold\">$1</strong>");
+                    }
+                    return $("<li></li>").data("ui-autocomplete-item", item).append("<div>" + highlightedLabel + "</div>").appendTo(ul);
+                };
+            }
+            $.getJSON("uniflex/controller-config").done(function (data) {
+                _controllers = data;
+                initializeAutocomplete($("#node-input-setpointTopic"));
+                initializeAutocomplete($("#node-input-returnTopic"));
+                initializeAutocomplete($("#node-input-roomTickTopic"));
+                initializeAutocomplete($("#node-input-valveCmdTopic"));
+                initializeAutocomplete($("#node-input-roomSetpointTopic"));
+                initializeAutocomplete($("#node-input-roomActualTopic"));
+                initializeAutocomplete($("#node-input-roomErrorTopic"));
+                initializeAutocomplete($("#node-input-forceOpenTopic"));
+                initializeAutocomplete($("#node-input-supervisorForceOpenTopic"));
+                initializeAutocomplete($("#node-input-forceCloseTopic"));
+                initializeAutocomplete($("#node-input-measurementNotifyTopic"));
+                initializeAutocomplete($("#node-input-verboseLoggingTopic"));
+                initializeAutocomplete($("#node-input-coolingModeTopic"));
+                initializeAutocomplete($("#node-input-dewPointTopic"));
+            }).fail(function () {
+                _controllers = {};
+            });
+        }
+    });
+</script>
+
+<script type="text/html" data-help-name="uniflex-mpc-floor">
+    <p>Floor valve PWM controller: proportional + optional room-error feedforward, with optional model-based open-time capping so estimated surface temperature reaches setpoint without overshoot.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Room tick <span class="property-type">object</span></dt>
+        <dd>On configured tick topic. Starts a control cycle; period from elapsed time between ticks or <code>payload.periodSec</code> (default 300). Node then waits for the next floor setpoint.</dd>
+        <dt>Floor setpoint <span class="property-type">number °C</span></dt>
+        <dd>On setpoint topic. After a tick, triggers duty computation.</dd>
+        <dt>Floor return / actual <span class="property-type">number °C</span></dt>
+        <dd>On return topic. Used for error and surface estimate.</dd>
+        <dt>Room SP / actual / error <span class="property-type">number °C</span></dt>
+        <dd>Optional. Feedforward and slow room integral use room error from SP−actual, or a direct room-error topic.</dd>
+        <dt>Cooling mode / dew point <span class="property-type">0/1 | number °C</span></dt>
+        <dd>Optional. In cooling, closes valve if floor SP is below dew + margin (topic or fixed dew).</dd>
+        <dt>Force open / force close <span class="property-type">0/1</span></dt>
+        <dd>Output gates: force-open (room or supervisor) overrides to open; force-close to closed. Does not stop internal auto logic.</dd>
+        <dt>Verbose logging topic <span class="property-type">0/1</span></dt>
+        <dd>Optional. Enables debug logging when payload is non-zero.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Valve command <span class="property-type">0/1</span></dt>
+        <dd>On valve command topic. Mapped for NC/NO valve type. Sent on tick sync, open/close schedule, and force changes.</dd>
+        <dt>Measurement notify <span class="property-type">0/1</span></dt>
+        <dd>Optional. Emitted on min-open “gate” opens (1) and matching close (0) for collector emergency measuring.</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>Duty <code>u</code> is clamped 0–1 from P on floor error, optional Kff×roomErr (adaptive Kff optional), and optional Ki_room integral. Requested open time is <code>u × periodSec</code>, with carryover when below <b>min open</b>; after enough skipped ticks a short min-open is forced for flow averaging. When model-based close is on (heating), open time is capped using τ_pipe_surface so estimated surface does not overshoot SP − close margin.</p>
+</script>

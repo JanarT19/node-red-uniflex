@@ -1,0 +1,234 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-forecast-publisher", {
+        category: "uniflex home",
+        color: "#CFE8FF",
+        icon: "font-awesome/fa-cloud",
+        defaults: {
+            name: { value: "" },
+
+            // Calendar API
+            calendarHost: { value: "localhost" },
+            calendarPort: { value: 80, validate: RED.validators.number() },
+
+            // Calendar series titles
+            toutTitle: { value: "main.temp" },
+            windTitle: { value: "wind.speed" },
+            cloudsTitle: { value: "clouds.all" },
+            solarGainTitle: { value: "solar_irradiance" },
+
+            // Output topic prefixes (iolayer: FCTW.1, FCWW.1, FCCW.1, etc.)
+            toutTopicPrefix: { value: "FCTW" },
+            windTopicPrefix: { value: "FCWW" },
+            cloudsTopicPrefix: { value: "FCCW" },
+            solarTopicPrefix: { value: "FSRW" },
+
+            // Tick topic
+            tickTopic: { value: "heating/tick" },
+
+
+            // Fetch on startup
+            fetchOnStartup: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "forecast publisher";
+        },
+        paletteLabel: "forecast publisher",
+
+        oneditprepare: function () {
+            // Known iolayer forecast datastreams (write topics)
+            const forecastDatastreams = [
+                { label: "FCTW - ForecaTemp (temperature)", value: "FCTW" },
+                { label: "FCWW - ForecaWind (wind speed)", value: "FCWW" },
+                { label: "FCCW - ForecaClouds (cloudiness)", value: "FCCW" },
+                { label: "FSRW - Solar irradiance forecast (kW/m²)", value: "FSRW" }
+            ];
+
+            function initForecastAutocomplete(element) {
+                element.autocomplete({
+                    minLength: 0,
+                    source: function (request, response) {
+                        const term = request.term.toLowerCase();
+                        const matches = forecastDatastreams.filter(function (item) {
+                            return item.label.toLowerCase().indexOf(term) >= 0 ||
+                                item.value.toLowerCase().indexOf(term) >= 0;
+                        });
+                        response(matches);
+                    },
+                    select: function (event, ui) {
+                        element.val(ui.item.value);
+                        return false;
+                    }
+                }).on("focus", function () {
+                    element.autocomplete("search", "");
+                });
+            }
+
+            initForecastAutocomplete($("#node-input-toutTopicPrefix"));
+            initForecastAutocomplete($("#node-input-windTopicPrefix"));
+            initForecastAutocomplete($("#node-input-cloudsTopicPrefix"));
+            initForecastAutocomplete($("#node-input-solarTopicPrefix"));
+        }
+    });
+</script>
+
+<style type="text/css">
+    .forecast-publisher-div .form-row {
+        margin-bottom: 8px;
+    }
+
+    .forecast-publisher-div .form-row label {
+        width: 35% !important;
+        vertical-align: middle;
+    }
+
+    .forecast-publisher-div .form-row input,
+    .forecast-publisher-div .form-row select {
+        width: 60% !important;
+    }
+
+    .forecast-publisher-div .help-text {
+        font-size: 0.85em;
+        color: #666;
+        margin-top: 2px;
+    }
+
+    .forecast-publisher-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 10px 0;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-forecast-publisher">
+    <div class="forecast-publisher-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="forecast-publisher" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Calendar API</b>
+
+        <div class="form-row">
+            <label for="node-input-calendarHost"><i class="fa fa-server"></i> Host</label>
+            <input type="text" id="node-input-calendarHost" placeholder="localhost" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-calendarPort"><i class="fa fa-plug"></i> Port</label>
+            <input type="number" id="node-input-calendarPort" min="1" max="65535" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Calendar Series (input)</b>
+
+        <div class="form-row">
+            <label for="node-input-toutTitle"><i class="fa fa-thermometer-half"></i> Temperature</label>
+            <input type="text" id="node-input-toutTitle" placeholder="main.temp" />
+            <div class="help-text">Calendar series title for outdoor temperature forecast</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-windTitle"><i class="fa fa-flag"></i> Wind speed</label>
+            <input type="text" id="node-input-windTitle" placeholder="wind.speed" />
+            <div class="help-text">Calendar series title for wind speed forecast</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-cloudsTitle"><i class="fa fa-cloud"></i> Cloud cover</label>
+            <input type="text" id="node-input-cloudsTitle" placeholder="clouds.all" />
+            <div class="help-text">Calendar series title for cloud cover forecast (%)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-solarGainTitle"><i class="fa fa-sun-o"></i> Solar gain</label>
+            <input type="text" id="node-input-solarGainTitle" placeholder="solar_irradiance" />
+            <div class="help-text">Calendar series title for solar irradiance forecast (kW/m²)</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Output Topics (to iolayer)</b>
+
+        <div class="form-row">
+        <label for="node-input-toutTopicPrefix"><i class="fa fa-thermometer-half"></i> Temp prefix</label>
+            <input type="text" id="node-input-toutTopicPrefix" placeholder="FCTW" />
+            <div class="help-text">Publishes: FCTW.1 (3h), .2 (6h), .3 (12h), .4 (24h)</div>
+        </div>
+        <div class="form-row">
+        <label for="node-input-windTopicPrefix"><i class="fa fa-flag"></i> Wind prefix</label>
+            <input type="text" id="node-input-windTopicPrefix" placeholder="FCWW" />
+            <div class="help-text">Publishes: FCWW.1 (3h), .2 (6h), .3 (12h), .4 (24h)</div>
+        </div>
+        <div class="form-row">
+        <label for="node-input-cloudsTopicPrefix"><i class="fa fa-cloud"></i> Clouds prefix</label>
+            <input type="text" id="node-input-cloudsTopicPrefix" placeholder="FCCW" />
+            <div class="help-text">Publishes: FCCW.1 (3h), .2 (6h), .3 (12h), .4 (24h)</div>
+        </div>
+        <div class="form-row">
+        <label for="node-input-solarTopicPrefix"><i class="fa fa-sun-o"></i> Solar prefix</label>
+            <input type="text" id="node-input-solarTopicPrefix" placeholder="FSRW" />
+            <div class="help-text">Publishes: FSRW.1 (3h), .2 (6h), .3 (12h), .4 (24h) in kW/m²</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Timing</b>
+
+        <div class="form-row">
+            <label for="node-input-tickTopic"><i class="fa fa-clock-o"></i> Tick topic</label>
+            <input type="text" id="node-input-tickTopic" placeholder="heating/tick" />
+            <div class="help-text">Listen for this topic to trigger fetch (typically heating/tick every 1200s)</div>
+        </div>
+        <div class="form-row">
+            <label for="node-input-fetchOnStartup"><i class="fa fa-play"></i> Fetch on startup</label>
+            <input type="checkbox" id="node-input-fetchOnStartup" style="width: auto;" />
+            <div class="help-text">Fetch initial data 5s after deploy</div>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-forecast-publisher">
+    <h3>Forecast Publisher</h3>
+    <p>
+        Queries weather forecast from sql-calendar on heating tick and publishes lookahead values
+        to iolayer topics. Replaces Python-based ForecaTemp/ForecaWind/ForecaClouds publisher.
+    </p>
+
+    <h4>Purpose</h4>
+    <p>
+        Instead of having 18 floor loops each query the calendar API for weather data, this single node
+        fetches once per heating tick and publishes to iolayer. All interested nodes (floor loops, MPC, etc.)
+        receive the data via their existing iolayer subscription.
+    </p>
+
+    <h4>Input</h4>
+    <ul>
+        <li><b>Tick message</b> – topic matching tickTopic (e.g., "heating/tick") triggers a fetch</li>
+        <li><b>Manual trigger</b> – empty topic or "trigger"/"fetch" topic also triggers fetch</li>
+    </ul>
+
+    <h4>Output</h4>
+    <p>Publishes 16 messages (4 horizons × 4 series):</p>
+    <ul>
+        <li><code>FCTW.1</code> (3h), <code>.2</code> (6h), <code>.3</code> (12h), <code>.4</code> (24h) – temperature °C</li>
+        <li><code>FCWW.1</code>, <code>.2</code>, <code>.3</code>, <code>.4</code> – wind speed m/s</li>
+        <li><code>FCCW.1</code>, <code>.2</code>, <code>.3</code>, <code>.4</code> – cloudiness %</li>
+        <li><code>FSRW.1</code>, <code>.2</code>, <code>.3</code>, <code>.4</code> – solar irradiance kW/m²</li>
+    </ul>
+    <p>Wire output to iolayer write node to distribute to all subscribers.</p>
+
+    <h4>Timing</h4>
+    <p>
+        Values are refreshed on every tick input. Wire to a clock-ticker or inject node for periodic updates.
+    </p>
+
+    <h4>Typical Wiring</h4>
+    <pre>
+[clock-ticker] → [forecast-publisher] → [write-data-streams]
+       ↑
+  heating/tick (every 1200s)
+    </pre>
+
+    <h4>Status</h4>
+    <ul>
+        <li>Grey: Waiting for first tick</li>
+        <li>Green: Last fetch successful, shows T6h and W6h values</li>
+        <li>Red: Fetch error</li>
+    </ul>
+</script>

@@ -1,0 +1,324 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-price-handler", {
+        category: "uniflex heating",
+        paletteLabel: "price handler",
+        color: "#c7e9ff",
+        defaults: {
+            name: { value: "" },
+            elecSpotTitle: { value: "electricity.spot" },
+            gasSpotTitle: { value: "gas.spot" },
+            elecTransportTitle: { value: "electricity.transport_tax" },
+            gasTransportTitle: { value: "gas.transport_tax" },
+            elecHeatTitle: { value: "heat_price.electricity" },
+            gasHeatTitle: { value: "heat_price.gas" },
+            elecTransportDay: { value: 0 },
+            elecTransportNight: { value: 0 },
+            elecMonthlyCost1: { value: 0 },
+            elecMonthlyCost1Comment: { value: "" },
+            elecMonthlyCost2: { value: 0 },
+            elecMonthlyCost2Comment: { value: "" },
+            elecTax1: { value: 0 },
+            elecTax1Comment: { value: "" },
+            elecTax2: { value: 0 },
+            elecTax2Comment: { value: "" },
+            elecVat: { value: 0 },
+            dayStartHour: { value: 7 },
+            dayEndHour: { value: 23 },
+            useSummertime: { value: false },
+            holidaysTitle: { value: "holiday" },
+            weekdaysActive: { value: [1, 2, 3, 4, 5] },
+            gasMonthlyCost1: { value: 0 },
+            gasMonthlyCost1Comment: { value: "" },
+            gasMonthlyCost2: { value: 0 },
+            gasMonthlyCost2Comment: { value: "" },
+            gasTransportPerM3: { value: 0 },
+            gasTransportPerM3Comment: { value: "" },
+            gasTax1PerM3: { value: 0 },
+            gasTax1PerM3Comment: { value: "" },
+            gasTax2PerM3: { value: 0 },
+            gasTax2PerM3Comment: { value: "" },
+            gasHeatingValuePerM3: { value: 10.0 },
+            gasVat: { value: 0 },
+            copT1: { value: -5 },
+            copV1: { value: 2.5 },
+            copT2: { value: 7 },
+            copV2: { value: 3.5 },
+            ambientTempTitle: { value: "main.temp" },
+            boilerEff: { value: 0.9 },
+            calendarTopic: { value: "calendar/price-handler" },
+            enableLogging: { value: true },
+            debugTopics: { value: "" },
+            retryCount: { value: 3 },
+            retryDelayMinutes: { value: 30 },
+            intervalMinutes: { value: 15 }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-line-chart",
+        label: function () {
+            return this.name || "price-handler";
+        },
+        oneditprepare: function () {
+            const weekdays = this.weekdaysActive || [1, 2, 3, 4, 5];
+            $(".price-handler-weekday").each(function () {
+                const val = parseInt($(this).val(), 10);
+                $(this).prop("checked", weekdays.indexOf(val) !== -1);
+            });
+        },
+        oneditsave: function () {
+            const selected = [];
+            $(".price-handler-weekday:checked").each(function () {
+                selected.push(parseInt($(this).val(), 10));
+            });
+            this.weekdaysActive = selected;
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-price-handler">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="price-handler">
+    </div>
+    <h4>INPUT: Calendar Series to Read</h4>
+    <div class="form-row">
+        <span class="help-block">These series are <b>read from calendar</b> (populated by fetcher nodes)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-elecSpotTitle">Electricity spot price</label>
+        <input type="text" id="node-input-elecSpotTitle" style="width: 60%;">
+        <span style="font-size: 11px; margin-left: 5px;">From price-fetcher-electricity</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-gasSpotTitle">Gas spot price</label>
+        <input type="text" id="node-input-gasSpotTitle" style="width: 60%;">
+        <span style="font-size: 11px; margin-left: 5px;">From price-fetcher-gas</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-ambientTempTitle">Ambient temperature</label>
+        <input type="text" id="node-input-ambientTempTitle" style="width: 60%;">
+        <span style="font-size: 11px; margin-left: 5px;">From openweather-fetcher (for COP interpolation)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-holidaysTitle">Holidays calendar</label>
+        <input type="text" id="node-input-holidaysTitle" placeholder="holiday" style="width: 60%;">
+        <span style="font-size: 11px; margin-left: 5px;">From holidays-fetcher</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-intervalMinutes">Spot interval</label>
+        <input type="number" id="node-input-intervalMinutes" min="1" max="60" style="width: 60px;">
+        <span style="font-size: 11px; margin-left: 5px;">minutes (was 60, now 15, may become 5)</span>
+    </div>
+    
+    <h4>OUTPUT: Calendar Series to Write</h4>
+    <div class="form-row">
+        <span class="help-block">These series are <b>written to calendar</b> (calculated by this node)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-elecTransportTitle">Electricity surcharge</label>
+        <input type="text" id="node-input-elecTransportTitle" style="width: 60%;">
+        <span style="font-size: 11px; margin-left: 5px;">Transport+taxes (cents/MWh)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-gasTransportTitle">Gas surcharge</label>
+        <input type="text" id="node-input-gasTransportTitle" style="width: 60%;">
+        <span style="font-size: 11px; margin-left: 5px;">Transport+taxes (cents/MWh)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-elecHeatTitle">Heat price (electricity)</label>
+        <input type="text" id="node-input-elecHeatTitle" style="width: 60%;">
+        <span style="font-size: 11px; margin-left: 5px;">Final heat cost via heat pump (cents/MWh)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-gasHeatTitle">Heat price (gas)</label>
+        <input type="text" id="node-input-gasHeatTitle" style="width: 60%;">
+        <span style="font-size: 11px; margin-left: 5px;">Final heat cost via gas boiler (cents/MWh)</span>
+    </div>
+
+    <h4>Electricity Pricing (Transport, Taxes, VAT - Configured in UI)</h4>
+    <div class="form-row">
+        <span class="help-block">Transport costs and taxes are <b>entered here in UI</b> (not from calendar)</span>
+    </div>
+    <div class="form-row">
+        <span class="help-block"><b>Note:</b> Negative spot prices are treated as 0 for calculations (transport+taxes still apply).</span>
+    </div>
+    <div class="form-row">
+        <label>Weekdays (day/night):</label>
+        <div style="margin-left: 110px; display: inline-block;">
+            <label><input type="checkbox" class="price-handler-weekday" value="1">Mon</label>
+            <label><input type="checkbox" class="price-handler-weekday" value="2">Tue</label>
+            <label><input type="checkbox" class="price-handler-weekday" value="3">Wed</label>
+            <label><input type="checkbox" class="price-handler-weekday" value="4">Thu</label>
+            <label><input type="checkbox" class="price-handler-weekday" value="5">Fri</label>
+        </div>
+        <span style="margin-left: 20px;">Day: <input type="number" id="node-input-dayStartHour" min="0" max="23" style="width: 60px;">-<input type="number" id="node-input-dayEndHour" min="1" max="24" style="width: 60px;">h</span>
+        <label style="margin-left: 20px;"><input type="checkbox" id="node-input-useSummertime">Summertime</label>
+    </div>
+    <div class="form-row">
+        <span class="help-block"><b>Note:</b> Holidays and weekends use night rate. If day/night not configured, all times use night rate.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-elecTransportDay">Transport day</label>
+        <input type="number" id="node-input-elecTransportDay" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR/kWh</span>
+        <label for="node-input-elecTransportNight" style="margin-left: 20px;">Transport night/weekend:</label>
+        <input type="number" id="node-input-elecTransportNight" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR/kWh</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-elecMonthlyCost1">Monthly fixed cost1</label>
+        <input type="number" id="node-input-elecMonthlyCost1" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR</span>
+        <input type="text" id="node-input-elecMonthlyCost1Comment" placeholder="comment" style="margin-left: 10px; width: 200px;">
+        <label for="node-input-elecMonthlyCost2" style="margin-left: 20px;">Monthly fixed cost2:</label>
+        <input type="number" id="node-input-elecMonthlyCost2" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR</span>
+        <input type="text" id="node-input-elecMonthlyCost2Comment" placeholder="comment" style="margin-left: 10px; width: 200px;">
+        <span style="display: block; font-size: 11px; color: #666; margin-top: 3px;">(Reference only - not used in variable cost calculation)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-elecTax1">Tax1</label>
+        <input type="number" id="node-input-elecTax1" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR/kWh</span>
+        <input type="text" id="node-input-elecTax1Comment" placeholder="comment" style="margin-left: 10px; width: 200px;">
+        <label for="node-input-elecTax2" style="margin-left: 20px;">Tax2:</label>
+        <input type="number" id="node-input-elecTax2" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR/kWh</span>
+        <input type="text" id="node-input-elecTax2Comment" placeholder="comment" style="margin-left: 10px; width: 200px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-elecVat">VAT (%)</label>
+        <input type="number" id="node-input-elecVat" step="0.01" style="width: 120px;">
+    </div>
+
+    <h4>Gas Pricing</h4>
+    <div class="form-row">
+        <span class="help-block">Transport and taxes are entered in EUR/m³; converted to EUR/MWh using heating value</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-gasMonthlyCost1">Monthly fixed cost1</label>
+        <input type="number" id="node-input-gasMonthlyCost1" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR</span>
+        <input type="text" id="node-input-gasMonthlyCost1Comment" placeholder="comment" style="margin-left: 10px; width: 200px;">
+        <label for="node-input-gasMonthlyCost2" style="margin-left: 20px;">Monthly fixed cost2:</label>
+        <input type="number" id="node-input-gasMonthlyCost2" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR</span>
+        <input type="text" id="node-input-gasMonthlyCost2Comment" placeholder="comment" style="margin-left: 10px; width: 200px;">
+        <span style="display: block; font-size: 11px; color: #666; margin-top: 3px;">(Reference only - not used in variable cost calculation)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-gasTransportPerM3">Transport cost</label>
+        <input type="number" id="node-input-gasTransportPerM3" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR/m³</span>
+        <input type="text" id="node-input-gasTransportPerM3Comment" placeholder="comment" style="margin-left: 10px; width: 200px;">
+        <label for="node-input-gasTax1PerM3" style="margin-left: 20px;">Tax1:</label>
+        <input type="number" id="node-input-gasTax1PerM3" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR/m³</span>
+        <input type="text" id="node-input-gasTax1PerM3Comment" placeholder="comment" style="margin-left: 10px; width: 200px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-gasTax2PerM3">Tax2</label>
+        <input type="number" id="node-input-gasTax2PerM3" step="any" style="width: 120px;">
+        <span style="margin-left: 5px;">EUR/m³</span>
+        <input type="text" id="node-input-gasTax2PerM3Comment" placeholder="comment" style="margin-left: 10px; width: 200px;">
+    <div class="form-row">
+        <label for="node-input-gasHeatingValuePerM3">Heating value per m³ (kWh/m³)</label>
+        <input type="number" id="node-input-gasHeatingValuePerM3" step="0.01" style="width: 120px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-gasVat">VAT (%)</label>
+        <input type="number" id="node-input-gasVat" step="0.01" style="width: 120px;">
+    </div>
+
+    <h4>Efficiency</h4>
+    <div class="form-row">
+        <label for="node-input-copT1">COP T1 (°C)</label>
+        <input type="number" id="node-input-copT1" step="0.1" style="width: 80px;">
+        <label for="node-input-copV1" style="margin-left: 20px;">COP @T1:</label>
+        <input type="number" id="node-input-copV1" step="0.01" style="width: 80px;">
+        <label for="node-input-copT2" style="margin-left: 20px;">T2 (°C):</label>
+        <input type="number" id="node-input-copT2" step="0.1" style="width: 80px;">
+        <label for="node-input-copV2" style="margin-left: 10px;">COP @T2:</label>
+        <input type="number" id="node-input-copV2" step="0.01" style="width: 80px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-boilerEff">Gas heater COP</label>
+        <input type="number" id="node-input-boilerEff" step="0.01" min="0.5" max="1.05" style="width: 80px;">
+        <span style="margin-left: 5px;">~1.0 for condensing boiler</span>
+    </div>
+
+    <h4>Calendar Integration</h4>
+    <div class="form-row">
+        <label for="node-input-calendarTopic">Calendar topic</label>
+        <input type="text" id="node-input-calendarTopic" placeholder="calendar/price-handler" style="width: 60%;">
+    </div>
+    <div class="form-row">
+        <span class="help-block">Topic to send delete/create messages to sql-calendar nodes. Wire this node's output to sql-calendar input(s).</span>
+    </div>
+
+    <h4>Retry on Missing Data</h4>
+    <div class="form-row">
+        <label for="node-input-retryCount" style="width: 110px;">Retry count</label>
+        <input type="number" id="node-input-retryCount" min="0" max="10" value="3" style="width: 60px;">
+        <span class="help-block" style="display: inline-block; margin-left: 10px; font-size: 11px;">Number of retries if required data not available</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-retryDelayMinutes" style="width: 110px;">Retry delay</label>
+        <input type="number" id="node-input-retryDelayMinutes" min="1" max="1440" value="5" style="width: 60px;">
+        <span class="help-block" style="display: inline-block; margin-left: 10px; font-size: 11px;">Minutes between retries</span>
+    </div>
+
+    <h4>Logging</h4>
+    <div class="form-row">
+        <label for="node-input-enableLogging">Enable logging</label>
+        <input type="checkbox" id="node-input-enableLogging" checked>
+    </div>
+    <div class="form-row">
+        <label for="node-input-debugTopics">Debug topics</label>
+        <input type="text" id="node-input-debugTopics" placeholder="comma-separated">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-price-handler">
+    <p><b>Price Handler</b> - Calculates electricity and gas heat prices for MPC optimization.</p>
+
+    <h3>Purpose</h3>
+    <p>Reads electricity spot prices from calendar, applies transport costs, taxes, and heat pump/boiler efficiencies to calculate the effective cost of heat from each source. These prices are used by <code>mpc-house</code> to schedule the cheapest heating option.</p>
+
+    <h3>Outputs (Written to Calendar)</h3>
+    <ul>
+        <li><b>electricity.transport</b> - Spot price + transport + taxes (cents/kWh)</li>
+        <li><b>heat_price.electricity</b> - Electricity heat price = transport price / COP (cents/kWh_heat)</li>
+        <li><b>heat_price.gas</b> - Gas heat price = gas price / boiler efficiency (cents/kWh_heat)</li>
+    </ul>
+
+    <h3>COP Calculation</h3>
+    <p>The heat pump COP (Coefficient of Performance) varies with outdoor temperature. Configure two reference points:</p>
+    <ul>
+        <li><b>COP @T1</b> - COP at temperature T1 (e.g., 3.0 @ -10°C)</li>
+        <li><b>COP @T2</b> - COP at temperature T2 (e.g., 5.0 @ +10°C)</li>
+    </ul>
+    <p>COP is linearly interpolated for temperatures between T1 and T2, clamped outside this range.</p>
+
+    <h3>Price Components</h3>
+    <ul>
+        <li><b>Transport price</b> - Grid transport fee (cents/kWh)</li>
+        <li><b>Taxes</b> - Electricity tax, renewable levy, etc. (cents/kWh)</li>
+        <li><b>Gas price</b> - Fixed gas price including transport (cents/kWh)</li>
+        <li><b>Boiler efficiency</b> - Gas boiler efficiency (~0.95-1.0 for condensing)</li>
+    </ul>
+
+    <h3>Usage</h3>
+    <ol>
+        <li>Configure transport costs and efficiencies in the node settings</li>
+        <li>Wire output to <code>sql-calendar</code> node(s)</li>
+        <li>Trigger after electricity spot prices are fetched (e.g., daily at 14:00)</li>
+        <li>Heat prices will be available in calendar for MPC scheduling</li>
+    </ol>
+
+    <h3>Retry Logic</h3>
+    <p>If required data (spot prices or temperature forecast) is missing, the node will retry after the configured delay. Useful when price-fetcher runs slightly before price-handler.</p>
+
+    <h3>Time Window</h3>
+    <p>Derived from available spot data (midnight today to last available spot timestamp, typically 01:00 day+2). Spot interval is configurable (was 60min until 2024, now typically 15min).</p>
+</script>

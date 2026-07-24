@@ -1,0 +1,78 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-holidays-fetcher", {
+        category: "uniflex calendar",
+        paletteLabel: "holidays fetcher",
+        color: "#c7e9ff",
+        defaults: {
+            name: { value: "" },
+            calendarUrl: { value: "", required: true },
+            calendarTitle: { value: "holiday" },
+            calendarTopic: { value: "calendar/holidays" },
+            enableLogging: { value: true },
+            debugTopics: { value: "" }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-calendar",
+        label: function () {
+            return this.name || "holidays-fetcher";
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-holidays-fetcher">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="holidays-fetcher">
+    </div>
+
+    <h4>Google Calendar</h4>
+    <div class="form-row">
+        <label for="node-input-calendarUrl">Calendar URL</label>
+        <input type="text" id="node-input-calendarUrl" placeholder="https://calendar.google.com/calendar/ical/..." style="max-width: 75%;">
+    </div>
+    <div class="form-row">
+        <span class="help-block">Google Calendar iCal public URL. All events from this calendar will be stored with the configured title.</span>
+    </div>
+
+    <h4>Calendar Integration</h4>
+    <div class="form-row">
+        <label for="node-input-calendarTitle">Calendar title</label>
+        <input type="text" id="node-input-calendarTitle" placeholder="holiday">
+        <span class="help-block">Title to use for all events in sql-calendar (default: "holiday")</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-calendarTopic">Calendar topic</label>
+        <input type="text" id="node-input-calendarTopic" placeholder="calendar/holidays">
+        <span class="help-block">Topic to send delete/create messages to sql-calendar nodes. Wire this node's output to sql-calendar input(s).</span>
+    </div>
+
+    <h4>Logging</h4>
+    <div class="form-row">
+        <label for="node-input-enableLogging">Enable logging</label>
+        <input type="checkbox" id="node-input-enableLogging" checked>
+    </div>
+    <div class="form-row">
+        <label for="node-input-debugTopics">Debug topics</label>
+        <input type="text" id="node-input-debugTopics" placeholder="comma-separated">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-holidays-fetcher">
+    <p>Fetches holiday events from a Google Calendar iCal URL and writes them to sql-calendar under a single configured title (default <code>holiday</code>), regardless of original event titles. Range: about 1 year ahead.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Trigger <span class="property-type">any</span></dt>
+        <dd>Any message starts a fetch (inject). No special topic required. Monthly is usually enough.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Calendar writes</dt>
+        <dd>sql-calendar create messages for each holiday day (wire to sql-calendar).</dd>
+    </dl>
+
+    <h3>Details</h3>
+    <p>Events are normalized to the configured calendar title. Status shows the number of events written.</p>
+</script>

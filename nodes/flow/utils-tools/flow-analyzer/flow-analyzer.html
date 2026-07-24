@@ -1,0 +1,218 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-flow-analyzer", {
+        category: "uniflex utils",
+        color: "#67B7E8",
+        defaults: {
+            name: { value: "" },
+            autoRunOnDeploy: { value: true },
+            showInStatus: { value: true },
+            analyzeAllFlows: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-search",
+        label: function () {
+            return this.name || "flow analyzer";
+        },
+        labelStyle: function () {
+            return this.name ? "node_label_italic" : "";
+        },
+        paletteLabel: "flow analyzer",
+        button: {
+            enabled: function () {
+                return !this.changed;
+            },
+            visible: function () {
+                return !this.changed;
+            },
+            onclick: function () {
+                if (this.changed) {
+                    RED.notify("Please deploy first", "warning");
+                    return;
+                }
+
+                const label = this.name || "flow analyzer";
+                $.ajax({
+                    url: "inject/" + this.id,
+                    type: "POST",
+                    success: function (resp) {
+                        RED.notify("Flow analysis started", "success");
+                    },
+                    error: function (jqXHR, textStatus, errorThrown) {
+                        if (jqXHR.status == 404) {
+                            RED.notify("Node not deployed", "error");
+                        } else if (jqXHR.status == 500) {
+                            RED.notify("Analysis failed", "error");
+                        } else if (jqXHR.status == 0) {
+                            RED.notify("No response from server", "error");
+                        } else {
+                            RED.notify("Error: " + textStatus, "error");
+                        }
+                    }
+                });
+            }
+        },
+        oneditprepare: function () {
+            // Initialize checkboxes
+            $("#node-input-autoRunOnDeploy").prop("checked", this.autoRunOnDeploy !== false);
+            $("#node-input-showInStatus").prop("checked", this.showInStatus !== false);
+            $("#node-input-analyzeAllFlows").prop("checked", this.analyzeAllFlows !== false);
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-flow-analyzer">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name" />
+    </div>
+
+    <div class="form-row">
+        <label>&nbsp;</label>
+        <input type="checkbox" id="node-input-autoRunOnDeploy" style="display:inline-block; width:auto; vertical-align:baseline;" />
+        <label for="node-input-autoRunOnDeploy" style="width:auto; margin-left:5px;">Auto-run on deploy</label>
+    </div>
+
+    <div class="form-row">
+        <label>&nbsp;</label>
+        <input type="checkbox" id="node-input-showInStatus" style="display:inline-block; width:auto; vertical-align:baseline;" />
+        <label for="node-input-showInStatus" style="width:auto; margin-left:5px;">Show results in status</label>
+    </div>
+
+    <div class="form-row">
+        <label>&nbsp;</label>
+        <input type="checkbox" id="node-input-analyzeAllFlows" style="display:inline-block; width:auto; vertical-align:baseline;" />
+        <label for="node-input-analyzeAllFlows" style="width:auto; margin-left:5px;">Analyze all flows (not just current tab)</label>
+    </div>
+
+    <div class="form-tips" style="margin-top:15px;">
+        <strong>💡 Usage:</strong>
+        <ul style="margin:5px 0 0 20px; padding:0;">
+            <li>Click the button on the node to run analysis manually</li>
+            <li>Send any message to input to trigger analysis</li>
+            <li>Enable "Auto-run on deploy" to analyze automatically on every deploy</li>
+        </ul>
+    </div>
+
+    <div class="form-tips" style="margin-top:10px; padding:10px; background-color:#fff3cd; border:1px solid #ff9800; border-radius:4px;">
+        <strong>🔍 What is Analyzed:</strong>
+        <ul style="margin:5px 0 0 20px; padding:0;">
+            <li><strong>Feedback Loops:</strong> Detects actual wiring loops (following wires and link nodes)</li>
+            <li><strong>Topic Conflicts:</strong> Finds read/write conflicts with same topics</li>
+            <li><strong>Disconnected Nodes:</strong> Finds nodes with no connections</li>
+            <li><strong>Link Chains:</strong> Maps link-out → link-in connections (including cross-tab)</li>
+            <li><strong>Performance Risks:</strong> Large flows, rapid inject nodes, etc.</li>
+        </ul>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-flow-analyzer">
+    <p>Deep analysis tool for Node-RED flows to detect loops, conflicts, and optimization opportunities.</p>
+
+    <h3>Features</h3>
+    <dl class="message-properties">
+        <dt>Feedback Loop Detection <span class="property-type">error</span></dt>
+        <dd>Follows actual wiring (including link nodes) to detect real feedback loops, not just topic name matches.</dd>
+
+        <dt>Topic Conflict Detection <span class="property-type">warning</span></dt>
+        <dd>Finds cases where read and write nodes use the same topics. Severity is "error" if actual wiring is detected, "warning" otherwise.</dd>
+
+        <dt>Disconnected Nodes <span class="property-type">warning</span></dt>
+        <dd>Identifies nodes with no input or output connections (excluding inject, debug, comment, etc.).</dd>
+
+        <dt>Link Chain Analysis <span class="property-type">info</span></dt>
+        <dd>Maps all link-out → link-in connections, including cross-tab links.</dd>
+
+        <dt>Performance Risks <span class="property-type">warning</span></dt>
+        <dd>Detects large flows (>100 nodes) and rapid inject nodes (<0.5s interval) that may cause performance issues.</dd>
+    </dl>
+
+    <h3>Usage</h3>
+    <p>There are three ways to trigger analysis:</p>
+    <ol>
+        <li><strong>Auto-run on deploy:</strong> Enable "Auto-run on deploy" to automatically analyze flows after every deploy</li>
+        <li><strong>Button click:</strong> Click the button on the node in the editor</li>
+        <li><strong>Input message:</strong> Send any message to the input to trigger analysis</li>
+    </ol>
+
+    <h3>Output</h3>
+    <p>Sends a message with detailed analysis results:</p>
+    <pre>
+{
+    payload: {
+        timestamp: "2025-11-07T...",
+        summary: {
+            totalNodes: 234,
+            totalFlows: 5,
+            issues: 2,
+            warnings: 3,
+            info: 12
+        },
+        loops: [...],
+        topicConflicts: [...],
+        disconnectedNodes: [...],
+        linkChains: [...],
+        performanceRisks: [...],
+        analysisTime: "45ms"
+    },
+    topic: "flow-analysis"
+}</pre
+    >
+
+    <h3>Configuration</h3>
+    <dl class="message-properties">
+        <dt>Auto-run on deploy <span class="property-type">boolean</span></dt>
+        <dd>If enabled, automatically runs analysis after every deploy (default: true)</dd>
+
+        <dt>Show results in status <span class="property-type">boolean</span></dt>
+        <dd>If enabled, displays summary in node status (default: true)</dd>
+
+        <dt>Analyze all flows <span class="property-type">boolean</span></dt>
+        <dd>If enabled, analyzes all flows; if disabled, only current tab (default: true)</dd>
+    </dl>
+
+    <h3>Status Display</h3>
+    <p>Node status shows quick summary:</p>
+    <ul>
+        <li><span style="color:green;">●</span> <strong>Green:</strong> No issues found</li>
+        <li><span style="color:orange;">●</span> <strong>Yellow:</strong> Warnings found</li>
+        <li><span style="color:red;">●</span> <strong>Red:</strong> Critical issues found</li>
+    </ul>
+
+    <h3>Integration with Write Node</h3>
+    <p>The "Loop Detection" warning in <code>uniflex-write-data-streams</code> now includes an "🔍 Analyze Flow" button that triggers this node (if present in the flow).</p>
+
+    <h3>Best Practices</h3>
+    <ul>
+        <li>Add one Flow Analyzer node per workspace</li>
+        <li>Enable "Auto-run on deploy" to catch issues early</li>
+        <li>Connect output to a debug node to see detailed results</li>
+        <li>Use link nodes to avoid visual clutter when fixing loops</li>
+    </ul>
+
+    <h3>Examples</h3>
+    <h4>Example 1: Feedback Loop Detection</h4>
+    <pre>
+// Detected loop:
+{
+    type: "feedback-loop",
+    severity: "error",
+    path: ["write node → link-out → link-in → read node → write node"],
+    description: "Feedback loop detected..."
+}</pre
+    >
+
+    <h4>Example 2: Topic Conflict</h4>
+    <pre>
+// Confirmed loop with wiring:
+{
+    topic: "SADW",
+    severity: "error",
+    hasWiring: true,
+    description: "CONFIRMED LOOP: Topic SADW has 1 writer(s) and 1 reader(s) with actual wiring connection"
+}</pre
+    >
+
+    <h3>Performance</h3>
+    <p>Analysis typically completes in 10-100ms depending on flow complexity. Large workspaces (>500 nodes) may take longer but should still complete in <1 second.</p>
+</script>
