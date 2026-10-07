@@ -81,8 +81,8 @@ module.exports = function (RED) {
             if (t.includes("/room/error")) {
                 const parts = t.split("/");
                 const roomId = parts[1] || "";
-                const errorC = Number(msg.payload);
-                if (!isNaN(errorC)) handleRoomError(roomId, errorC);
+                const errorC = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (errorC !== null) handleRoomError(roomId, errorC);
                 return;
             }
             // match room tick: heating/<roomId>/tick

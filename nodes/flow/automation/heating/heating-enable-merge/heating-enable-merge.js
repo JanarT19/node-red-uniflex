@@ -118,60 +118,59 @@ module.exports = function (RED) {
             }
             // Separate schedule topics (2 members: hp_ena, gas_ena from cal2datastream)
             const v = msg.payload;
-            const n = Number(v);
-            const val = Number.isFinite(n) ? (n !== 0 ? 1 : 0) : null;
-            if (topic === node.scheduleHpTopic && val !== null) {
-                scheduleHp = val;
+            const val = (v == null || !Number.isFinite(Number(v)) ? null : (Number(v) !== 0 ? 1 : 0));
+            if (topic === node.scheduleHpTopic) {
+                scheduleHp = val === null ? 0 : val;
                 computeAndSend();
                 return;
             }
-            if (topic === node.scheduleGasTopic && val !== null) {
-                scheduleGas = val;
+            if (topic === node.scheduleGasTopic) {
+                scheduleGas = val === null ? 0 : val;
                 computeAndSend();
                 return;
             }
             if (topic === node.hewTopic1) {
-                hew1 = val !== null ? val : 0;
+                hew1 = val === null ? 0 : val;
                 computeAndSend();
                 return;
             }
             if (topic === node.hewTopic2) {
-                hew2 = val !== null ? val : 0;
+                hew2 = val === null ? 0 : val;
                 computeAndSend();
                 return;
             }
             if (topic === node.hewTopic3) {
-                hew3 = val !== null ? val : 0;
+                hew3 = val === null ? 0 : val;
                 computeAndSend();
                 return;
             }
             if (topic === node.autoHpTopic) {
-                autoHp = val !== null ? val : 0;
+                autoHp = val === null ? 0 : val;
                 computeAndSend();
                 return;
             }
             if (topic === node.autoGasTopic) {
-                autoGas = val !== null ? val : 0;
+                autoGas = val === null ? 0 : val;
                 computeAndSend();
                 return;
             }
             if (topic === node.manualForceHpTopic) {
-                manualForceHp = val !== null ? val : 0;
+                manualForceHp = val === null ? 0 : val;
                 computeAndSend();
                 return;
             }
             if (topic === node.manualForceGasTopic) {
-                manualForceGas = val !== null ? val : 0;
+                manualForceGas = val === null ? 0 : val;
                 computeAndSend();
                 return;
             }
             if (topic === node.manualBlockHpTopic) {
-                manualBlockHp = val !== null ? val : 0;
+                manualBlockHp = val === null ? 1 : val;
                 computeAndSend();
                 return;
             }
             if (topic === node.manualBlockGasTopic) {
-                manualBlockGas = val !== null ? val : 0;
+                manualBlockGas = val === null ? 1 : val;
                 computeAndSend();
                 return;
             }

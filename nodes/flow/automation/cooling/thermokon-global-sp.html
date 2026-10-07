@@ -1,0 +1,49 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-thermokon-global-sp", {
+        category: "uniflex",
+        color: "#E8D8B0",
+        defaults: {
+            name: { value: "" },
+            enableDebug: { value: false },
+            host: { value: "127.0.0.1" },
+            tcpPort: { value: 19080, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 0,
+        icon: "font-awesome/fa-globe",
+        label: function () {
+            return this.name || "thermokon global sp";
+        },
+        paletteLabel: "thermokon global sp"
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-thermokon-global-sp">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="TGSW fan-out" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-host">TCP host</label>
+        <input type="text" id="node-input-host" placeholder="127.0.0.1" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-tcpPort">TCP port</label>
+        <input type="number" id="node-input-tcpPort" min="1" max="65535" placeholder="19080" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-enableDebug">Debug log</label>
+        <input type="checkbox" id="node-input-enableDebug" style="width:auto;" />
+    </div>
+    <p style="font-size:0.85em;color:#666;margin:8px 0;">
+        On TGSW save, any changed member triggers debounced fan-out of all three
+        (eco/lo/hi) from cache. Forced ao writes r276/r272/r273 on flat S streams.
+        Wire IO read fan-in (TGSW + S reads for cache). No permanent polling.
+    </p>
+</script>
+
+<script type="text/html" data-help-name="uniflex-thermokon-global-sp">
+    <h3>thermokon global setpoints</h3>
+    <p>On <code>TempKehtesta</code> save, any changed TGSW member fans out <b>all three</b> slots (eco, lo, hi) using cached TGSW values.</p>
+    <p>Compares cached S reads for logging only; always forced-writes all zones on save (cache can lie after old ai setup).</p>
+</script>

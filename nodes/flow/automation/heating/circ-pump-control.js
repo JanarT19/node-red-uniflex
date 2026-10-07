@@ -111,18 +111,25 @@ module.exports = function (RED) {
         // ---- Input handler
         node.on("input", (msg) => {
             const t = String(msg.topic || "").trim();
-            const n = Number(msg.payload);
+            const n = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
 
             if (node.openFracTopic && t === node.openFracTopic) {
-                openFrac = Number.isFinite(n) ? n / 100 : null; // HVAVV arrives as 0..100 %
+                if (n === null) return;
+                openFrac = n / 100; // HVAVV arrives as 0..100 %
             } else if (node.tAvgTopic && t === node.tAvgTopic) {
-                tAvg = Number.isFinite(n) ? n : null;
+                if (n === null) return;
+                tAvg = n;
             } else if (node.spAvgTopic && t === node.spAvgTopic) {
-                spAvg = Number.isFinite(n) ? n : null;
+                if (n === null) return;
+                spAvg = n;
             } else if (node.coolsTopic && t === node.coolsTopic) {
-                cools = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                cools = !!bit;
             } else if (node.testTopic && t === node.testTopic) {
-                testActive = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                testActive = !!bit;
             } else {
                 return;
             }

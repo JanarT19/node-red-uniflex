@@ -1,0 +1,134 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-openweather-solar-fetcher", {
+        category: "uniflex-calendar",
+        color: "#ffd966",
+        defaults: {
+            name: { value: "" },
+            lat: { value: "" },
+            lon: { value: "" },
+            appid: { value: "" },
+            solarSeriesTitle: { value: "solar_irradiance" },
+            calendarTopic: { value: "calendar/solar" },
+            enableLogging: { value: true },
+            retryCount: { value: 2 },
+            retryDelayMinutes: { value: 10 }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-sun-o",
+        label: function () {
+            return this.name || "openweather-solar";
+        }
+    });
+</script>
+
+<script type="text/x-red" data-template-name="uniflex-openweather-solar-fetcher">
+    <div class="form-row">
+        <label for="node-input-name">Name</label>
+        <input type="text" id="node-input-name" placeholder="Name" style="max-width: 75%;">
+    </div>
+
+    <h4>OpenWeather Solar API Configuration</h4>
+    <div class="form-row">
+        <label for="node-input-lat" style="width: 110px;">Latitude</label>
+        <input type="text" id="node-input-lat" placeholder="59.42483" style="width: 150px;">
+        <label for="node-input-lon" style="width: 70px; margin-left: 10px;">Longitude</label>
+        <input type="text" id="node-input-lon" placeholder="24.61344" style="width: 150px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-appid">API Key (appid)</label>
+        <input type="text" id="node-input-appid" placeholder="your-openweather-api-key" style="max-width: 75%;">
+        <span class="help-block" style="color: #d9534f;"><b>Important:</b> Requires OpenWeather Solar Energy API subscription. 
+        Contact <a href="https://openweathermap.org/api/solar-radiation" target="_blank">OpenWeather support</a> to enable Solar API for your key.</span>
+    </div>
+
+    <h4>Data Storage</h4>
+    <div class="form-row">
+        <label for="node-input-solarSeriesTitle">Solar series title</label>
+        <input type="text" id="node-input-solarSeriesTitle" placeholder="solar_irradiance" style="max-width: 75%;">
+        <span class="help-block">Calendar series name for solar GHI data (kW/m²). Should match the series expected by <code>sun-handler</code> or <code>forecast-publisher</code>.</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-calendarTopic">Calendar topic</label>
+        <input type="text" id="node-input-calendarTopic" placeholder="calendar/solar" style="max-width: 75%;">
+        <span class="help-block">Topic to send delete/create messages to sql-calendar nodes. Wire this node's output to sql-calendar input(s).</span>
+    </div>
+
+    <h4>Retry on Failure</h4>
+    <div class="form-row">
+        <label for="node-input-retryCount" style="width: 110px;">Retry count</label>
+        <input type="number" id="node-input-retryCount" min="0" max="10" value="2" style="width: 60px;">
+        <span class="help-block" style="display: inline-block; margin-left: 10px; font-size: 11px;">Number of retries if fetch fails</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-retryDelayMinutes" style="width: 110px;">Retry delay</label>
+        <input type="number" id="node-input-retryDelayMinutes" min="1" max="1440" value="10" style="width: 60px;">
+        <span class="help-block" style="display: inline-block; margin-left: 10px; font-size: 11px;">Minutes between retries</span>
+    </div>
+
+    <h4>Logging</h4>
+    <div class="form-row">
+        <label for="node-input-enableLogging">Enable logging</label>
+        <input type="checkbox" id="node-input-enableLogging" checked>
+    </div>
+</script>
+
+<script type="text/x-red" data-help-name="uniflex-openweather-solar-fetcher">
+    <p>Fetches <b>direct solar GHI (Global Horizontal Irradiance)</b> forecast from OpenWeather's Solar Energy API and writes to sql-calendar. 
+    This provides accurate solar radiation forecasts instead of cloud-based calculations.</p>
+    
+    <h4>Key Features</h4>
+    <ul>
+        <li><b>Direct GHI data:</b> Measured in W/m², automatically converted to kW/m² for MPC compatibility</li>
+        <li><b>Hourly resolution:</b> 120+ hours ahead (5+ days)</li>
+        <li><b>Replaces sun-handler:</b> Use this for accurate solar FF learning and predictions</li>
+    </ul>
+    
+    <h4>API Access</h4>
+    <p><b style="color: #d9534f;">IMPORTANT:</b> This requires OpenWeather's <b>Solar Energy API</b> subscription, which is separate from the standard Weather API.</p>
+    <ul>
+        <li>Contact <a href="https://home.openweathermap.org/questions" target="_blank">OpenWeather support</a> to enable Solar API for your existing API key</li>
+        <li>Pricing: Check <a href="https://openweathermap.org/price" target="_blank">openweathermap.org/price</a> for Solar Radiation API plans</li>
+        <li>Your existing weather API key <b>will not work</b> until Solar API is enabled</li>
+    </ul>
+    
+    <h4>Usage</h4>
+    <ol>
+        <li><b>Trigger:</b> Connect an inject node (recommended: every 3-6 hours, same schedule as weather-fetcher)</li>
+        <li><b>Output:</b> Wire to sql-calendar node (same calendar as weather data)</li>
+        <li><b>Integration:</b> Disable or remove <code>sun-handler</code> node after confirming solar data is flowing correctly</li>
+    </ol>
+    
+    <h4>Data Format</h4>
+    <p>Fetches hourly GHI forecasts and stores them in calendar with automatic unit conversion:</p>
+    <ul>
+        <li><b>API provides:</b> GHI in W/m²</li>
+        <li><b>Calendar stores:</b> GHI in kW/m² (divided by 1000)</li>
+        <li><b>Series title:</b> Configurable (default: <code>solar_irradiance</code>)</li>
+    </ul>
+    
+    <h4>Expected Improvements</h4>
+    <p>Using direct solar GHI instead of cloud-based calculations should dramatically improve:</p>
+    <ul>
+        <li><b>FF learning R²:</b> From -1.0 (broken) to >0.5 (usable)</li>
+        <li><b>Prediction accuracy:</b> Real atmospheric modeling vs naive sin(elevation)×(1-cloud)^γ</li>
+        <li><b>MPC efficiency:</b> Better solar anticipation → optimized heating schedules</li>
+    </ul>
+    
+    <h4>Troubleshooting</h4>
+    <ul>
+        <li><b>HTTP 401 Unauthorized:</b> Solar API not enabled for your key - contact OpenWeather support</li>
+        <li><b>HTTP 404 Not Found:</b> Wrong endpoint or subscription issue - verify your Solar API access</li>
+        <li><b>No data:</b> Check Node-RED log for API response details</li>
+    </ul>
+    
+    <h4>Migration from sun-handler</h4>
+    <p>To switch from calculated solar to real GHI:</p>
+    <ol>
+        <li>Deploy this node with same <code>solarSeriesTitle</code> as sun-handler uses</li>
+        <li>Trigger manually to test (check status turns green)</li>
+        <li>Verify calendar has solar_irradiance data with <code>SELECT * FROM calendar WHERE title='solar_irradiance' ORDER BY timestamp DESC LIMIT 10</code></li>
+        <li>Disable sun-handler node in your flow</li>
+        <li>Monitor FF learning logs - R² should improve significantly</li>
+    </ol>
+</script>

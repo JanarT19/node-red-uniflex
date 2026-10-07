@@ -1,0 +1,111 @@
+<script type="text/javascript">
+    RED.nodes.registerType('uniflex-room-comfort-checker', {
+        category: 'heating-control',
+        color: '#87CEEB',
+        defaults: {
+            name: { value: "" },
+            controller: { type: "uniflex-controller", required: false },
+            staleThresholdHours: { value: 2, required: true },
+            outputTopic: { value: "MPCGW.8" }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-thermometer-half",
+        label: function () {
+            return this.name || "room comfort";
+        },
+        paletteLabel: "room comfort"
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-room-comfort-checker">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Room Comfort Checker">
+    </div>
+    
+    <div class="form-row">
+        <label for="node-input-controller"><i class="fa fa-microchip"></i> Controller</label>
+        <input type="text" id="node-input-controller" placeholder="Optional">
+    </div>
+    
+    <div class="form-row">
+        <label for="node-input-staleThresholdHours"><i class="fa fa-clock-o"></i> Stale threshold</label>
+        <input type="number" id="node-input-staleThresholdHours" placeholder="2" style="width: 80px;">
+        <span style="margin-left: 10px; color: #999;">hours (default: 2h)</span>
+    </div>
+    
+    <div class="form-row">
+        <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+        <input type="text" id="node-input-outputTopic" placeholder="MPCGW.8">
+        <span style="margin-left: 10px; color: #999;">For monitoring (default: MPCGW.8)</span>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-room-comfort-checker">
+    <p>Aggregates room comfort status from all <code>mpc-room-advanced</code> nodes.</p>
+    
+    <h3>Purpose</h3>
+    <p>Reads room forecasts from flow context and determines if ANY room needs heating based on predicted temperatures without heating.</p>
+    
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>Any message <span class="property-type">object</span></dt>
+        <dd>Trigger to check room comfort (optional - node checks automatically every 5 minutes)</dd>
+    </dl>
+    
+    <p><strong>⚠ Important:</strong> Do NOT wire this node to the main read-data-streams or link-in that fires every few seconds. The node runs automatically on startup and every 5 minutes. You can optionally wire it to receive manual triggers or MPC recalc events for immediate updates.</p>
+    
+    <h3>Output</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>1 if heating required, 0 if all rooms comfortable</dd>
+        
+        <dt>details <span class="property-type">object</span></dt>
+        <dd>Coldest room information: name, Tset, Ti_now, minT_forecast, Tmin, needsHeating, delta</dd>
+        
+        <dt>roomCount <span class="property-type">number</span></dt>
+        <dd>Number of healthy rooms checked</dd>
+    </dl>
+    
+    <h3>Configuration</h3>
+    <dl class="message-properties">
+        <dt>Stale threshold (hours)</dt>
+        <dd>Room forecast data older than this is ignored (default: 2 hours). This prevents using outdated predictions. If room nodes stop publishing forecasts (e.g., due to missing forecast cache), their data becomes stale and is excluded from the comfort check. When NO healthy room data is available, the node outputs heating_required=1 as a safe fallback.</dd>
+        
+        <dt>Output topic</dt>
+        <dd>Topic for output message (default: MPCGW.8). Wire this to a write-data-streams node for monitoring/graphing. The node also automatically writes to flow.heatingRequired for mpc-house to read.</dd>
+    </dl>
+    
+    <h3>Details</h3>
+    <p>This node reads the <code>roomForecasts</code> object from flow context (populated by <code>mpc-room-advanced</code> nodes) and checks each room's predicted minimum temperature against its setpoint tolerance (Tmin = Tset - 0.3°C).</p>
+    
+    <p><strong>Startup Behavior:</strong> On Node-RED startup, this node automatically performs an initial comfort check after a 15-second delay (allowing time for room nodes to populate forecast data). It then checks every 5 minutes automatically.</p>
+    
+    <p><strong>Decision Logic:</strong> Heating is required if ANY room's predicted minimum temperature drops below its Tmin threshold.</p>
+    
+    <p><strong>Node Status Display:</strong> Shows the coldest room and its heating need</p>
+    <ul>
+        <li><strong>Green:</strong> ✓ Coldest room name: temperature (all rooms OK)</li>
+        <li><strong>Yellow:</strong> ⚠ Coldest room name: temperature (needs X°C)</li>
+        <li><strong>Yellow ring:</strong> No healthy room data (safe fallback: heating required)</li>
+    </ul>
+    
+    <h3>Example Flow</h3>
+    <pre>
+[tick-5min] → [mpc-room-advanced] ×14
+                      ↓ (writes to flow.roomForecasts)
+              
+[room-comfort-checker] (auto-checks every 5min, no wire needed)
+                      ↓ (auto-writes to flow.heatingRequired)
+                      ↓ (msg output with topic MPCGW.8)
+              [write-data-streams]
+                      ↓
+              [monitoring/graphs]
+              
+[tick-5min] → [mpc-house] (reads flow.heatingRequired)
+
+⚠ DO NOT wire room-comfort-checker to read-data-streams or 
+  the main "link in" - it runs on its own 5-minute schedule.
+    </pre>
+</script>

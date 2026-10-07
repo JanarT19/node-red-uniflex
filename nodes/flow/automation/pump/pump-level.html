@@ -18,6 +18,7 @@
             phaseCtrlTopic: { value: "" },
             totalCurrentTopic: { value: "I11W.1" }, // Default: actual current from iolayer
             maxCurrentTopic: { value: "I11W.2" },   // Default: max current limit from iolayer
+            maxCurrentLimit: { value: "", validate: RED.validators.number() },
             numPumps: { value: 2, validate: RED.validators.number() },
             // Numeric port count in defaults (not a function -- that becomes NaN on palette drop).
             // Updated via node.outputs in defineOutputPorts(), same pattern as read-data-streams.
@@ -26,9 +27,22 @@
             pumpErrorTopics: { value: [] },
             pumpCmdTopics: { value: [] },
             enableRotation: { value: true },
+            enableRuntimeBalance: { value: true },
+            runtimeBalanceThreshold: { value: 0.1, validate: RED.validators.number() },
+            pumpRuntimeTopics: { value: [] },
+            pumpRuntimeFilePaths: { value: [] },
             swapDelaySec: { value: 30, validate: RED.validators.number() },
             startDelaySec: { value: 2.0, validate: RED.validators.number() },
-            maxPumpTimeSec: { value: 600, validate: RED.validators.number() },
+            maxPumpTimeSec: {
+                value: "",
+                validate: function (v) {
+                    if (v === "" || v === null || v === undefined) {
+                        return true;
+                    }
+                    const n = Number(v);
+                    return Number.isFinite(n) && n >= 60;
+                }
+            },
             levelStartPump2: {
                 value: null,
                 validate: function (v) {
@@ -39,6 +53,7 @@
             },
             totalCurrentMeasured: { value: true }, // true = total current, false = individual sensors
             enableSystemLog: { value: false },
+            pumpCurrentTopics: { value: [] },
             // Dynamic pump error topics stored as arrays
             pumpNoRunTopics: { value: [] },
             pumpOvercurrentTopics: { value: [] }
@@ -86,6 +101,15 @@
                     node.pumpOvercurrentTopics = node.pumpOvercurrentTopics || [];
                 }
             }
+            if (!Array.isArray(node.pumpRuntimeTopics)) {
+                node.pumpRuntimeTopics = node.pumpRuntimeTopics || [];
+            }
+            if (!Array.isArray(node.pumpRuntimeFilePaths)) {
+                node.pumpRuntimeFilePaths = node.pumpRuntimeFilePaths || [];
+            }
+            if (!Array.isArray(node.pumpCurrentTopics)) {
+                node.pumpCurrentTopics = node.pumpCurrentTopics || [];
+            }
 
             function defineOutputPorts() {
                 node.outputs = parseInt($("#node-input-numPumps").val(), 10) || 2;
@@ -115,12 +139,24 @@
                 while (node.pumpCmdTopics.length < numPumps) {
                     node.pumpCmdTopics.push("");
                 }
+                while (node.pumpRuntimeTopics.length < numPumps) {
+                    node.pumpRuntimeTopics.push("");
+                }
+                while (node.pumpRuntimeFilePaths.length < numPumps) {
+                    node.pumpRuntimeFilePaths.push("");
+                }
+                while (node.pumpCurrentTopics.length < numPumps) {
+                    node.pumpCurrentTopics.push("");
+                }
 
                 // Clear existing pump fields
                 $("#pump-fuse-topics-container").empty();
                 $("#pump-norun-topics-container").empty();
                 $("#pump-overcurrent-topics-container").empty();
                 $("#pump-cmd-topics-container").empty();
+                $("#pump-runtime-topics-container").empty();
+                $("#pump-runtime-filepaths-container").empty();
+                $("#pump-current-topics-container").empty();
 
                 // Create individual input fields for each pump
                 for (let i = 0; i < numPumps; i++) {
@@ -148,6 +184,13 @@
                     ocRow.append(ocInput);
                     $("#pump-overcurrent-topics-container").append(ocRow);
 
+                    const curRow = $('<div class="form-row pump-current-topic-row"></div>');
+                    curRow.append(`<label style="width:33%"><i class="fa fa-flash"></i> Pump ${i + 1} current</label>`);
+                    const curInput = $(`<input type="text" class="pump-current-topic" data-index="${i}" placeholder="e.g., I12W.${i + 1}" style="max-width:66%">`);
+                    curInput.val(node.pumpCurrentTopics[i] || "");
+                    curRow.append(curInput);
+                    $("#pump-current-topics-container").append(curRow);
+
                     // Command topic field
                     const cmdRow = $('<div class="form-row"></div>');
                     cmdRow.append(`<label style="width:33%"><i class="fa fa-power-off"></i> Pump ${i + 1} cmd</label>`);
@@ -156,12 +199,29 @@
                     cmdRow.append(cmdInput);
                     $("#pump-cmd-topics-container").append(cmdRow);
 
+                    const rtRow = $('<div class="form-row"></div>');
+                    rtRow.append(`<label style="width:33%"><i class="fa fa-clock-o"></i> Pump ${i + 1} runtime</label>`);
+                    const rtInput = $(`<input type="text" class="pump-runtime-topic" data-index="${i}" placeholder="e.g., P${i + 1}_RUNTIME" style="max-width:66%">`);
+                    rtInput.val(node.pumpRuntimeTopics[i] || "");
+                    rtRow.append(rtInput);
+                    $("#pump-runtime-topics-container").append(rtRow);
+
+                    const rtFileRow = $('<div class="form-row"></div>');
+                    rtFileRow.append(`<label style="width:33%"><i class="fa fa-file"></i> Pump ${i + 1} runtime file</label>`);
+                    const rtFileInput = $(`<input type="text" class="pump-runtime-filepath" data-index="${i}" placeholder="same as pump node file path" style="max-width:66%">`);
+                    rtFileInput.val(node.pumpRuntimeFilePaths[i] || "");
+                    rtFileRow.append(rtFileInput);
+                    $("#pump-runtime-filepaths-container").append(rtFileRow);
+
                     // Initialize autocomplete for these fields
                     initializeAutocomplete(fuseInput);
                     initializeAutocomplete(norunInput);
                     initializeAutocomplete(ocInput);
+                    initializeAutocomplete(curInput);
                     initializeAutocomplete(cmdInput);
+                    initializeAutocomplete(rtInput);
                 }
+                updateCurrentFields();
             }
 
             function updateOutputInfo() {
@@ -189,14 +249,21 @@
             function updateCurrentFields() {
                 const totalMeasured = $("#node-input-totalCurrentMeasured").is(":checked");
                 if (totalMeasured) {
-                    $("#total-current-row, #max-current-row").show();
+                    $("#total-current-row").show();
+                    $("#pump-current-topics-block").hide();
+                    $("#pump-current-mode-hint").text(
+                        "Per-pump current hidden. Uncheck 'Pumps total current measured' to edit Pump 1/2 current (e.g. I12W.1, I12W.2)."
+                    );
                 } else {
-                    $("#total-current-row, #max-current-row").hide();
+                    $("#total-current-row").hide();
+                    $("#pump-current-topics-block").show();
+                    $("#pump-current-mode-hint").text("");
                 }
+                $("#max-current-row").show();
             }
-            $("#node-input-totalCurrentMeasured").on("change", updateCurrentFields);
-            updateCurrentFields(); // Initial state
-
+            $("#node-input-totalCurrentMeasured").on("change", function () {
+                updateCurrentFields();
+            });
             queryControllerConfig();
             updatePumpFields();
             updateOutputInfo();
@@ -311,6 +378,21 @@
             $(".pump-cmd-topic").each(function () {
                 node.pumpCmdTopics.push($(this).val() || "");
             });
+
+            node.pumpRuntimeTopics = [];
+            $(".pump-runtime-topic").each(function () {
+                node.pumpRuntimeTopics.push($(this).val() || "");
+            });
+
+            node.pumpRuntimeFilePaths = [];
+            $(".pump-runtime-filepath").each(function () {
+                node.pumpRuntimeFilePaths.push($(this).val() || "");
+            });
+
+            node.pumpCurrentTopics = [];
+            $(".pump-current-topic").each(function () {
+                node.pumpCurrentTopics.push($(this).val() || "");
+            });
         }
     });
 </script>
@@ -410,26 +492,27 @@
         <div class="form-row">
             <label for="node-input-lowFloatTopic"><i class="fa fa-exclamation-triangle"></i> Low float</label>
             <input type="text" id="node-input-lowFloatTopic" placeholder="e.g. LES" />
-            <div class="help-text">Optional: 0=OK, 1=triggered (emergency stop).</div>
+            <div class="help-text">Optional: 0=OK, non-zero=triggered (emergency stop). Use iolayer status on read node if cfg sets status 2.</div>
         </div>
 
         <div class="form-row">
             <label for="node-input-highFloatTopic"><i class="fa fa-arrow-up"></i> High float</label>
             <input type="text" id="node-input-highFloatTopic" placeholder="e.g. LHS" />
-            <div class="help-text">Optional: 0=OK, 1=triggered.</div>
+            <div class="help-text">Optional: 0=OK, non-zero=triggered. Wire read node Status (not Value) when iolayer status is 1 or 2.</div>
         </div>
 
         <div class="form-row">
             <label for="node-input-phaseCtrlTopic"><i class="fa fa-bolt"></i> Phase control</label>
             <input type="text" id="node-input-phaseCtrlTopic" placeholder="e.g. PWS" />
-            <div class="help-text">Optional: 0=OK, 1=fault (stop all pumps).</div>
+            <div class="help-text">Optional: 0=OK, non-zero=fault (stop all pumps).</div>
         </div>
 
         <div class="form-row">
             <label for="node-input-totalCurrentMeasured"><i class="fa fa-check-square-o"></i> Pumps total current measured</label>
             <input type="checkbox" id="node-input-totalCurrentMeasured" />
-            <div class="help-text">Check if total current of all pumps is measured (single sensor). Uncheck if individual current sensors per pump (or not measured at all).</div>
+            <div class="help-text">Checked: one total current sensor (divided by running pumps). Unchecked: per-pump current fields under Pump Configuration.</div>
         </div>
+        <div class="help-text" id="pump-current-mode-hint" style="margin-left: 33%; margin-top: -5px; margin-bottom: 10px; color: #a65;"></div>
 
         <div class="form-row" id="total-current-row">
             <label for="node-input-totalCurrentTopic"><i class="fa fa-flash"></i> Total current</label>
@@ -438,9 +521,15 @@
         </div>
 
         <div class="form-row" id="max-current-row">
-            <label for="node-input-maxCurrentTopic"><i class="fa fa-exclamation-circle"></i> Max current/pump</label>
+            <label for="node-input-maxCurrentTopic"><i class="fa fa-exclamation-circle"></i> Max current topic</label>
             <input type="text" id="node-input-maxCurrentTopic" placeholder="e.g. I11W.2" />
-            <div class="help-text">Optional: maximum allowed current PER PUMP (A) from iolayer.</div>
+            <div class="help-text">Optional: live max current per pump (A) from iolayer. Leave empty if using fixed limit below.</div>
+        </div>
+
+        <div class="form-row" id="max-current-limit-row">
+            <label for="node-input-maxCurrentLimit"><i class="fa fa-exclamation-circle"></i> Max current limit</label>
+            <input type="number" id="node-input-maxCurrentLimit" min="0" step="0.1" placeholder="e.g. 12" />
+            <div class="help-text">Fixed max current per pump (A) when max current topic is empty or has no data.</div>
         </div>
 
         <div class="form-divider"></div>
@@ -450,6 +539,13 @@
             <label for="node-input-numPumps"><i class="fa fa-list-ol"></i> Number of pumps</label>
             <input type="number" id="node-input-numPumps" min="1" max="10" />
             <div class="help-text">Number of pumps to control (1-10).</div>
+        </div>
+
+        <div id="pump-current-topics-block">
+            <div class="form-divider"></div>
+            <b>Per-pump current topics (A)</b>
+            <div id="pump-current-topics-container"></div>
+            <div class="help-text" style="margin-left: 33%; margin-top: -5px; margin-bottom: 10px;">One topic per pump (e.g. I12W.1, I12W.2).</div>
         </div>
 
         <div class="form-divider"></div>
@@ -479,6 +575,25 @@
         </div>
 
         <div class="form-row">
+            <label for="node-input-enableRuntimeBalance"><i class="fa fa-balance-scale"></i> Runtime balance</label>
+            <input type="checkbox" id="node-input-enableRuntimeBalance" />
+            <div class="help-text">When persistent runtime is configured for all pumps, favor the less-used pump (e.g. 1-2-2-1 instead of strict 1-2-1-2).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-runtimeBalanceThreshold"><i class="fa fa-percent"></i> Balance threshold</label>
+            <input type="number" id="node-input-runtimeBalanceThreshold" step="0.01" min="0.05" max="0.5" />
+            <div class="help-text">Imbalance ratio to trigger wear balancing. Default 0.10 = 10% more runtime on one pump.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Runtime wear balancing (optional, one row per pump)</b>
+        <div id="pump-runtime-topics-container"></div>
+        <div class="help-text" style="margin-left: 33%; margin-top: -10px; margin-bottom: 10px;">Runtime topic from each pump node (hours). Wire pump runtime output to level controller input, or use file path below.</div>
+        <div id="pump-runtime-filepaths-container"></div>
+        <div class="help-text" style="margin-left: 33%; margin-top: -10px; margin-bottom: 10px;">Optional JSON file path per pump (same path as pump node runtime file). Used when runtime topic is not wired.</div>
+
+        <div class="form-row">
             <label for="node-input-swapDelaySec"><i class="fa fa-exchange"></i> Swap delay (s)</label>
             <input type="number" id="node-input-swapDelaySec" step="1" min="1" />
             <div class="help-text">Delay before swapping pump on NORUN or overcurrent error (seconds).</div>
@@ -493,7 +608,7 @@
         <div class="form-row">
             <label for="node-input-maxPumpTimeSec"><i class="fa fa-clock-o"></i> Max pump time (s)</label>
             <input type="number" id="node-input-maxPumpTimeSec" step="1" min="60" />
-            <div class="help-text">Maximum runtime before automatic pump swap (seconds). Default: 600s (10 minutes). Pump will be swapped to another pump after this time to distribute wear.</div>
+            <div class="help-text">Empty = disabled. With 2+ pumps, swap after this many seconds (min 60). Replacement start waits start delay (feedback time).</div>
         </div>
 
         <div class="form-row">
@@ -525,10 +640,11 @@
         <li><b>Level actual</b> -- Current water level (mm) from iolayer.</li>
         <li><b>Level start</b> -- Start threshold (mm) from iolayer.</li>
         <li><b>Level stop</b> -- Stop threshold (mm) from iolayer.</li>
-        <li><b>Low float</b> -- 0=OK, 1=triggered (emergency stop all).</li>
-        <li><b>High float</b> -- 0=OK, 1=triggered.</li>
-        <li><b>Phase control</b> -- 0=OK, 1=fault (stop all pumps).</li>
-        <li><b>Total current</b> -- Total current measurement (A).</li>
+        <li><b>Low float</b> -- 0=OK, non-zero=triggered (emergency stop all).</li>
+        <li><b>High float</b> -- 0=OK, non-zero=triggered (display/warning only).</li>
+        <li><b>Phase control</b> -- 0=OK, non-zero=fault (stop all pumps).</li>
+        <li><b>Total current</b> -- Total current measurement (A) when one sensor for all pumps.</li>
+        <li><b>Pump N current</b> -- Individual current per pump (A) when total sensor is not used.</li>
         <li><b>Max current/pump</b> -- Maximum allowed current per pump (A).</li>
         <li><b>Pump fuse OFF</b> -- Fuse OFF/problem inputs: 0=OK, 1=active problem (pump unusable).</li>
     </ul>
@@ -545,14 +661,14 @@
         <li>level > start</li>
         <li>Safety interlocks OK (floats, phase)</li>
         <li>Selected pump has no fuse OFF</li>
-        <li>Current per pump < maxCurrent (if configured)</li>
+        <li>Current per pump below limit (iolayer topic or fixed NR value, if configured)</li>
     </ul>
 
     <p><b>Stop</b> when:</p>
     <ul>
         <li>level < stop</li>
         <li>Safety interlock triggered</li>
-        <li>Current per pump > maxCurrent</li>
+        <li>Current per pump above configured limit</li>
     </ul>
 
     <h4>Pump Sequencing</h4>

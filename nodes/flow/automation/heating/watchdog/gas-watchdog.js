@@ -31,8 +31,7 @@ module.exports = function (RED) {
         let lastAvail = null;
 
         function b01(v) {
-            const n = Number(v);
-            return Number.isFinite(n) && n !== 0 ? 1 : 0;
+            return (v == null || !Number.isFinite(Number(v)) ? null : (Number(v) !== 0 ? 1 : 0));
         }
         function sendProblem() {
             if (!node.outAvailTopic) return;
@@ -81,13 +80,31 @@ module.exports = function (RED) {
 
         node.on("input", (msg) => {
             const t = String(msg.topic || "").trim();
-            if (t === node.enableCmdTopic) enableCmd = b01(msg.payload);
-            else if (t === node.needHeatTopic) needHeat = Number(msg.payload) > node.needThresholdKw ? 1 : 0;
-            else if (t === node.flameTopic) flame = b01(msg.payload);
-            else if (t === node.pumpHeatingTopic) pumpHeating = b01(msg.payload);
-            else if (t === node.dhwActiveTopic) dhwActive = b01(msg.payload);
-            else if (t === node.blockTopic) block = b01(msg.payload);
-            else return;
+            if (t === node.enableCmdTopic) {
+                const bit = b01(msg.payload);
+                if (bit === null) return;
+                enableCmd = bit;
+            } else if (t === node.needHeatTopic) {
+                const n = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (n === null) return;
+                needHeat = n > node.needThresholdKw ? 1 : 0;
+            } else if (t === node.flameTopic) {
+                const bit = b01(msg.payload);
+                if (bit === null) return;
+                flame = bit;
+            } else if (t === node.pumpHeatingTopic) {
+                const bit = b01(msg.payload);
+                if (bit === null) return;
+                pumpHeating = bit;
+            } else if (t === node.dhwActiveTopic) {
+                const bit = b01(msg.payload);
+                if (bit === null) return;
+                dhwActive = bit;
+            } else if (t === node.blockTopic) {
+                const bit = b01(msg.payload);
+                if (bit === null) return;
+                block = bit;
+            } else return;
             compute();
         });
     }

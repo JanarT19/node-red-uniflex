@@ -12,13 +12,14 @@ module.exports = function (RED) {
         node.outputMode = config.outputMode;
         node.msgType = config.msgType;
         node.mappings = config.mappings || [];
-        node.debugTopics = (config.debugTopics || "").trim();
+        node.debugTopics = (config.debugTopics || "").trim(); // comma-separated topic prefixes; empty = no debug logging
 
         // Caching and state
         const previousRows = {};
         const invalidValues = ["", null, undefined];
+        let lastServicesWarning = null;
         const outputModeValid = ["all", "change"];
-        const msgTypeValid = ["separate", "together", "split"];
+        const msgTypeValid = ["separate", "together"];
 
         // Helper to track latest error timestamps to avoid spamming
         const latestErrorTimestamps = {};
@@ -93,6 +94,18 @@ module.exports = function (RED) {
             return prefixes.some((p) => topicName && topicName.startsWith(p));
         }
 
+        function warnInvalidServicesMetadata() {
+            const warning = node.controller?.servicesError || null;
+            if (!warning) {
+                lastServicesWarning = null;
+                return;
+            }
+            if (warning !== lastServicesWarning) {
+                node.warn(`[read-data-streams] ${warning}; configured coefficients and labels may be affected`);
+                lastServicesWarning = warning;
+            }
+        }
+
         // Retrieve controller config node
         node.controller = RED.nodes.getNode(config.controller);
 
@@ -105,6 +118,8 @@ module.exports = function (RED) {
         // Listen for input messages
 
         node.on("input", (msg) => {
+            warnInvalidServicesMetadata();
+
             // Example UDP node output:
             // payload: { TEST1S: { values: [0], status: 0, timestamp: 1750530361 } }
             const dataStreams = msg.payload;
@@ -138,7 +153,6 @@ module.exports = function (RED) {
                 changed: false,
                 time: Math.floor(Date.now() / 1000),
                 separate: [],
-                split: [],
                 combined: {}
             };
             const loggedRawInputByKey = new Set();
@@ -160,11 +174,6 @@ module.exports = function (RED) {
 
                     if (age < gatingMs) {
                         // Skip this output - it was recently written
-                        if (node.msgType === "split") {
-                            outputContext.split[i] = null;
-                        } else {
-                            outputContext.split.push(null);
-                        }
                         return;
                     }
                 }
@@ -187,11 +196,6 @@ module.exports = function (RED) {
                 if (invalidValues.includes(topic)) {
                     node.error(`Topic undefined for ${svcKey}`);
                     node.status({ fill: "red", shape: "dot", text: `Topic undefined for ${svcKey}` });
-                    if (node.msgType === "split") {
-                        outputContext.split[i] = null;
-                    } else {
-                        outputContext.split.push(null);
-                    }
                     return;
                 }
 
@@ -209,11 +213,6 @@ module.exports = function (RED) {
                         }
                     }
 
-                    if (node.msgType === "split") {
-                        outputContext.split[i] = null;
-                    } else {
-                        outputContext.split.push(null);
-                    }
                     return;
                 }
 
@@ -238,20 +237,10 @@ module.exports = function (RED) {
 
                 // UDP sends one key per packet: only emit rows for the key in this message.
                 if (node.outputMode === "all" && node.msgType !== "together" && !inThisMsg) {
-                    if (node.msgType === "split") {
-                        outputContext.split[i] = null;
-                    } else {
-                        outputContext.split.push(null);
-                    }
                     return;
                 }
 
                 if (node.outputMode === "change" && node.msgType !== "together" && !changed) {
-                    if (node.msgType === "split") {
-                        outputContext.split[i] = null;
-                    } else {
-                        outputContext.split.push(null);
-                    }
                     return;
                 }
 
@@ -275,12 +264,6 @@ module.exports = function (RED) {
                     );
                 }
 
-                // Store the output message to different variables based on message type
-                if (node.msgType === "split") {
-                    outputContext.split[i] = outMsg;
-                } else {
-                    outputContext.split.push(outMsg);
-                }
                 outputContext.separate.push(outMsg);
                 outputContext.combined[topic] = output;
                 outputContext.changed ||= changed;
@@ -290,9 +273,6 @@ module.exports = function (RED) {
             if (node.msgType === "together") {
                 node.mappings.forEach((row, i) => processMappingRow(row, i));
             } else {
-                if (node.msgType === "split") {
-                    outputContext.split = new Array(node.mappings.length).fill(null);
-                }
                 const packetKeys = Object.keys(dataStreams);
                 for (let ki = 0; ki < packetKeys.length; ki++) {
                     const svcKey = packetKeys[ki];
@@ -354,17 +334,6 @@ module.exports = function (RED) {
                 return;
             }
 
-            // Send to different output ports as array
-            if (node.msgType === "split") {
-                const filtered = ctx.split.filter((m) => m !== null);
-                const count = filtered.length;
-                const keys = [...new Set(filtered.map((m) => m?.topic).filter((k) => !!k))];
-                const shownKeys = keys.slice(0, 8).join(", ");
-                const suffix = keys.length > 8 ? "..." : "";
-
-                node.status({ fill: count === 0 ? "grey" : "green", shape: "dot", text: `Output ${count} of ${rows} keys${count > 0 ? `: ${shownKeys}${suffix}` : ""}` });
-                if (count > 0) node.send(ctx.split);
-            }
         }
 
         // Function to retrieve the output value based on the row configuration
@@ -377,7 +346,17 @@ module.exports = function (RED) {
                 const index = row.index - 1;
                 const coefficient = formatCoefficient(node, row);
                 const value = values?.[index];
-                return [undefined, null].includes(value) ? null : parseFloat((value / coefficient).toFixed(2));
+                if (value === undefined || value === null || value === "") {
+                    return null;
+                }
+                if (typeof value === "string" && value.trim().toUpperCase() === "UNKN") {
+                    return null;
+                }
+                const n = Number(value);
+                if (!Number.isFinite(n)) {
+                    return null;
+                }
+                return parseFloat((n / coefficient).toFixed(2));
             }
 
             if (dataType === "status") return status ?? null;

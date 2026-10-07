@@ -1,6 +1,6 @@
 const ts = require("../../core/lib/timestamp.js");
 module.exports = function (RED) {
-    const NODE_VERSION = "6.2.1-chargeadj-nan-guard"; // Reads heatingRequired from room-comfort-checker
+    const NODE_VERSION = "6.3.2-hcmw-ff"; // charge signal carries maxDeg for the HCMW feedforward
     const http = require("http");
     const fs = require("fs");
     const path = require("path");
@@ -72,6 +72,9 @@ module.exports = function (RED) {
             gas_efficiency = 0.95;
             node.log(`[mpc-house:${node.name}] No thermal model config selected, using defaults`);
         }
+
+        // Heating envelope time constant. Free cooling is a longer lag and is not used here.
+        const heatLeadH = (Number.isFinite(Ci) && Ci > 0 && Number.isFinite(Uenv_base) && Uenv_base > 0) ? (Ci / Uenv_base) : 96;
 
         // Comfort & optimization (still configurable per node)
         const Tset = parseFloat(config.Tset) || 21.0;
@@ -160,7 +163,7 @@ module.exports = function (RED) {
         const calendarPort = parseInt(config.calendarPort) || 80;
         // Prefer global.forecastCache for outdoor temp & wind (same source as mpc-room-advanced); avoids duplicate calendar HTTP for Tout/wind
         const useForecastCache = config.useForecastCache !== false;
-        const FORECAST_CACHE_MAX_AGE_MS = 2 * 3600 * 1000; // match mpc-room-advanced staleness window
+        const FORECAST_CACHE_MAX_AGE_MS = 14 * 3600 * 1000; // same window as mpc-room-advanced, so the 96 h date mean is still there at both recalcs
 
         // Calendar HTTP: limit JSON size (prevents OOM on ARM) and lookback (15-min x 30d was huge)
         const calendarLookbackDays = Math.max(1, Math.min(62, parseInt(config.calendarLookbackDays, 10) || 10));
@@ -213,6 +216,10 @@ module.exports = function (RED) {
         // Power feedback state
         let Q_floor_actual = null; // Current floor heating power (kW)
         let Q_air_actual = null; // Current air heating power (kW)
+        // Energy taken during the current HP block. Used to extend the block when the floors
+        // deliver less than the plan. Cleared on a full recalc.
+        let heatAccount = null;
+        let closedBlockStartTs = 0;
         let Q_planned_last = null; // Last planned Q for current hour
         let totalRoomLoad = null; // Total room load (kW) from topic, when HP Power Control input is used
         let warnedTfInvalid = false; // Warn once when Tf topic is configured but payload is invalid/missing
@@ -915,6 +922,24 @@ module.exports = function (RED) {
                 });
         }
 
+        // Date mean at slotStart+heatLeadH. Last known mean is kept past the forecast.
+        // Falls back to hourly Tout when the average series is missing.
+        function toutBalanceAt(slotStartSec, hourlyTout) {
+            const cache = node.context().global.get("forecastCache");
+            if (!cache || !Array.isArray(cache.ToutAvg) || cache.ToutAvg.length === 0) return hourlyTout;
+            if (!Number.isFinite(cache.baseSlot) || !Number.isFinite(cache.stepSec) || cache.stepSec <= 0) return hourlyTout;
+            const age = Date.now() - (cache.timestamp || 0);
+            if (age > FORECAST_CACHE_MAX_AGE_MS) return hourlyTout;
+            const arr = cache.ToutAvg;
+            let idx = Math.floor((slotStartSec + heatLeadH * 3600 - cache.baseSlot) / cache.stepSec);
+            if (idx < 0) idx = 0;
+            if (idx >= arr.length) idx = arr.length - 1;
+            for (let i = idx; i >= 0; i--) {
+                if (Number.isFinite(arr[i])) return arr[i];
+            }
+            return hourlyTout;
+        }
+
         /** Map MPC slot starts onto forecast-cache grid (piecewise-constant, same semantics as calendar query). */
         function sampleForecastGrid(arr, cacheBaseSlot, cacheStepSec, slotStartSec, defaultVal) {
             if (!Array.isArray(arr) || arr.length === 0) return defaultVal;
@@ -956,6 +981,128 @@ module.exports = function (RED) {
                 windArr.push(sampleForecastGrid(wind, cache.baseSlot, cache.stepSec, slotStart, defaultWind));
             }
             return { ToutArr, windArr, cacheTimestamp: ts };
+        }
+
+        // On-event value is kWh as a numeric string ("1.5"). "0" and "" mean off.
+        // Keep at least 0.1 so a short block does not collapse to 0 and read as off.
+        function kwhOnValue(kwh) {
+            const n = Number(kwh);
+            const safe = Number.isFinite(n) && n >= 0.05 ? n : 0.1;
+            return safe.toFixed(1);
+        }
+
+        function calendarJson(method, path, bodyObj) {
+            return new Promise((resolve) => {
+                const payload = bodyObj ? JSON.stringify(bodyObj) : null;
+                const headers = {};
+                if (payload) {
+                    headers["Content-Type"] = "application/json";
+                    headers["Content-Length"] = Buffer.byteLength(payload);
+                }
+                const req = http.request(
+                    {
+                        hostname: calendarHost,
+                        port: calendarPort,
+                        path: path,
+                        method: method,
+                        timeout: 8000,
+                        headers: headers
+                    },
+                    (res) => {
+                        let data = "";
+                        res.on("data", (chunk) => (data += chunk));
+                        res.on("end", () => {
+                            let parsed = null;
+                            try {
+                                parsed = data ? JSON.parse(data) : null;
+                            } catch (e) {
+                                parsed = null;
+                            }
+                            resolve({ status: res.statusCode || 0, body: parsed });
+                        });
+                    }
+                );
+                req.on("error", () => resolve({ status: 0, body: null }));
+                req.on("timeout", () => {
+                    req.destroy();
+                    resolve({ status: 0, body: null });
+                });
+                if (payload) req.write(payload);
+                req.end();
+            });
+        }
+
+        async function putEventRow(title, mid, timestamp, value) {
+            const r = await calendarJson("PUT", "/calendar", {
+                configuration: { id: Number(mid), title: title, timestamp: timestamp, value: value }
+            });
+            const ok = r.status >= 200 && r.status < 300;
+            if (!ok) node.warn(`[mpc-house:${node.name}] calendar PUT ${title} mid=${mid} ts=${timestamp} failed status=${r.status}`);
+            return ok;
+        }
+
+        async function findOngoingEvents(title, nowSec) {
+            const from = nowSec - 2 * 86400;
+            const to = nowSec + 3600;
+            const path = `/calendar?title=${encodeURIComponent(title)}&start=${from}&end=${to}&events=true`;
+            const r = await calendarJson("GET", path);
+            const list = [];
+            const rows = Array.isArray(r.body) ? r.body : [];
+            for (const evt of rows) {
+                const ts1 = Number(evt.ts1 != null ? evt.ts1 : evt.start);
+                const ts2 = Number(evt.ts2 != null ? evt.ts2 : evt.end);
+                const mid = evt.mid != null ? evt.mid : evt.id;
+                if (!Number.isFinite(ts1) || !Number.isFinite(ts2) || mid == null) continue;
+                if (ts1 <= nowSec && nowSec < ts2) list.push({ mid: mid, start: ts1, end: ts2 });
+            }
+            const chk = await calendarJson("GET", `/calendar?title=${encodeURIComponent(title)}&check=true`);
+            const cv = chk.body && chk.body.value;
+            const cmid = chk.body && chk.body.mid;
+            const on = cv != null && cv !== "" && Number(cv) !== 0;
+            if (on && cmid != null && !list.some((e) => String(e.mid) === String(cmid))) {
+                list.push({ mid: cmid, start: nowSec, end: nowSec + 1, orphan: true });
+            }
+            return list;
+        }
+
+        // If the new plan is ON in the current slot, keep the running event and move its end.
+        // The delete that follows must not include that event: cal_store removes an event only
+        // when both start and end sit inside the delete window. A start at currentSlot would
+        // otherwise be deleted, and the continued block is not written again.
+        // If the next ON block starts later, close the running event at now before that delete.
+        async function settleOngoing(title, newEvents, currentSlot, nowSec) {
+            const fmtTs = (t) => new Date(t * 1000).toLocaleTimeString("et-EE", { hour: "2-digit", minute: "2-digit" });
+            let deleteFrom = currentSlot;
+            let eventsToWrite = newEvents;
+            if (!title) return { eventsToWrite: eventsToWrite, deleteFrom: deleteFrom };
+            const ongoing = await findOngoingEvents(title, nowSec);
+            if (ongoing.length === 0) return { eventsToWrite: eventsToWrite, deleteFrom: deleteFrom };
+            const followNow = newEvents.length > 0 && newEvents[0].start === currentSlot;
+            if (followNow) {
+                const keep = ongoing.reduce((a, b) => (a.start >= b.start ? a : b));
+                const newEnd = newEvents[0].end;
+                const newVal = newEvents[0].value;
+                await putEventRow(title, keep.mid, keep.start, newVal);
+                await putEventRow(title, keep.mid, newEnd, "");
+                log(`[mpc-house:${node.name}] ${title}: continue mid=${keep.mid} ${fmtTs(keep.start)}->${fmtTs(newEnd)} value=${newVal}`);
+                for (const extra of ongoing) {
+                    if (String(extra.mid) === String(keep.mid)) continue;
+                    const stopAt = Math.max(nowSec, extra.start + 1);
+                    await putEventRow(title, extra.mid, stopAt, "");
+                    log(`[mpc-house:${node.name}] ${title}: closed extra ongoing mid=${extra.mid} at ${fmtTs(stopAt)}`);
+                    if (extra.start >= currentSlot) deleteFrom = Math.max(deleteFrom, stopAt + 1);
+                }
+                eventsToWrite = newEvents.slice(1);
+                if (keep.start >= currentSlot) deleteFrom = Math.max(deleteFrom, keep.start + 1);
+            } else {
+                for (const ev of ongoing) {
+                    const stopAt = Math.max(nowSec, ev.start + 1);
+                    await putEventRow(title, ev.mid, stopAt, "");
+                    log(`[mpc-house:${node.name}] ${title}: stop mid=${ev.mid} at ${fmtTs(stopAt)} (next block does not follow immediately)`);
+                    if (ev.start >= currentSlot) deleteFrom = Math.max(deleteFrom, stopAt + 1);
+                }
+            }
+            return { eventsToWrite: eventsToWrite, deleteFrom: deleteFrom };
         }
 
         // Check if there's an ongoing event for a title and get its mid
@@ -1014,8 +1161,8 @@ module.exports = function (RED) {
         // IMPORTANT: Only write FUTURE schedule (from current slot onwards)
         // Past schedule is preserved as historical record of what actually happened
         // HP/gas work sessions are written as EVENTS with start/end times (not individual slot points)
-        // Q_hp and Q_gas contain power per slot for calculating expected energy
-        async function writeSchedules(hp_ena, gas_ena, Q_hp, Q_gas, send, slotDurationParam, planHeat, planElec) {
+        // Q_hp is electrical kW for the HP block. Q_gas is heat output kW.
+        async function writeSchedules(hp_ena, gas_ena, Q_hp, Q_gas, send, slotDurationParam, planHeat, planElec, skipCoastBlank) {
             const now = Math.floor(Date.now() / 1000);
             const writeSlotDuration = slotDurationParam != null ? slotDurationParam : slotDuration;
             const currentSlot = Math.floor(now / writeSlotDuration) * writeSlotDuration;
@@ -1033,6 +1180,7 @@ module.exports = function (RED) {
             // the house is thermally satisfied. Blank leading HP/gas slots until Ti is predicted
             // to decay back to setpoint (single-RC exponential approximation, Tf excluded).
             if (
+                !skipCoastBlank &&
                 Number.isFinite(avgValveOpenness) &&
                 Number.isFinite(valveGateThreshold) &&
                 avgValveOpenness < valveGateThreshold &&
@@ -1084,8 +1232,11 @@ module.exports = function (RED) {
                         }
                         const durationHours = (s - eventStartIdx) * slotHours;
                         const avgPowerKw = durationHours > 0 ? energyKwh / durationHours : 0;
-                        // Store as "E kWh (P kW)" format for display
-                        const displayValue = `${energyKwh.toFixed(1)} kWh (${avgPowerKw.toFixed(1)} kW)`;
+                        // Numeric kWh. Non-zero is ON; the end row (empty value) is OFF.
+                        const displayValue = kwhOnValue(energyKwh);
+                        debug(
+                            `[mpc-house:${node.name}] block ${new Date(eventStart * 1000).toLocaleTimeString("et-EE", { hour: "2-digit", minute: "2-digit" })}->${new Date(ts * 1000).toLocaleTimeString("et-EE", { hour: "2-digit", minute: "2-digit" })} ${displayValue} kWh avg ${avgPowerKw.toFixed(1)} kW`
+                        );
                         events.push({ start: eventStart, end: ts, value: displayValue });
                         eventStart = null;
                         eventStartIdx = null;
@@ -1135,51 +1286,22 @@ module.exports = function (RED) {
             if (gasScheduleTitle) {
                 send({ topic: calendarTopic, mode: "delete", title: gasScheduleTitle, start: 0, end: yesterday00 });
             }
-            if (planHeatTitle) {
-                send({ topic: calendarTopic, mode: "delete", title: planHeatTitle, start: 0, end: yesterday00 });
-            }
-            if (planElecTitle) {
-                send({ topic: calendarTopic, mode: "delete", title: planElecTitle, start: 0, end: yesterday00 });
-            }
+            // plan_heat, plan_elec, actual_heat and actual_elec older than yesterday
+            // are removed once a day by power2calendar in the flow.
 
             const fmtTs = (ts) => new Date(ts * 1000).toLocaleTimeString("et-EE", { hour: "2-digit", minute: "2-digit" });
 
-            // Step 2: Handle ongoing events, then wipe all future-only events.
-            // If the new plan starts HP/gas at currentSlot and an event is already running,
-            // reuse it (extend its end) instead of closing + immediately reopening.
-            // Otherwise close the ongoing event at currentSlot to preserve the historical record.
-            const ongoingHp = hpScheduleTitle ? await checkOngoingEvent(hpScheduleTitle) : null;
-            const ongoingGas = gasScheduleTitle ? await checkOngoingEvent(gasScheduleTitle) : null;
+            // Step 2: Continue a run only when the new plan is ON in this same slot.
+            // Close it first when the next ON block starts later. Both updates finish
+            // before the delete, and the kept event is left outside the delete window.
+            const hpSettled = await settleOngoing(hpScheduleTitle, hpEvents, currentSlot, now);
+            const gasSettled = await settleOngoing(gasScheduleTitle, gasEvents, currentSlot, now);
+            const hpEventsToWrite = hpSettled.eventsToWrite;
+            const gasEventsToWrite = gasSettled.eventsToWrite;
 
-            let hpEventsToWrite = hpEvents;
-            let gasEventsToWrite = gasEvents;
-
-            if (ongoingHp && ongoingHp.mid != null) {
-                if (hpEvents.length > 0 && hpEvents[0].start === currentSlot) {
-                    // Reuse: extend end of ongoing event to cover the first new planned run
-                    truncateEvent(hpScheduleTitle, ongoingHp.mid, hpEvents[0].end, send);
-                    log(`[mpc-house:${node.name}] HP: reusing ongoing event (mid=${ongoingHp.mid}), end extended to ${fmtTs(hpEvents[0].end)}`);
-                    hpEventsToWrite = hpEvents.slice(1);
-                } else {
-                    // Close ongoing event now; new events (if any) start later
-                    truncateEvent(hpScheduleTitle, ongoingHp.mid, currentSlot, send);
-                    log(`[mpc-house:${node.name}] HP: closing ongoing event (mid=${ongoingHp.mid}) at ${fmtTs(currentSlot)}`);
-                }
-            }
-            if (ongoingGas && ongoingGas.mid != null) {
-                if (gasEvents.length > 0 && gasEvents[0].start === currentSlot) {
-                    truncateEvent(gasScheduleTitle, ongoingGas.mid, gasEvents[0].end, send);
-                    log(`[mpc-house:${node.name}] Gas: reusing ongoing event (mid=${ongoingGas.mid}), end extended to ${fmtTs(gasEvents[0].end)}`);
-                    gasEventsToWrite = gasEvents.slice(1);
-                } else {
-                    truncateEvent(gasScheduleTitle, ongoingGas.mid, currentSlot, send);
-                    log(`[mpc-house:${node.name}] Gas: closing ongoing event (mid=${ongoingGas.mid}) at ${fmtTs(currentSlot)}`);
-                }
-            }
-
-            // Delete all future-only events [currentSlot, farFuture]
-            if (hpScheduleTitle) send({ topic: calendarTopic, mode: "delete", title: hpScheduleTitle, start: currentSlot, end: farFuture });
-            if (gasScheduleTitle) send({ topic: calendarTopic, mode: "delete", title: gasScheduleTitle, start: currentSlot, end: farFuture });
+            // Delete future events. deleteFrom is currentSlot, or just after a kept event's start.
+            if (hpScheduleTitle) send({ topic: calendarTopic, mode: "delete", title: hpScheduleTitle, start: hpSettled.deleteFrom, end: farFuture });
+            if (gasScheduleTitle) send({ topic: calendarTopic, mode: "delete", title: gasScheduleTitle, start: gasSettled.deleteFrom, end: farFuture });
             if (planHeatTitle) send({ topic: calendarTopic, mode: "delete", title: planHeatTitle, start: currentSlot, end: farFuture });
             if (planElecTitle) send({ topic: calendarTopic, mode: "delete", title: planElecTitle, start: currentSlot, end: farFuture });
 
@@ -1489,7 +1611,182 @@ module.exports = function (RED) {
             }
         }
 
+        // Integrate floor+air heat while an HP block is on. Near the end of the block,
+        // if the floors took at least 1 kWh less than planned, keep the HP on for the
+        // missing energy at the same power. Stops at 2 h extra, or where electricity
+        // heat is no longer cheaper than gas. Does not move the HP setpoint pair.
+        const SHORTFALL_MIN_KWH = 1;
+        const MAX_EXTRA_SLOTS = 8;
+
+        function noteActualHeat(nowSec) {
+            const schedule = node.context().get("schedule");
+            if (!schedule || !Array.isArray(schedule.hp_ena) || !schedule.slotDurationUsed || schedule.baseSlot == null) return null;
+            const step = schedule.slotDurationUsed;
+            const base = schedule.baseSlot;
+            const hp = schedule.hp_ena;
+            const idx = Math.floor((nowSec - base) / step);
+            let probe = idx;
+            if ((probe < 0 || probe >= hp.length || hp[probe] !== 1) && probe - 1 >= 0 && hp[probe - 1] === 1) probe = probe - 1;
+            let block = null;
+            if (probe >= 0 && probe < hp.length && hp[probe] === 1) {
+                let a = probe;
+                while (a > 0 && hp[a - 1] === 1) a--;
+                let b = probe + 1;
+                while (b < hp.length && hp[b] === 1) b++;
+                block = { a: a, b: b, startTs: base + a * step, endTs: base + b * step };
+            }
+            if (block && block.startTs === closedBlockStartTs) block = null;
+            if (block && (!heatAccount || heatAccount.startTs !== block.startTs)) {
+                const slotH = step / 3600;
+                let planned = 0;
+                let qSum = 0;
+                let qN = 0;
+                for (let i = block.a; i < block.b; i++) {
+                    const q = schedule.Q && schedule.Q[i] ? schedule.Q[i] : 0;
+                    planned += q * slotH;
+                    if (q > 0.3) {
+                        qSum += q;
+                        qN++;
+                    }
+                }
+                heatAccount = {
+                    startTs: block.startTs,
+                    origEndTs: block.endTs,
+                    endTs: block.endTs,
+                    plannedKwh: planned,
+                    actualKwh: 0,
+                    lastTs: nowSec,
+                    qOn: qN > 0 ? qSum / qN : 8,
+                    sawPower: false,
+                    watchedFrom: nowSec
+                };
+            }
+            if (heatAccount && nowSec >= heatAccount.startTs && nowSec < heatAccount.endTs) {
+                if (heatAccount.lastTs && Q_floor_actual != null && Number.isFinite(Q_floor_actual)) {
+                    const dt = nowSec - heatAccount.lastTs;
+                    if (dt > 0 && dt <= 900) {
+                        const qAir = Q_air_actual != null && Number.isFinite(Q_air_actual) ? Q_air_actual : 0;
+                        heatAccount.actualKwh += (Q_floor_actual + qAir) * (dt / 3600);
+                        heatAccount.sawPower = true;
+                    }
+                }
+                heatAccount.lastTs = nowSec;
+            }
+            return schedule;
+        }
+
+        // Rooms open valves from chargeSignal, not from hp_ena. Copy the running
+        // block's feedforward onto the extra slots so the floor setpoint stays up.
+        function keepChargeFf(base, step, iFrom, iTo) {
+            const sig = node.context().global.get("chargeSignal");
+            if (!sig || !Array.isArray(sig.adj) || sig.baseSlot !== base || sig.stepSec !== step) {
+                log(`[mpc-house:${node.name}] Charge FF not kept on extension (signal does not match this plan)`);
+                return null;
+            }
+            const iStart = Math.round((heatAccount.startTs - base) / step);
+            const iOrigEnd = Math.round((heatAccount.origEndTs - base) / step);
+            let sum = 0;
+            let n = 0;
+            for (let i = iStart; i < iOrigEnd && i < sig.adj.length; i++) {
+                if (Number.isFinite(sig.adj[i])) {
+                    sum += sig.adj[i];
+                    n++;
+                }
+            }
+            if (n <= 0) return null;
+            const keep = sum / n;
+            if (!(keep > 0.05)) return null;
+            for (let i = iFrom; i < iTo && i < sig.adj.length; i++) {
+                const cur = Number.isFinite(sig.adj[i]) ? sig.adj[i] : 0;
+                sig.adj[i] = Math.max(cur, keep);
+            }
+            sig.timestamp = Date.now();
+            node.context().global.set("chargeSignal", sig);
+            saveState();
+            return keep;
+        }
+
+        function extendShortRun(send) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            const schedule = noteActualHeat(nowSec);
+            if (!schedule || !heatAccount || !heatAccount.sawPower || heatAccount.plannedKwh < SHORTFALL_MIN_KWH) return;
+            const step = schedule.slotDurationUsed;
+            const dur = Math.max(0, heatAccount.origEndTs - heatAccount.startTs);
+            const needWatch = Math.min(600, Math.max(300, dur * 0.5));
+            if (nowSec - heatAccount.watchedFrom < needWatch) return;
+            if (nowSec < heatAccount.endTs - 30) return;
+            const shortfall = heatAccount.plannedKwh - heatAccount.actualKwh;
+            if (shortfall < SHORTFALL_MIN_KWH) {
+                if (nowSec >= heatAccount.endTs) {
+                    closedBlockStartTs = heatAccount.startTs;
+                    heatAccount = null;
+                }
+                return;
+            }
+            const slotH = step / 3600;
+            const qOn = heatAccount.qOn > 0.5 ? heatAccount.qOn : 8;
+            const usedExtra = Math.round((heatAccount.endTs - heatAccount.origEndTs) / step);
+            let need = Math.ceil(shortfall / (qOn * slotH));
+            need = Math.min(need, MAX_EXTRA_SLOTS - usedExtra);
+            if (need <= 0) {
+                log(
+                    `[mpc-house:${node.name}] Shortfall ${shortfall.toFixed(1)} kWh remains, extension cap ${MAX_EXTRA_SLOTS} slots reached`
+                );
+                closedBlockStartTs = heatAccount.startTs;
+                heatAccount = null;
+                return;
+            }
+            const base = schedule.baseSlot;
+            const hp = schedule.hp_ena;
+            const pe = schedule.priceElecBase;
+            const pg = schedule.priceGasBase;
+            let i0 = Math.round((heatAccount.endTs - base) / step);
+            const idxNow = Math.floor((nowSec - base) / step);
+            if (i0 < idxNow) i0 = idxNow;
+            let added = 0;
+            for (let i = i0; i < hp.length && added < need; i++) {
+                if (hp[i] === 1) break;
+                if (pe && pg && Number.isFinite(pe[i]) && Number.isFinite(pg[i]) && pg[i] > 0 && pe[i] >= pg[i]) break;
+                hp[i] = 1;
+                if (schedule.Q) schedule.Q[i] = qOn;
+                if (schedule.allow) schedule.allow[i] = 1;
+                added++;
+                heatAccount.endTs = base + (i + 1) * step;
+            }
+            if (added <= 0) return;
+            const ffKept = keepChargeFf(base, step, i0, i0 + added);
+            log(
+                `[mpc-house:${node.name}] Shortfall ${shortfall.toFixed(1)} kWh (planned ${heatAccount.plannedKwh.toFixed(1)}, got ${heatAccount.actualKwh.toFixed(1)}) -- extending ${added} slots at ${qOn.toFixed(1)} kW` +
+                    (ffKept != null ? `, ff kept ${ffKept >= 0 ? "+" : ""}${ffKept.toFixed(2)} C` : "")
+            );
+            node.context().global.set("hpChargePlan", {
+                baseSlot: base,
+                stepSec: step,
+                hp_ena: hp.slice(),
+                timestamp: Date.now()
+            });
+            const from = Math.max(0, idxNow);
+            const hpFrom = hp.slice(from);
+            const gas = Array.isArray(schedule.gas_ena) ? schedule.gas_ena : [];
+            const gasFrom = gas.slice(from);
+            const qFrom = (schedule.Q || []).slice(from);
+            const tout = Number.isFinite(lastTout) ? lastTout : 10;
+            const qElec = qFrom.map((q, i) => {
+                if (hpFrom[i] !== 1 || !(q > 0)) return 0;
+                const cop = getCopAtTemp(tout, q);
+                return cop > 0 ? q / cop : 0;
+            });
+            const qGas = gasFrom.map((on, i) => (on ? qFrom[i] || 0 : 0));
+            writeSchedules(hpFrom, gasFrom, qElec, qGas, send, step, qFrom, qElec, true).catch((e) => {
+                node.error(`[mpc-house:${node.name}] Error extending schedule: ${e.message}`);
+            });
+        }
+
         function optimizeSchedule(TfUsed, priceElecArr, priceGasArr, ToutArr, windArr, send, fullRecalc = true, slotDurationOverride = null, totalSlotsOverride = null) {
+            if (fullRecalc) {
+                heatAccount = null;
+                closedBlockStartTs = 0;
+            }
             const slotDurationUsed = slotDurationOverride != null ? slotDurationOverride : slotDuration;
             const totalSlotsUsed = totalSlotsOverride != null ? totalSlotsOverride : totalSlots;
             // Scheduling horizon = end of known electricity prices (not the configured horizon)
@@ -1608,10 +1905,11 @@ module.exports = function (RED) {
                     Q_demand[k] = Math.max(0, sum);
                 }
             } else {
-                log(`[mpc-house:${node.name}] No healthy room forecasts -- using building-level model`);
+                log(`[mpc-house:${node.name}] No healthy room forecasts -- building model, date mean ${heatLeadH.toFixed(0)}h ahead`);
                 for (let k = 0; k < S; k++) {
-                    const Uenv_k = Uenv_base + k_temp * Math.max(0, Tbalance_model - ToutArr[k]) + k_wind * (windArr[k] || 0);
-                    Q_demand[k] = Math.max(0, Uenv_k * (TsetUsed - ToutArr[k]) - Q_internal);
+                    const ToutBal = toutBalanceAt(baseSlot + k * slotDurationUsed, ToutArr[k]);
+                    const Uenv_k = Uenv_base + k_temp * Math.max(0, Tbalance_model - ToutBal) + k_wind * (windArr[k] || 0);
+                    Q_demand[k] = Math.max(0, Uenv_k * (TsetUsed - ToutBal) - Q_internal);
                 }
             }
 
@@ -1624,19 +1922,50 @@ module.exports = function (RED) {
             const maxDemand = Math.max(...Q_demand);
             const E_demand = Q_demand.reduce((a, b) => a + b, 0) * slotHours;
 
-            // Quick check: no heating needed?
-            // Read heating decision from room-comfort-checker node (via flow context)
-            const heatingRequired = node.context().flow.get("heatingRequired");
-            const noHeatingNeeded = heatingRequired === 0 || heatingRequired === false;
+            // The 96 h lead decides whether to charge. Equilibrium indoor temperature
+            // for the led date mean is Tout + Q_internal/Uenv. This plan stores only
+            // the hold over its own hours, Uenv * fall * hours, not the whole Ci * fall
+            // reservoir. demandScale is not applied to this charge.
+            const CHARGE_SPREAD_KW = 8;
+            let leadCharge = false;
+            let chargeKwCap = 0;
+            let E_budget = E_demand;
+            const toutLedNow = toutBalanceAt(baseSlot, ToutArr.length ? ToutArr[0] : NaN);
+            if (Number.isFinite(toutLedNow) && toutLedNow < Tbalance_model && Uenv_base > 0) {
+                const qInt = Number.isFinite(Q_internal) && Q_internal > 0 ? Q_internal : Uenv_base * Math.max(0, 20 - Tbalance_model);
+                const tiEq = toutLedNow + qInt / Uenv_base;
+                const fallK = Math.max(0, TsetUsed - tiEq);
+                const planHours = S * slotHours;
+                const holdKw = Uenv_base * fallK;
+                const E_charge = holdKw * planHours;
+                if (E_charge > 0) {
+                    E_budget = E_charge;
+                    leadCharge = true;
+                    chargeKwCap = CHARGE_SPREAD_KW;
+                    const fullStore = Ci > 0 ? Ci * fallK : 0;
+                    log(
+                        `[mpc-house:${node.name}] Lead charge: mean ${heatLeadH.toFixed(0)}h ahead=${toutLedNow.toFixed(1)}C ` +
+                            `balance=${Tbalance_model}C eq=${tiEq.toFixed(1)}C fall=${fallK.toFixed(1)}K ` +
+                            `hold=${holdKw.toFixed(1)}kW x ${planHours.toFixed(1)}h E=${E_charge.toFixed(0)}kWh ` +
+                            `(full store ${fullStore.toFixed(0)}kWh not used)`
+                    );
+                }
+            }
 
-            const comfortSource = typeof heatingRequired === "number" ? "room-comfort-checker" : "not-available";
+            // Quick check: no heating needed?
+            // Read heating decision from comfort-manager (via flow context)
+            // A lead charge still runs when the rooms are currently on setpoint.
+            const heatingRequired = node.context().flow.get("heatingRequired");
+            const noHeatingNeeded = (heatingRequired === 0 || heatingRequired === false) && !leadCharge;
+
+            const comfortSource = typeof heatingRequired === "number" ? "comfort-manager" : "not-available";
             log(
-                `[mpc-house:${node.name}] Demand baseline [${demandSource}]: avg=${avgDemand.toFixed(1)}kW max=${maxDemand.toFixed(1)}kW E_total=${E_demand.toFixed(0)}kWh scale=${demandScale.toFixed(3)} | comfort check [${comfortSource}]: heatingRequired=${heatingRequired} -> ${noHeatingNeeded ? "NO HEATING NEEDED" : "heating required"}`
+                `[mpc-house:${node.name}] Demand baseline [${demandSource}]: avg=${avgDemand.toFixed(1)}kW max=${maxDemand.toFixed(1)}kW E_loss=${E_demand.toFixed(0)}kWh E_budget=${E_budget.toFixed(0)}kWh scale=${demandScale.toFixed(3)} | comfort check [${comfortSource}]: heatingRequired=${heatingRequired} -> ${noHeatingNeeded ? "NO HEATING NEEDED" : leadCharge ? "LEAD CHARGE" : "heating required"}`
             );
 
             // Step 1.5: Energy-budget HP allocation (block-aware, minimize total cost)
             // Find continuous blocks in TIME order, sort by total cost, allocate until budget met
-            const E_demand_total = E_demand;
+            const E_demand_total = E_budget;
             let E_allocated = 0;
             const hpAllocatedSlots = new Set();
 
@@ -1651,12 +1980,33 @@ module.exports = function (RED) {
             }
             if (forbiddenCount > 0) debug(`[mpc-house:${node.name}] HP forbidden in ${forbiddenCount}/${S} slots (elec >= gas price)`);
 
+            // A lead charge is spread at floor power across the cheap hours.
+            // If those hours cannot hold the energy at 8 kW, use full HP capacity.
+            if (leadCharge && chargeKwCap > 0) {
+                let ok = 0;
+                for (let s = 0; s < S; s++) {
+                    if (hp_capacity[s] > 0.5 && !hpForbidden[s]) ok++;
+                }
+                const eligibleHours = ok * slotHours;
+                const hoursNeeded = CHARGE_SPREAD_KW > 0 ? E_budget / CHARGE_SPREAD_KW : 0;
+                if (eligibleHours < hoursNeeded) {
+                    log(
+                        `[mpc-house:${node.name}] Lead charge window ${eligibleHours.toFixed(1)}h < ${hoursNeeded.toFixed(1)}h at ${CHARGE_SPREAD_KW}kW -- using HP capacity`
+                    );
+                    chargeKwCap = 0;
+                } else {
+                    log(
+                        `[mpc-house:${node.name}] Lead charge spread ${E_budget.toFixed(0)}kWh over cheapest ${hoursNeeded.toFixed(1)}h at ${CHARGE_SPREAD_KW}kW`
+                    );
+                }
+            }
+
             // Helper: calculate energy and cost for a slot.
-            // Use full HP capacity per slot so the greedy selector fills the energy
-            // budget in the fewest (cheapest) slots. Overheat is prevented by the
-            // Tmax / chargeMaxDeg supply-setpoint clamp, not by a power multiplier.
+            // Lead charge uses the floor power (8 kW) so the run is not a trickle.
+            // Otherwise one slot is a full HP capacity block.
             const calcSlotEnergy = (s) => {
-                const maxCapacity = Math.min(hp_capacity[s], Q_distribution);
+                let maxCapacity = Math.min(hp_capacity[s], Q_distribution);
+                if (chargeKwCap > 0) maxCapacity = Math.min(maxCapacity, chargeKwCap);
                 return maxCapacity * slotHours;
             };
 
@@ -1907,6 +2257,7 @@ module.exports = function (RED) {
                 baseSlot,
                 stepSec: slotDurationUsed,
                 adj: chargeAdj,
+                maxDeg: chargeMaxDeg,
                 timestamp: Date.now()
             });
             const chargeNow = chargeAdj[0] || 0;
@@ -1914,25 +2265,26 @@ module.exports = function (RED) {
                 `[mpc-house:${node.name}] Charge signal: chargeMax=${chargeMaxDeg}degC costRange=${minCost.toFixed(3)}..${maxCost.toFixed(3)} chargeNow=${chargeNow >= 0 ? "+" : ""}${chargeNow.toFixed(2)}degC`
             );
 
-            // Step 4: Initialize Q with demand baseline, capped at source capacity
+            // Step 4: Chosen slots charge the building at source capacity.
+            // How many slots is set by the energy that must be stored.
+            // The run is not scaled down to that hour's heat loss.
             let hp_ena = new Array(S).fill(0);
             let gas_ena = new Array(S).fill(0);
             let Q = new Array(S).fill(0);
 
             if (!noHeatingNeeded) {
                 for (let i = 0; i < S; i++) {
-                    // Determine which source is allocated for this slot
                     const useHp = hpPreferred[i];
-                    const useGas = gasAllocatedSlots.has(i); // Only use gas if explicitly allocated
+                    const useGas = gasAllocatedSlots.has(i);
 
                     if (!useHp && !useGas) {
-                        // Coast - no heating for this slot (energy budget satisfied)
                         Q[i] = 0;
                         continue;
                     }
 
-                    const capAtSlot = useHp ? hp_capacity[i] : Qmax_gas;
-                    Q[i] = Math.min(Q_demand[i], capAtSlot, Q_distribution);
+                    let capAtSlot = useHp ? hp_capacity[i] : Qmax_gas;
+                    if (useHp && chargeKwCap > 0) capAtSlot = Math.min(capAtSlot, chargeKwCap);
+                    Q[i] = Math.min(capAtSlot, Q_distribution);
                     if (Q[i] > minPowerThreshold) {
                         if (useHp && hp_capacity[i] > 0.5) {
                             hp_ena[i] = 1;
@@ -2037,7 +2389,7 @@ module.exports = function (RED) {
                 const slotTs = baseSlot + s * slotDurationUsed;
                 const hpOn = hp_ena[s] === 1 ? "HP" : "--";
                 const gasOn = gas_ena[s] === 1 ? "GAS" : "---";
-                const pref = hpPreferred[s] ? "pref:HP" : "pref:GAS";
+                const pref = hpPreferred[s] ? "pref:HP" : gasAllocatedSlots.has(s) ? "pref:GAS" : "pref:NONE";
                 const qd = Q_demand[s] || 0;
                 const ca = chargeAdj[s] || 0;
                 debug(
@@ -2076,31 +2428,35 @@ module.exports = function (RED) {
             schedule.priceElecBase = priceElecArr.slice(0, S);
             schedule.priceGasBase = priceGasArr.slice(0, S);
 
-            const Q_hp = hp_ena.map((on, h) => (on ? Q[h] : 0));
-            const Q_gas = gas_ena.map((on, h) => (on ? Q[h] : 0));
-
-            // Per-slot planned power for power chart
-            const planHeat = Q_hp.map((q, s) => parseFloat((q + Q_gas[s]).toFixed(2)));
-            const planElec = Q_hp.map((q, s) => {
-                if (q <= 0) return 0;
+            // plan_heat is the charge kW. plan_elec and hp_ena kWh are the electrical side of that charge.
+            const planHeat = Q.map((q) => parseFloat((q || 0).toFixed(2)));
+            const planElec = Q.map((q, s) => {
+                if (hp_ena[s] !== 1 || q <= 0) return 0;
                 const tout = ToutArr[s] != null ? ToutArr[s] : ToutArr[0] || 0;
                 const cop = getCopAtTemp(tout, q);
                 return cop > 0 ? parseFloat((q / cop).toFixed(2)) : 0;
             });
+            const qGasHeat = gas_ena.map((on, h) => (on ? Q[h] : 0));
 
             lastTout = ToutArr.length > 0 ? ToutArr[0] : null;
             lastTsetUsed = TsetUsed;
 
             if (fullRecalc && (hpScheduleTitle || gasScheduleTitle) && send) {
-                writeSchedules(hp_ena, gas_ena, Q_hp, Q_gas, send, slotDurationUsed, planHeat, planElec).catch((e) => {
+                writeSchedules(hp_ena, gas_ena, planElec, qGasHeat, send, slotDurationUsed, planHeat, planElec).catch((e) => {
                     node.error(`[mpc-house:${node.name}] Error writing schedules: ${e.message}`);
                 });
             } else if (!fullRecalc) {
                 debug(`[mpc-house:${node.name}] Adjustment only, schedule not written to calendar`);
             }
 
-            // Store schedule in context
+            // Store schedule in context. Floors read hpChargePlan to force valves open in cheap slots.
             node.context().set("schedule", schedule);
+            node.context().global.set("hpChargePlan", {
+                baseSlot: schedule.baseSlot,
+                stepSec: schedule.slotDurationUsed != null ? schedule.slotDurationUsed : slotDuration,
+                hp_ena: Array.isArray(schedule.hp_ena) ? schedule.hp_ena.slice() : [],
+                timestamp: Date.now()
+            });
 
             // Store prediction for next validation (hour 1 = next hour)
             if (enableAdaptiveFeedback && lastSim.Ti_pred.length > 0) {
@@ -2275,6 +2631,57 @@ module.exports = function (RED) {
                 });
             }
 
+            // Heating pair for the heat pump. hp-control writes it only when this
+            // full recalc moves it by at least 1 C. Center is the tank temperature
+            // that delivers the planned on-slot power through the expected open loops.
+            // A half-spread of 4 C (8 C between hi and lo) covers the hours until
+            // the next recalc. Tick adjustments do not move the pair.
+            if (fullRecalc) {
+                const floorK = 0.035;
+                const floorReturnC = 21;
+                const openLoops = 15;
+                const halfSpread = 4;
+                const pairMin = 25;
+                const pairMax = 55;
+                let qSum = 0;
+                let qN = 0;
+                for (let s = 0; s < S; s++) {
+                    if (hp_ena[s] === 1 && Q[s] > minPowerThreshold) {
+                        qSum += Q[s];
+                        qN++;
+                    }
+                }
+                if (qN > 0) {
+                    const qPlan = qSum / qN;
+                    const center = floorReturnC + qPlan / (openLoops * floorK);
+                    const span = halfSpread * 2;
+                    let lo = Math.round(center - halfSpread);
+                    let hi = Math.round(center + halfSpread);
+                    if (lo < pairMin) {
+                        lo = pairMin;
+                        hi = lo + span;
+                    }
+                    if (hi > pairMax) {
+                        hi = pairMax;
+                        lo = hi - span;
+                    }
+                    if (lo < pairMin) lo = pairMin;
+                    node.context().global.set("hpSetpointPair", {
+                        hi: hi,
+                        lo: lo,
+                        center: Math.round(center * 10) / 10,
+                        qKw: Math.round(qPlan * 10) / 10,
+                        ts: Date.now()
+                    });
+                    log(
+                        `[mpc-house:${node.name}] HP pair: Q=${qPlan.toFixed(1)}kW loops=${openLoops} ` +
+                            `center=${center.toFixed(1)}C -> hi=${hi} lo=${lo}`
+                    );
+                } else {
+                    log(`[mpc-house:${node.name}] HP pair unchanged: no planned HP slots`);
+                }
+            }
+
             // Publish supply target for hp-control (which owns setpoint writing)
             if (supplyTargetTopic && T_supply_curve != null) {
                 const roomError = Number.isFinite(Ti) && Number.isFinite(TsetUsed) ? Ti - TsetUsed : 0;
@@ -2351,6 +2758,7 @@ module.exports = function (RED) {
                 TsetFromTopic = parseNumericPayload(msg.payload);
             } else if (msg.topic === qFloorActualTopic && msg.payload != null) {
                 Q_floor_actual = parseNumericPayload(msg.payload);
+                noteActualHeat(Math.floor(Date.now() / 1000));
             } else if (msg.topic === qAirActualTopic && msg.payload != null) {
                 Q_air_actual = parseNumericPayload(msg.payload);
             } else if (msg.topic === totalRoomLoadTopic && msg.payload != null) {
@@ -2397,6 +2805,7 @@ module.exports = function (RED) {
                         );
                         publishCurrentState(send, schedule);
                     }
+                    if (!shouldAdjust) extendShortRun(send);
                     lastTickRunTime = now;
                 } else {
                     debug(`[mpc-house:${node.name}] Tick throttled (next run in ${Math.ceil((TICK_RUN_THROTTLE_MS - (now - lastTickRunTime)) / 60000)} min)`);

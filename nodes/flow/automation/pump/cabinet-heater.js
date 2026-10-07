@@ -103,7 +103,9 @@ module.exports = function (RED) {
             // Actual temperature (AI)
             if (t === node.tempActualTopic) {
                 const val = Array.isArray(p) ? p[0] : p;
-                tempActual = Number(val);
+                const n = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                if (n === null) return;
+                tempActual = n;
                 checkHeaterControl();
                 return;
             }
@@ -111,7 +113,8 @@ module.exports = function (RED) {
             // Setpoint temperature (from iolayer)
             if (t === node.tempSetpointTopic) {
                 const val = Array.isArray(p) ? p[0] : p;
-                const newSetpoint = Number(val);
+                const newSetpoint = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                if (newSetpoint === null) return;
                 // Only log if value actually changed
                 if (tempSetpoint === null || Math.abs(tempSetpoint - newSetpoint) > 0.1) {
                     tempSetpoint = newSetpoint;

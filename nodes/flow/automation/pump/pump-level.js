@@ -1,3 +1,4 @@
+const fs = require("fs");
 const ts = require("../../core/lib/timestamp.js");
 // uniflex-level-controller.js
 // Node-RED node: uniflex-level-controller
@@ -19,16 +20,56 @@ module.exports = function (RED) {
         node.phaseCtrlTopic = config.phaseCtrlTopic || "";
         node.totalCurrentTopic = config.totalCurrentTopic || "";
         node.maxCurrentTopic = config.maxCurrentTopic || "";
+        const maxCurrentLimitRaw = config.maxCurrentLimit;
+        if (maxCurrentLimitRaw !== null && maxCurrentLimitRaw !== undefined && maxCurrentLimitRaw !== "") {
+            const parsedLimit = Number(maxCurrentLimitRaw);
+            node.maxCurrentLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : null;
+        } else {
+            node.maxCurrentLimit = null;
+        }
         node.numPumps = parseInt(config.numPumps ?? 2);
         node.enableRotation = config.enableRotation !== false; // default true
         node.swapDelaySec = Number(config.swapDelaySec ?? 30);
         node.startDelaySec = Number(config.startDelaySec ?? 2.0); // Delay before checking NORUN after pump start
-        node.maxPumpTimeSec = Number(config.maxPumpTimeSec ?? 600); // Maximum runtime before automatic swap (seconds)
+        const maxPumpTimeRaw = config.maxPumpTimeSec;
+        if (maxPumpTimeRaw === null || maxPumpTimeRaw === undefined || maxPumpTimeRaw === "") {
+            node.maxPumpTimeSec = null;
+        } else {
+            const parsedMaxTime = Number(maxPumpTimeRaw);
+            if (!Number.isFinite(parsedMaxTime) || parsedMaxTime <= 0) {
+                node.maxPumpTimeSec = null;
+            } else if (parsedMaxTime < 60) {
+                node.warn(`maxPumpTimeSec ${parsedMaxTime} below minimum 60, max-time swap disabled`);
+                node.maxPumpTimeSec = null;
+            } else {
+                node.maxPumpTimeSec = parsedMaxTime;
+            }
+        }
+        node.maxTimeSwapEnabled = node.numPumps >= 2 && node.maxPumpTimeSec !== null;
+        node.pumpSwapEnabled = node.numPumps >= 2;
         node.totalCurrentMeasured = config.totalCurrentMeasured !== false; // default true
         node.enableSystemLog = config.enableSystemLog === true; // default false
+        node.enableRuntimeBalance = config.enableRuntimeBalance !== false; // default true
+        node.runtimeBalanceThreshold = Number(config.runtimeBalanceThreshold ?? 0.1);
+        if (node.runtimeBalanceThreshold < 0.05 || node.runtimeBalanceThreshold > 0.5) {
+            node.warn(`runtimeBalanceThreshold out of range (0.05-0.5), using 0.1`);
+            node.runtimeBalanceThreshold = 0.1;
+        }
         // Level offset for starting 2nd pump (added to start level, null/undefined/empty = disabled)
         const levelStartPump2Val = config.levelStartPump2;
         node.levelStartPump2 = levelStartPump2Val !== null && levelStartPump2Val !== undefined && levelStartPump2Val !== "" ? Number(levelStartPump2Val) : null;
+
+        // Parse pump runtime topics / file paths (one per pump, index-aligned)
+        node.pumpRuntimeTopics = Array.isArray(config.pumpRuntimeTopics) ? config.pumpRuntimeTopics : [];
+        node.pumpRuntimeFilePaths = Array.isArray(config.pumpRuntimeFilePaths) ? config.pumpRuntimeFilePaths : [];
+        while (node.pumpRuntimeTopics.length < node.numPumps) {
+            node.pumpRuntimeTopics.push("");
+        }
+        while (node.pumpRuntimeFilePaths.length < node.numPumps) {
+            node.pumpRuntimeFilePaths.push("");
+        }
+        node.pumpRuntimeTopics = node.pumpRuntimeTopics.slice(0, node.numPumps).map((t) => (t || "").trim());
+        node.pumpRuntimeFilePaths = node.pumpRuntimeFilePaths.slice(0, node.numPumps).map((t) => (t || "").trim());
 
         // Parse pump fuse OFF topics (array format, or legacy comma-separated)
         // These indicate pump is unusable (fuse tripped or other problem)
@@ -71,6 +112,13 @@ module.exports = function (RED) {
                 .filter((t) => t.length > 0);
         }
 
+        // Per-pump current sensor topics (index-aligned, used when totalCurrentMeasured is false)
+        node.pumpCurrentTopics = Array.isArray(config.pumpCurrentTopics) ? config.pumpCurrentTopics : [];
+        while (node.pumpCurrentTopics.length < node.numPumps) {
+            node.pumpCurrentTopics.push("");
+        }
+        node.pumpCurrentTopics = node.pumpCurrentTopics.slice(0, node.numPumps).map((t) => (t || "").trim());
+
         // Validate configuration
         if (node.pumpCmdTopics.length !== node.numPumps) {
             node.warn(`Number of command topics (${node.pumpCmdTopics.length}) does not match numPumps (${node.numPumps})`);
@@ -80,11 +128,71 @@ module.exports = function (RED) {
         let levelActual = null; // Actual water level (m)
         let levelStart = null; // Start threshold (m)
         let levelStop = null; // Stop threshold (m)
-        let LES = null; // Low float: 0=OK, 1=triggered
-        let LHS = null; // High float: 0=OK, 1=triggered
-        let PWS = null; // Phase control: 0=OK, 1=fault
+        let LES = null; // Low float: 0=OK, non-zero=triggered (iolayer status may be 1 or 2)
+        let LHS = null; // High float: 0=OK, non-zero=triggered
+        let PWS = null; // Phase control: 0=OK, non-zero=fault
+
+        function interlockActive(val, topicConfigured) {
+            if (!topicConfigured) {
+                return false;
+            }
+            if (val === null || val === undefined) {
+                return true;
+            }
+            const n = Number(val);
+            return Number.isFinite(n) && n !== 0;
+        }
+
+        let maxCurrentFromTopic = null; // Maximum allowed current per pump (A) from iolayer topic
+
+        function getMaxCurrentLimit() {
+            if (node.maxCurrentTopic && maxCurrentFromTopic !== null && Number.isFinite(maxCurrentFromTopic)) {
+                return maxCurrentFromTopic;
+            }
+            return node.maxCurrentLimit;
+        }
+
+        function evaluateCurrentLimit() {
+            const limit = getMaxCurrentLimit();
+            if (limit === null || !Number.isFinite(limit)) {
+                return { currentOK: true, ocDetail: null };
+            }
+
+            const activePumps = pumpCommands.filter((cmd) => cmd === 1).length;
+
+            if (node.totalCurrentMeasured) {
+                if (totalCurrent === null || activePumps === 0) {
+                    return { currentOK: true, ocDetail: null };
+                }
+                const currentPerPump = totalCurrent / activePumps;
+                if (currentPerPump >= limit) {
+                    return {
+                        currentOK: false,
+                        ocDetail: `${currentPerPump.toFixed(1)}A/pump > ${limit.toFixed(1)}A`
+                    };
+                }
+                return { currentOK: true, ocDetail: null };
+            }
+
+            for (let i = 0; i < node.numPumps; i++) {
+                if (pumpCommands[i] !== 1) {
+                    continue;
+                }
+                const cur = pumpCurrents[i];
+                if (cur === null || !Number.isFinite(cur)) {
+                    continue;
+                }
+                if (cur >= limit) {
+                    return {
+                        currentOK: false,
+                        ocDetail: `P${i + 1} ${cur.toFixed(1)}A > ${limit.toFixed(1)}A`
+                    };
+                }
+            }
+            return { currentOK: true, ocDetail: null };
+        }
         let totalCurrent = null; // Total current (A) - only used if totalCurrentMeasured is true
-        let maxCurrent = null; // Maximum allowed current (A) from iolayer - only used if totalCurrentMeasured is true
+        let pumpCurrents = Array(node.numPumps).fill(null); // Per-pump current (A) when totalCurrentMeasured is false
 
         // Cache for service unit (for status display only)
         let levelUnit = "m"; // default unit
@@ -118,14 +226,15 @@ module.exports = function (RED) {
 
         // Helper function for system logging
         function systemLog(level, message) {
-            if (node.enableSystemLog) {
-                // Use RED.log for system logging (can be extended to use settings.js configuration)
-                if (RED && RED.log) {
-                    RED.log[level](message);
-                } else {
-                    // Fallback to console if RED.log not available
-                    console[level === "error" ? "error" : level === "warn" ? "warn" : "log"](`[${node.name || "level-controller"}] ${message}`);
-                }
+            if (!node.enableSystemLog) {
+                return;
+            }
+            if (level === "error") {
+                node.error(message);
+            } else if (level === "warn") {
+                node.warn(message);
+            } else {
+                node.log(message);
             }
         }
 
@@ -138,7 +247,161 @@ module.exports = function (RED) {
         let pumpNoRunStartTime = Array(node.numPumps).fill(0); // timestamp when NORUN was first detected
         let pumpSwapTimers = Array(node.numPumps).fill(null); // timers for swap on error
         let pumpMaxTimeTimers = Array(node.numPumps).fill(null); // timers for max runtime swap
+        let pumpReplacementTimer = null; // delay before starting replacement pump after swap
         let rotationIndex = 0; // for pump rotation
+        let rotationSeqIndex = 0; // index in runtime-balance sequence
+        let pumpRuntimeHours = Array(node.numPumps).fill(null); // hours from topic or file
+        let lastRuntimeBalanceSeqKey = null; // log sequence changes once
+
+        function readRuntimeFile(filePath) {
+            const fp = (filePath || "").trim();
+            if (!fp) {
+                return null;
+            }
+            try {
+                if (!fs.existsSync(fp)) {
+                    return null;
+                }
+                const data = JSON.parse(fs.readFileSync(fp, "utf8"));
+                if (typeof data.runtimeHours === "number" && data.runtimeHours >= 0) {
+                    return data.runtimeHours;
+                }
+            } catch (err) {
+                if (node.enableSystemLog) {
+                    node.debug(`Failed to read runtime file '${fp}': ${err.message}`);
+                }
+            }
+            return null;
+        }
+
+        function refreshRuntimeFromFiles() {
+            for (let i = 0; i < node.numPumps; i++) {
+                const fp = node.pumpRuntimeFilePaths[i];
+                if (!fp) {
+                    continue;
+                }
+                const hours = readRuntimeFile(fp);
+                if (hours !== null) {
+                    pumpRuntimeHours[i] = hours;
+                }
+            }
+        }
+
+        function pumpHasRuntimeSource(pumpIdx) {
+            const topic = node.pumpRuntimeTopics[pumpIdx] || "";
+            const file = node.pumpRuntimeFilePaths[pumpIdx] || "";
+            return topic.length > 0 || file.length > 0;
+        }
+
+        function runtimeBalanceActive() {
+            if (!node.enableRotation || !node.enableRuntimeBalance || node.numPumps < 2) {
+                return false;
+            }
+            refreshRuntimeFromFiles();
+            for (let i = 0; i < node.numPumps; i++) {
+                if (!pumpHasRuntimeSource(i)) {
+                    return false;
+                }
+                if (pumpRuntimeHours[i] === null) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Build wear-balance start sequence. For 2 pumps: overworked once, other twice (1-2-2-1...).
+        function buildRuntimeBalanceSequence() {
+            if (!runtimeBalanceActive()) {
+                return null;
+            }
+
+            const hours = pumpRuntimeHours.map((h) => h ?? 0);
+            let minH = Math.min(...hours);
+            let maxH = Math.max(...hours);
+            if (maxH <= 0) {
+                return null;
+            }
+            if (minH <= 0) {
+                minH = maxH * 0.01;
+            }
+
+            const ratio = maxH / minH;
+            if (ratio <= 1 + node.runtimeBalanceThreshold) {
+                return null;
+            }
+
+            let maxIdx = 0;
+            for (let i = 1; i < hours.length; i++) {
+                if (hours[i] > hours[maxIdx]) {
+                    maxIdx = i;
+                }
+            }
+
+            if (node.numPumps === 2) {
+                const other = 1 - maxIdx;
+                return [maxIdx, other, other];
+            }
+
+            // 3+ pumps: least-used first, overworked pump once per round
+            const order = hours
+                .map((h, i) => ({ i, h }))
+                .sort((a, b) => a.h - b.h)
+                .map((x) => x.i);
+            const seq = order.filter((i) => i !== maxIdx);
+            seq.push(maxIdx);
+            return seq;
+        }
+
+        function buildPumpStartTryOrder() {
+            refreshRuntimeFromFiles();
+            const seq = buildRuntimeBalanceSequence();
+            const order = [];
+
+            if (seq && seq.length > 0) {
+                for (let i = 0; i < seq.length; i++) {
+                    const idx = seq[(rotationSeqIndex + i) % seq.length];
+                    if (!order.includes(idx)) {
+                        order.push(idx);
+                    }
+                }
+                for (let i = 0; i < node.numPumps; i++) {
+                    if (!order.includes(i)) {
+                        order.push(i);
+                    }
+                }
+
+                const seqKey = seq.map((i) => i + 1).join("-");
+                if (node.enableSystemLog && lastRuntimeBalanceSeqKey !== seqKey) {
+                    lastRuntimeBalanceSeqKey = seqKey;
+                    const hoursStr = pumpRuntimeHours.map((h, i) => `P${i + 1}=${(h ?? 0).toFixed(1)}h`).join(" ");
+                    node.log(`Runtime balance active (${hoursStr}), rotation pattern ${seqKey}`);
+                }
+
+                return { order, seq };
+            }
+
+            lastRuntimeBalanceSeqKey = null;
+            if (node.enableRotation) {
+                for (let i = 0; i < node.numPumps; i++) {
+                    order.push((rotationIndex + i) % node.numPumps);
+                }
+            } else {
+                for (let i = 0; i < node.numPumps; i++) {
+                    order.push(i);
+                }
+            }
+            return { order, seq: null };
+        }
+
+        function advanceRotationAfterStart(pumpIdx, seq) {
+            if (seq && seq.length > 0) {
+                rotationSeqIndex = (rotationSeqIndex + 1) % seq.length;
+                return;
+            }
+            if (node.enableRotation) {
+                rotationIndex = (pumpIdx + 1) % node.numPumps;
+            }
+        }
 
         function updateStatus() {
             let parts = [];
@@ -172,27 +435,35 @@ module.exports = function (RED) {
                 parts.push(`P${activeIndices.join(",")}`);
             }
 
-            // Total current (if configured and total current measured)
+            // Current display
             if (node.totalCurrentMeasured && totalCurrent !== null && node.totalCurrentTopic) {
-                if (activePumps > 0 && maxCurrent !== null) {
+                const maxLimit = getMaxCurrentLimit();
+                if (activePumps > 0 && maxLimit !== null) {
                     const currentPerPump = totalCurrent / activePumps;
                     parts.push(`${totalCurrent.toFixed(1)}A (${currentPerPump.toFixed(1)}A/pump)`);
                 } else {
                     parts.push(`${totalCurrent.toFixed(1)}A`);
                 }
+            } else if (!node.totalCurrentMeasured) {
+                const curParts = [];
+                for (let i = 0; i < node.numPumps; i++) {
+                    if (pumpCurrents[i] !== null && Number.isFinite(pumpCurrents[i])) {
+                        curParts.push(`P${i + 1}=${pumpCurrents[i].toFixed(1)}A`);
+                    }
+                }
+                if (curParts.length > 0) {
+                    parts.push(curParts.join(" "));
+                }
             }
 
             // Warnings only (show only if not 0)
-            if (LES === 1) warnings.push("LES!");
-            if (LHS === 1) warnings.push("LHS!");
-            if (PWS === 1) warnings.push("PWS!");
+            if (interlockActive(LES, !!node.lowFloatTopic)) warnings.push("LES!");
+            if (interlockActive(LHS, !!node.highFloatTopic)) warnings.push("LHS!");
+            if (interlockActive(PWS, !!node.phaseCtrlTopic)) warnings.push("PWS!");
 
-            // Check overcurrent per pump (only if total current measured)
-            if (node.totalCurrentMeasured && maxCurrent !== null && totalCurrent !== null && activePumps > 0) {
-                const currentPerPump = totalCurrent / activePumps;
-                if (currentPerPump > maxCurrent) {
-                    warnings.push(`OC! (${currentPerPump.toFixed(1)}A/pump)`);
-                }
+            const currentLimit = evaluateCurrentLimit();
+            if (!currentLimit.currentOK && currentLimit.ocDetail) {
+                warnings.push(`OC! (${currentLimit.ocDetail})`);
             }
 
             // Pump fuse OFF states
@@ -205,7 +476,7 @@ module.exports = function (RED) {
 
             // Determine color
             let fill = "grey";
-            if (LES === 1 || PWS === 1) {
+            if (interlockActive(LES, !!node.lowFloatTopic) || interlockActive(PWS, !!node.phaseCtrlTopic)) {
                 fill = "red"; // critical safety interlock
             } else if (warnings.length > 0) {
                 fill = "orange"; // warnings (including missing level data)
@@ -225,6 +496,12 @@ module.exports = function (RED) {
 
         updateStatus();
 
+        if (node.enableSystemLog) {
+            node.log(
+                `Started: numPumps=${node.numPumps}, actual=${node.levelActualTopic}, start=${node.levelStartTopic}, stop=${node.levelStopTopic}`
+            );
+        }
+
         // ---- PUMP CONTROL LOGIC
         function checkPumpControl() {
             // Check if we have all required level data - CRITICAL: no pump control without all 3 values
@@ -238,7 +515,6 @@ module.exports = function (RED) {
                     if (levelStop === null) missing.push("stop");
                     const msg = `EMERGENCY STOP: Missing level data (${missing.join(", ")})`;
                     node.error(msg);
-                    systemLog("error", msg);
 
                     for (let i = 0; i < node.numPumps; i++) {
                         if (pumpCommands[i] === 1) {
@@ -262,7 +538,6 @@ module.exports = function (RED) {
             if (isNaN(actual) || isNaN(start) || isNaN(stop)) {
                 const msg = `Invalid level values: actual=${levelActual} (${typeof levelActual}), start=${levelStart} (${typeof levelStart}), stop=${levelStop} (${typeof levelStop})`;
                 node.warn(msg);
-                systemLog("warn", msg);
                 updateStatus();
                 return;
             }
@@ -275,20 +550,14 @@ module.exports = function (RED) {
                 const pumpStates = pumpCommands.map((cmd, idx) => `P${idx + 1}=${cmd ? "ON" : "OFF"}`).join(" ");
                 const msg = `Level check: actual=${actual}, start=${start}, stop=${stop}, activePumps=${activePumps} [${pumpStates}], comparison: ${actual} > ${start} = ${actual > start}`;
                 node.log(msg);
-                systemLog("info", msg);
             }
 
             // Safety checks
-            const lowFloatOK = LES === null || LES === 0;
-            const phaseOK = PWS === null || PWS === 0;
+            const lowFloatOK = !interlockActive(LES, !!node.lowFloatTopic);
+            const phaseOK = !interlockActive(PWS, !!node.phaseCtrlTopic);
 
-            // Check current per pump (if total current measured and both current and limit available)
-            let currentOK = true;
-            let currentPerPump = 0;
-            if (node.totalCurrentMeasured && maxCurrent !== null && totalCurrent !== null && activePumps > 0) {
-                currentPerPump = totalCurrent / activePumps;
-                currentOK = currentPerPump < maxCurrent;
-            }
+            const currentLimit = evaluateCurrentLimit();
+            const currentOK = currentLimit.currentOK;
 
             // Check if any pump should stop
             const shouldStopAll = !lowFloatOK || !phaseOK || !currentOK;
@@ -298,15 +567,14 @@ module.exports = function (RED) {
                 let reason = [];
                 if (!lowFloatOK) reason.push("LES");
                 if (!phaseOK) reason.push("PWS");
-                if (!currentOK && maxCurrent !== null) {
-                    reason.push(`OC(${currentPerPump.toFixed(1)}A/pump > ${maxCurrent.toFixed(1)}A)`);
+                if (!currentOK && currentLimit.ocDetail) {
+                    reason.push(`OC(${currentLimit.ocDetail})`);
                 }
 
                 for (let i = 0; i < node.numPumps; i++) {
                     if (pumpCommands[i] === 1) {
                         const msg = `EMERGENCY STOP pump ${i + 1}: ${reason.join(", ")}`;
-                        node.log(msg);
-                        systemLog("warn", msg);
+                        node.warn(msg);
                         stopPump(i);
                     }
                 }
@@ -323,7 +591,6 @@ module.exports = function (RED) {
                     if (pumpCommands[i] === 1) {
                         const msg = `Stopping pump ${i + 1}: level ${actual} < ${stop}`;
                         node.log(msg);
-                        systemLog("info", msg);
                         stopPump(i);
                     }
                 }
@@ -337,14 +604,12 @@ module.exports = function (RED) {
                 if (pumpIdx !== -1) {
                     const msg = `Starting pump ${pumpIdx + 1}: level ${actual} > ${start}`;
                     node.log(msg);
-                    systemLog("info", msg);
                     startPump(pumpIdx);
                 } else {
                     // Log why no pump can start (only if system logging enabled to avoid spam)
                     if (node.enableSystemLog) {
                         const msg = `Cannot start any pump: all have fuse OFF or already running`;
                         node.warn(msg);
-                        systemLog("warn", msg);
                     } else {
                         // Even without system logging, log at debug level to help diagnose
                         node.debug(`Cannot start pump: selectPumpToStart() returned -1`);
@@ -359,27 +624,24 @@ module.exports = function (RED) {
                     if (pumpIdx !== -1) {
                         const msg = `Starting pump ${pumpIdx + 1}: level ${actual} > ${secondPumpThreshold} (start ${start} + offset ${node.levelStartPump2})`;
                         node.log(msg);
-                        systemLog("info", msg);
                         startPump(pumpIdx);
                     } else {
                         if (node.enableSystemLog) {
                             const msg = `Cannot start 2nd pump: all have fuse OFF or already running`;
                             node.warn(msg);
-                            systemLog("warn", msg);
                         }
                     }
                 } else {
                     // Don't log - threshold not met is normal, only log when it changes
                 }
             } else if (activePumps > 0 && actual <= start) {
-                // Safety check: if pumps are running but level is at or below start, log warning
-                // Only log once per state change to avoid spam
-                const warningState = `warning_${activePumps}_${actual.toFixed(2)}_${start.toFixed(2)}`;
-                if (!node.lastWarningState || node.lastWarningState !== warningState) {
-                    node.lastWarningState = warningState;
-                    const msg = `WARNING: Pumps running but level ${actual} <= start ${start}`;
-                    node.warn(msg);
-                    systemLog("warn", msg);
+                // Normal hysteresis: pump stays on until level drops below stop threshold
+                const bandState = `band_${activePumps}_${actual.toFixed(2)}_${start.toFixed(2)}`;
+                if (!node.lastWarningState || node.lastWarningState !== bandState) {
+                    node.lastWarningState = bandState;
+                    if (node.enableSystemLog) {
+                        systemLog("info", `Pumps running in start/stop band: level ${actual} <= start ${start}, stop at ${levelStop}`);
+                    }
                 }
             } else {
                 // Clear warning state when condition no longer applies
@@ -390,20 +652,17 @@ module.exports = function (RED) {
             checkPumpSwapErrors(); // Check for swap conditions after control logic
         }
 
-        function selectPumpToStart() {
-            // Select pump based on rotation and availability
-            for (let attempt = 0; attempt < node.numPumps; attempt++) {
-                let pumpIdx;
+        function selectPumpToStart(excludePumpIdx = -1) {
+            const { order, seq } = buildPumpStartTryOrder();
 
-                if (node.enableRotation) {
-                    // Try pumps in rotation order
-                    pumpIdx = (rotationIndex + attempt) % node.numPumps;
-                } else {
-                    // Always try pumps in order 0, 1, 2...
-                    pumpIdx = attempt;
+            for (const pumpIdx of order) {
+                if (pumpIdx < 0 || pumpIdx >= node.numPumps) {
+                    continue;
+                }
+                if (excludePumpIdx >= 0 && pumpIdx === excludePumpIdx) {
+                    continue;
                 }
 
-                // Check if pump is available (no fuse OFF, not already running)
                 const hasFuseOFF = pumpErrors[pumpIdx] === 1;
                 const isNotRunning = pumpCommands[pumpIdx] === 0;
 
@@ -415,10 +674,7 @@ module.exports = function (RED) {
                 }
 
                 if (!hasFuseOFF && isNotRunning) {
-                    // Update rotation index for next start
-                    if (node.enableRotation) {
-                        rotationIndex = (pumpIdx + 1) % node.numPumps;
-                    }
+                    advanceRotationAfterStart(pumpIdx, seq);
                     return pumpIdx;
                 }
             }
@@ -440,6 +696,34 @@ module.exports = function (RED) {
             }
 
             return -1;
+        }
+
+        function scheduleReplacementPump(stoppedPumpIdx, reason) {
+            if (!node.pumpSwapEnabled) {
+                return;
+            }
+
+            if (pumpReplacementTimer) {
+                clearTimeout(pumpReplacementTimer);
+                pumpReplacementTimer = null;
+            }
+
+            const delayMs = node.startDelaySec * 1000;
+            if (node.enableSystemLog) {
+                node.log(`Replacement pump scheduled in ${node.startDelaySec}s (${reason})`);
+            }
+
+            pumpReplacementTimer = setTimeout(() => {
+                pumpReplacementTimer = null;
+                const newPumpIdx = selectPumpToStart(stoppedPumpIdx);
+                if (newPumpIdx !== -1) {
+                    const msg = `Starting replacement pump ${newPumpIdx + 1} (${reason})`;
+                    node.log(msg);
+                    startPump(newPumpIdx);
+                } else {
+                    node.warn(`Cannot start replacement pump (${reason}): no available pumps`);
+                }
+            }, delayMs);
         }
 
         function startPump(pumpIdx) {
@@ -475,38 +759,28 @@ module.exports = function (RED) {
                 pumpNoRunStartTime[pumpIdx] = 0; // Reset NORUN tracking on new start attempt
             }
 
-            // Start max time timer for automatic swap after maxPumpTimeSec
-            pumpMaxTimeTimers[pumpIdx] = setTimeout(() => {
-                pumpMaxTimeTimers[pumpIdx] = null;
+            // Max runtime swap: only with 2+ pumps and configured maxPumpTimeSec
+            if (node.maxTimeSwapEnabled) {
+                pumpMaxTimeTimers[pumpIdx] = setTimeout(() => {
+                    pumpMaxTimeTimers[pumpIdx] = null;
 
-                // Check if pump is still running
-                if (pumpCommands[pumpIdx] === 1) {
-                    const msg = `Pump ${pumpIdx + 1} max runtime (${node.maxPumpTimeSec}s) reached - swapping pump`;
-                    node.log(msg);
-                    systemLog("info", msg);
-
-                    // Stop the pump that has run for max time
-                    stopPump(pumpIdx);
-
-                    // Had active cmd → move to another pump if available (no level check)
-                    const newPumpIdx = selectPumpToStart();
-                    if (newPumpIdx !== -1) {
-                        const msg2 = `Starting replacement pump ${newPumpIdx + 1} after max time swap (moving active cmd)`;
-                        node.log(msg2);
-                        systemLog("info", msg2);
-                        startPump(newPumpIdx);
-                    } else {
-                        const msg2 = `Cannot start replacement pump after max time swap: no available pumps`;
-                        node.warn(msg2);
-                        systemLog("warn", msg2);
+                    if (pumpCommands[pumpIdx] === 1) {
+                        const msg = `Pump ${pumpIdx + 1} max runtime (${node.maxPumpTimeSec}s) reached - swapping pump`;
+                        node.log(msg);
+                        stopPump(pumpIdx);
+                        scheduleReplacementPump(pumpIdx, "max time swap");
                     }
-                }
-            }, node.maxPumpTimeSec * 1000);
+                }, node.maxPumpTimeSec * 1000);
+            }
 
             sendPumpCommand(pumpIdx, 1);
         }
 
         function checkPumpSwapErrors() {
+            if (!node.pumpSwapEnabled) {
+                return;
+            }
+
             // Check each pump for NORUN or overcurrent errors
             // Only process swap logic for pumps that are actually running
             const now = Date.now();
@@ -541,7 +815,6 @@ module.exports = function (RED) {
                         const errorType = pumpNoRun[i] === 1 ? "NORUN" : "overcurrent";
                         const delayStr = swapDelay > 0 ? ` after ${swapDelay / 1000}s` : " immediately";
                         node.warn(`Pump ${i + 1} error detected (${errorType}), will swap${delayStr}`);
-                        systemLog("warn", `Pump ${i + 1} error detected (${errorType}), will swap${delayStr}`);
                         pumpSwapTimers[i] = setTimeout(() => {
                             pumpSwapTimers[i] = null;
 
@@ -549,21 +822,8 @@ module.exports = function (RED) {
                             if (pumpCommands[i] === 1 && (pumpNoRun[i] === 1 || pumpOvercurrent[i] === 1)) {
                                 node.error(`Pump ${i + 1} swap: error persists, swapping pump`);
 
-                                // Stop the faulty pump
                                 stopPump(i);
-
-                                // Had active cmd → move to another pump if available (no level check)
-                                const newPumpIdx = selectPumpToStart();
-                                if (newPumpIdx !== -1) {
-                                    const msg = `Starting replacement pump ${newPumpIdx + 1} after NORUN/overcurrent swap (moving active cmd)`;
-                                    node.log(msg);
-                                    systemLog("info", msg);
-                                    startPump(newPumpIdx);
-                                } else {
-                                    const msg = `Cannot start replacement pump: all have fuse OFF or already running`;
-                                    node.warn(msg);
-                                    systemLog("warn", msg);
-                                }
+                                scheduleReplacementPump(i, "NORUN/overcurrent swap");
                             }
                         }, swapDelay);
                     } else if (!hasError && pumpSwapTimers[i]) {
@@ -621,11 +881,14 @@ module.exports = function (RED) {
                 node.debug(`Sending command: topic=${node.pumpCmdTopics[pumpIdx]}, value=${value}`);
             }
 
-            node.send(msg);
+            const outputs = Array(node.numPumps).fill(null);
+            outputs[pumpIdx] = msg;
+            node.send(outputs);
             const cmdStr = value === 1 ? "START" : "STOP";
-            const logMsg = `Pump ${pumpIdx + 1} command → ${cmdStr} (topic: ${node.pumpCmdTopics[pumpIdx]}, payload: ${value})`;
-            node.log(logMsg);
-            systemLog("info", logMsg);
+            const logMsg = `Pump ${pumpIdx + 1} command -> ${cmdStr} (topic: ${node.pumpCmdTopics[pumpIdx]}, payload: ${value})`;
+            if (node.enableSystemLog) {
+                node.log(logMsg);
+            }
         }
 
         // ---- INPUT HANDLER
@@ -658,7 +921,6 @@ module.exports = function (RED) {
                         levelStart = parsed;
                         const msg = `Start threshold updated: ${levelStart.toFixed(3)}${levelUnit}`;
                         node.log(msg);
-                        systemLog("info", msg);
                     } else {
                         levelStart = parsed; // Update even if same (for consistency)
                     }
@@ -679,7 +941,6 @@ module.exports = function (RED) {
                         levelStop = parsed;
                         const msg = `Stop threshold updated: ${levelStop.toFixed(3)}${levelUnit}`;
                         node.log(msg);
-                        systemLog("info", msg);
                     } else {
                         levelStop = parsed; // Update even if same (for consistency)
                     }
@@ -691,18 +952,24 @@ module.exports = function (RED) {
             // Low float switch (DI)
             if (t === node.lowFloatTopic) {
                 const val = Array.isArray(p) ? p[0] : p;
-                const newLES = Number(val);
+                const newLES = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                if (newLES === null) {
+                    if (LES !== null) {
+                        node.error("LOW FLOAT unknown - emergency stop all pumps");
+                    }
+                    LES = null;
+                    checkPumpControl();
+                    return;
+                }
 
                 if (newLES !== LES) {
                     LES = newLES;
-                    if (LES === 1) {
+                    if (interlockActive(LES, true)) {
                         const msg = `LOW FLOAT TRIGGERED - emergency stop all pumps`;
                         node.error(msg);
-                        systemLog("error", msg);
                     } else {
                         const msg = `Low float cleared`;
                         node.log(msg);
-                        systemLog("info", msg);
                     }
                 }
                 checkPumpControl();
@@ -712,7 +979,13 @@ module.exports = function (RED) {
             // High float switch (DI)
             if (t === node.highFloatTopic) {
                 const val = Array.isArray(p) ? p[0] : p;
-                LHS = Number(val);
+                const newLHS = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                if (newLHS === null) {
+                    LHS = null;
+                    checkPumpControl();
+                    return;
+                }
+                LHS = newLHS;
                 checkPumpControl();
                 return;
             }
@@ -720,51 +993,90 @@ module.exports = function (RED) {
             // Phase control (DI)
             if (t === node.phaseCtrlTopic) {
                 const val = Array.isArray(p) ? p[0] : p;
-                const newPWS = Number(val);
+                const newPWS = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                if (newPWS === null) {
+                    if (PWS !== null) {
+                        node.error("PHASE CONTROL unknown - stop all pumps");
+                    }
+                    PWS = null;
+                    checkPumpControl();
+                    return;
+                }
 
                 if (newPWS !== PWS) {
                     PWS = newPWS;
-                    if (PWS === 1) {
+                    if (interlockActive(PWS, true)) {
                         const msg = `PHASE CONTROL FAULT - stop all pumps`;
                         node.error(msg);
-                        systemLog("error", msg);
                     } else {
                         const msg = `Phase control OK`;
                         node.log(msg);
-                        systemLog("info", msg);
                     }
                 }
                 checkPumpControl();
                 return;
             }
 
-            // Total current (AI)
-            if (t === node.totalCurrentTopic) {
+            // Total current (AI) - single sensor for all pumps
+            if (node.totalCurrentMeasured && node.totalCurrentTopic && t === node.totalCurrentTopic) {
                 const val = Array.isArray(p) ? p[0] : p;
-                totalCurrent = Number(val);
+                const n = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                if (n === null) {
+                    totalCurrent = null;
+                    checkPumpControl();
+                    return;
+                }
+                totalCurrent = n;
 
-                // Check for overcurrent (per pump)
-                const activePumps = pumpCommands.filter((cmd) => cmd === 1).length;
-                if (maxCurrent !== null && activePumps > 0) {
-                    const currentPerPump = totalCurrent / activePumps;
-                    if (currentPerPump > maxCurrent) {
-                        node.warn(
-                            `Current per pump ${currentPerPump.toFixed(1)}A exceeds limit ${maxCurrent.toFixed(1)}A (total: ${totalCurrent.toFixed(1)}A / ${activePumps} pumps)`
-                        );
-                    }
+                const currentLimit = evaluateCurrentLimit();
+                if (!currentLimit.currentOK && currentLimit.ocDetail) {
+                    node.warn(`Current limit exceeded: ${currentLimit.ocDetail}`);
                 }
 
                 checkPumpControl();
                 return;
             }
 
-            // Max current limit (from iolayer) - PER PUMP - only process if total current measured
-            if (node.totalCurrentMeasured && t === node.maxCurrentTopic) {
+            // Per-pump current sensors
+            if (!node.totalCurrentMeasured) {
+                for (let i = 0; i < node.pumpCurrentTopics.length && i < node.numPumps; i++) {
+                    const curTopic = node.pumpCurrentTopics[i];
+                    if (!curTopic || t !== curTopic) {
+                        continue;
+                    }
+                    const val = Array.isArray(p) ? p[0] : p;
+                    const n = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                    if (n === null) {
+                        pumpCurrents[i] = null;
+                        checkPumpControl();
+                        updateStatus();
+                        return;
+                    }
+                    pumpCurrents[i] = n;
+
+                    const currentLimit = evaluateCurrentLimit();
+                    if (!currentLimit.currentOK && currentLimit.ocDetail) {
+                        node.warn(`Current limit exceeded: ${currentLimit.ocDetail}`);
+                    }
+
+                    checkPumpControl();
+                    updateStatus();
+                    return;
+                }
+            }
+
+            // Max current limit per pump (from iolayer)
+            if (node.maxCurrentTopic && t === node.maxCurrentTopic) {
                 const val = Array.isArray(p) ? p[0] : p;
-                maxCurrent = Number(val);
-                const msg = `Max current limit per pump updated: ${maxCurrent.toFixed(1)}A`;
+                const n = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                if (n === null) {
+                    maxCurrentFromTopic = null;
+                    checkPumpControl();
+                    return;
+                }
+                maxCurrentFromTopic = n;
+                const msg = `Max current limit per pump updated: ${maxCurrentFromTopic.toFixed(1)}A`;
                 node.log(msg);
-                systemLog("info", msg);
                 checkPumpControl();
                 return;
             }
@@ -774,7 +1086,19 @@ module.exports = function (RED) {
             for (let i = 0; i < node.pumpErrorTopics.length && i < node.numPumps; i++) {
                 if (t === node.pumpErrorTopics[i]) {
                     const val = Array.isArray(p) ? p[0] : p;
-                    const newFuseOFF = Number(val);
+                    const newFuseOFF = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                    if (newFuseOFF === null) {
+                        if (pumpErrors[i] !== 1) {
+                            pumpErrors[i] = 1;
+                            node.warn(`Pump ${i + 1} fuse unknown - treat as OFF`);
+                            if (pumpCommands[i] === 1) {
+                                stopPump(i);
+                                scheduleReplacementPump(i, `pump ${i + 1} fuse unknown`);
+                            }
+                        }
+                        updateStatus();
+                        return;
+                    }
 
                     if (newFuseOFF !== pumpErrors[i]) {
                         pumpErrors[i] = newFuseOFF;
@@ -786,18 +1110,7 @@ module.exports = function (RED) {
                             if (pumpCommands[i] === 1) {
                                 node.log(`Stopping pump ${i + 1} due to fuse OFF`);
                                 stopPump(i);
-                                // Had active cmd → move to another pump if available (no level check)
-                                const replacementPumpIdx = selectPumpToStart();
-                                if (replacementPumpIdx !== -1 && replacementPumpIdx !== i) {
-                                    const msg = `Starting replacement pump ${replacementPumpIdx + 1} after pump ${i + 1} fuse OFF (moving active cmd)`;
-                                    node.log(msg);
-                                    systemLog("info", msg);
-                                    startPump(replacementPumpIdx);
-                                } else if (replacementPumpIdx === -1) {
-                                    const msg = `Cannot start replacement pump after pump ${i + 1} fuse OFF: no available pumps`;
-                                    node.warn(msg);
-                                    systemLog("warn", msg);
-                                }
+                                scheduleReplacementPump(i, `pump ${i + 1} fuse OFF`);
                             }
                         } else {
                             node.log(`Pump ${i + 1} fuse OFF cleared`);
@@ -813,7 +1126,19 @@ module.exports = function (RED) {
             for (let i = 0; i < node.pumpNoRunTopics.length && i < node.numPumps; i++) {
                 if (t === node.pumpNoRunTopics[i]) {
                     const val = Array.isArray(p) ? p[0] : p;
-                    const newNoRun = Number(val);
+                    const newNoRun = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                    if (newNoRun === null) {
+                        if (pumpNoRun[i] !== 1) {
+                            pumpNoRun[i] = 1;
+                            if (pumpNoRunStartTime[i] === 0) {
+                                pumpNoRunStartTime[i] = Date.now();
+                            }
+                            node.warn(`Pump ${i + 1} NORUN unknown`);
+                            checkPumpSwapErrors();
+                            updateStatus();
+                        }
+                        return;
+                    }
 
                     if (newNoRun !== pumpNoRun[i]) {
                         pumpNoRun[i] = newNoRun;
@@ -839,7 +1164,16 @@ module.exports = function (RED) {
             for (let i = 0; i < node.pumpOvercurrentTopics.length && i < node.numPumps; i++) {
                 if (t === node.pumpOvercurrentTopics[i]) {
                     const val = Array.isArray(p) ? p[0] : p;
-                    const newOvercurrent = Number(val);
+                    const newOvercurrent = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                    if (newOvercurrent === null) {
+                        if (pumpOvercurrent[i] !== 1) {
+                            pumpOvercurrent[i] = 1;
+                            node.error(`Pump ${i + 1} overcurrent unknown`);
+                            checkPumpSwapErrors();
+                            updateStatus();
+                        }
+                        return;
+                    }
 
                     if (newOvercurrent !== pumpOvercurrent[i]) {
                         pumpOvercurrent[i] = newOvercurrent;
@@ -854,9 +1188,35 @@ module.exports = function (RED) {
                     return;
                 }
             }
+
+            // Pump runtime hours (from pump node runtimeTopic output)
+            for (let i = 0; i < node.numPumps; i++) {
+                const rtTopic = node.pumpRuntimeTopics[i];
+                if (!rtTopic || t !== rtTopic) {
+                    continue;
+                }
+                const val = Array.isArray(p) ? p[0] : p;
+                const hours = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                if (hours === null || hours < 0) {
+                    node.warn(`Invalid runtime hours for pump ${i + 1}: ${val}`);
+                    return;
+                }
+                if (pumpRuntimeHours[i] === null || Math.abs(pumpRuntimeHours[i] - hours) > 0.01) {
+                    pumpRuntimeHours[i] = hours;
+                    if (node.enableSystemLog) {
+                        node.debug(`Pump ${i + 1} runtime updated: ${hours.toFixed(2)}h`);
+                    }
+                }
+                return;
+            }
         });
 
         node.on("close", () => {
+            if (pumpReplacementTimer) {
+                clearTimeout(pumpReplacementTimer);
+                pumpReplacementTimer = null;
+            }
+
             // Clear all swap timers
             for (let i = 0; i < node.numPumps; i++) {
                 if (pumpSwapTimers[i]) {

@@ -165,7 +165,10 @@ module.exports = function (RED) {
             for (let i = 0; i < numInputs; i++) {
                 if (node.inputTopics[i] && t === node.inputTopics[i]) {
                     const val = Array.isArray(p) ? p[0] : p;
-                    const newState = Number(val) !== 0 ? 1 : 0; // Convert to 0/1
+                    const newState = (val == null || !Number.isFinite(Number(val)) ? null : (Number(val) !== 0 ? 1 : 0));
+                    if (newState === null) {
+                        continue;
+                    }
                     const comment = node.inputComments[i] || `Input ${i + 1}`;
 
                     if (newState !== inputStates[i]) {

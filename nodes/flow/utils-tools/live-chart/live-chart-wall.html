@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Live chart wall</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            font-family: Arial, sans-serif;
+            --bg: #e9edf2;
+            --panel: #ffffff;
+            --text: #17202a;
+            --muted: #667085;
+            --border: #bfc8d4;
+            --accent: #1769aa;
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 10px; background: var(--bg); color: var(--text); }
+        header { position: sticky; top: 0; z-index: 10; margin-bottom: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
+        h1 { margin: 0 0 8px; font-size: 20px; }
+        #controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+        #charts { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+        label { display: inline-flex; align-items: center; gap: 5px; }
+        button, select { min-height: 30px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); color: var(--text); }
+        button { cursor: pointer; }
+        button:hover { border-color: var(--accent); }
+        #status { color: var(--muted); font-size: 13px; }
+        #rows { display: flex; flex-direction: column; gap: 10px; }
+        .chart-row { min-height: 520px; height: 640px; overflow: hidden; resize: vertical; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
+        iframe { display: block; width: 100%; height: 100%; border: 0; }
+        #empty { padding: 30px; border: 1px dashed var(--border); border-radius: 6px; background: var(--panel); color: var(--muted); text-align: center; }
+        @media (prefers-color-scheme: dark) {
+            :root { --bg: #11151a; --panel: #1b222b; --text: #e8edf2; --muted: #a9b4c0; --border: #3b4652; --accent: #5aa9e6; }
+        }
+        @media (max-width: 850px) {
+            body { padding: 4px; overflow-x: hidden; }
+            header { position: static; margin-bottom: 6px; padding: 8px; }
+            h1 { margin-bottom: 6px; font-size: 18px; }
+            #controls, #charts { gap: 5px 10px; }
+            #charts { width: 100%; }
+            button, select { min-height: 28px; padding: 2px 6px; }
+            #rows { gap: 6px; }
+            .chart-row { height: 900px; min-height: 900px; resize: none; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Live chart wall</h1>
+        <div id="controls">
+            <div id="charts"></div>
+            <label>Refresh <select id="refresh-period"></select></label>
+            <label>Timespan <select id="timespan"></select></label>
+            <button id="refresh" type="button">Refresh chart list</button>
+            <span id="status">Loading...</span>
+        </div>
+    </header>
+    <main id="rows"></main>
+    <script>
+        "use strict";
+
+        const wallPath = window.location.pathname.replace(/\/$/, "");
+        const chartRoot = wallPath.replace(/\/wall$/, "");
+        const storageKey = `${wallPath}:selected`;
+        const configStorageKey = `${wallPath}:config`;
+        const ui = {
+            charts: document.getElementById("charts"),
+            refreshPeriod: document.getElementById("refresh-period"),
+            timespan: document.getElementById("timespan"),
+            refresh: document.getElementById("refresh"),
+            status: document.getElementById("status"),
+            rows: document.getElementById("rows")
+        };
+        let catalog = [];
+        let selected = loadSelected();
+        const rowsById = new Map();
+        let serverClockOffset = 0;
+        let limits = {
+            refreshSeconds: [1, 2, 5, 10, 30],
+            timespanMinutes: [1, 2, 5, 10, 15, 30, 60]
+        };
+        let savedWallConfigJson = null;
+        let wallConfig = loadWallConfig();
+
+        function loadSelected() {
+            try {
+                const stored = JSON.parse(window.localStorage.getItem(storageKey) || "[]");
+                return new Set(Array.isArray(stored) ? stored.map(String) : []);
+            } catch (error) {
+                return new Set();
+            }
+        }
+
+        function saveSelected() {
+            try {
+                window.localStorage.setItem(storageKey, JSON.stringify(Array.from(selected)));
+            } catch (error) {
+                ui.status.textContent = `Could not save wall selection: ${error.message}`;
+            }
+        }
+
+        function loadWallConfig() {
+            try {
+                const raw = window.localStorage.getItem(configStorageKey);
+                const stored = JSON.parse(raw || "{}");
+                const loaded = {
+                    refreshSeconds: Number(stored.refreshSeconds) || 5,
+                    timespanMinutes: Number(stored.timespanMinutes) || 10,
+                    streamWidth: Number(stored.streamWidth) || 370
+                };
+                if (raw) savedWallConfigJson = JSON.stringify(loaded);
+                return loaded;
+            } catch (error) {
+                return { refreshSeconds: 5, timespanMinutes: 10, streamWidth: 370 };
+            }
+        }
+
+        function saveWallConfig() {
+            const serialized = JSON.stringify(wallConfig);
+            if (serialized === savedWallConfigJson) return;
+            try {
+                window.localStorage.setItem(configStorageKey, serialized);
+                savedWallConfigJson = serialized;
+            } catch (error) {
+                ui.status.textContent = `Could not save wall settings: ${error.message}`;
+            }
+        }
+
+        function fillSelect(select, values, suffix) {
+            select.innerHTML = "";
+            values.forEach((value) => {
+                const option = document.createElement("option");
+                option.value = String(value);
+                option.textContent = `${value} ${suffix}`;
+                select.appendChild(option);
+            });
+        }
+
+        function normalizeWallConfig() {
+            if (!limits.refreshSeconds.includes(wallConfig.refreshSeconds)) wallConfig.refreshSeconds = 5;
+            if (!limits.timespanMinutes.includes(wallConfig.timespanMinutes)) wallConfig.timespanMinutes = 10;
+            const maximumWidth = Math.max(260, Math.floor(window.innerWidth * 0.7));
+            wallConfig.streamWidth = Math.max(260, Math.min(maximumWidth, Math.round(wallConfig.streamWidth)));
+            fillSelect(ui.refreshPeriod, limits.refreshSeconds, "s");
+            fillSelect(ui.timespan, limits.timespanMinutes, "min");
+            ui.refreshPeriod.value = String(wallConfig.refreshSeconds);
+            ui.timespan.value = String(wallConfig.timespanMinutes);
+            saveWallConfig();
+        }
+
+        function applyRequestedSelection() {
+            const requested = new URLSearchParams(window.location.search).getAll("select");
+            requested.forEach((id) => selected.add(id));
+            if (requested.length > 0) saveSelected();
+        }
+
+        function renderPicker() {
+            ui.charts.innerHTML = "";
+            catalog.forEach((item) => {
+                const label = document.createElement("label");
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.checked = selected.has(item.id);
+                checkbox.addEventListener("change", () => {
+                    if (checkbox.checked) selected.add(item.id);
+                    else selected.delete(item.id);
+                    saveSelected();
+                    renderRows();
+                });
+                label.append(checkbox, document.createTextNode(item.name));
+                ui.charts.appendChild(label);
+            });
+        }
+
+        function renderRows() {
+            const active = catalog.filter((item) => selected.has(item.id));
+            const activeIds = new Set(active.map((item) => item.id));
+            for (const [id, row] of rowsById.entries()) {
+                if (activeIds.has(id)) continue;
+                row.remove();
+                rowsById.delete(id);
+            }
+            const oldEmpty = document.getElementById("empty");
+            if (oldEmpty) oldEmpty.remove();
+
+            if (active.length === 0) {
+                const empty = document.createElement("div");
+                empty.id = "empty";
+                empty.textContent = catalog.length ? "Select one or more charts above." : "No deployed live-chart nodes found.";
+                ui.rows.appendChild(empty);
+                return;
+            }
+
+            active.forEach((item) => {
+                let row = rowsById.get(item.id);
+                if (!row) {
+                    row = document.createElement("section");
+                    row.className = "chart-row";
+                    const frame = document.createElement("iframe");
+                    frame.src = `${chartRoot}/${encodeURIComponent(item.id)}?wall=1`;
+                    frame.title = item.name;
+                    frame.addEventListener("load", broadcastWallState);
+                    row.appendChild(frame);
+                    rowsById.set(item.id, row);
+                }
+                ui.rows.appendChild(row);
+            });
+        }
+
+        function broadcastWallState() {
+            const message = {
+                type: "uniflex-live-chart-wall-state",
+                now: Date.now() + serverClockOffset,
+                refreshSeconds: wallConfig.refreshSeconds,
+                timespanMinutes: wallConfig.timespanMinutes,
+                streamWidth: wallConfig.streamWidth
+            };
+            rowsById.forEach((row) => {
+                const frame = row.querySelector("iframe");
+                if (frame?.contentWindow) frame.contentWindow.postMessage(message, window.location.origin);
+            });
+        }
+
+        async function refreshCatalog() {
+            ui.refresh.disabled = true;
+            try {
+                const response = await fetch(`${chartRoot}/wall/catalog`);
+                const body = await response.json();
+                if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
+                if (Number.isFinite(Number(body.serverTime))) serverClockOffset = Number(body.serverTime) - Date.now();
+                if (body.limits) limits = body.limits;
+                normalizeWallConfig();
+                catalog = Array.isArray(body.charts) ? body.charts : [];
+                renderPicker();
+                renderRows();
+                broadcastWallState();
+                ui.status.textContent = `${catalog.length} deployed chart${catalog.length === 1 ? "" : "s"}`;
+            } catch (error) {
+                ui.status.textContent = `Could not load charts: ${error.message}`;
+            } finally {
+                ui.refresh.disabled = false;
+            }
+        }
+
+        applyRequestedSelection();
+        ui.refresh.addEventListener("click", refreshCatalog);
+        ui.refreshPeriod.addEventListener("change", () => {
+            wallConfig.refreshSeconds = Number(ui.refreshPeriod.value);
+            saveWallConfig();
+            broadcastWallState();
+        });
+        ui.timespan.addEventListener("change", () => {
+            wallConfig.timespanMinutes = Number(ui.timespan.value);
+            saveWallConfig();
+            broadcastWallState();
+        });
+        window.addEventListener("message", (event) => {
+            if (event.origin !== window.location.origin || event.data?.type !== "uniflex-live-chart-stream-width") return;
+            const width = Number(event.data.width);
+            if (!Number.isFinite(width)) return;
+            const maximumWidth = Math.max(260, Math.floor(window.innerWidth * 0.7));
+            wallConfig.streamWidth = Math.max(260, Math.min(maximumWidth, Math.round(width)));
+            saveWallConfig();
+            broadcastWallState();
+        });
+        window.setInterval(broadcastWallState, 1000);
+        refreshCatalog();
+    </script>
+</body>
+</html>

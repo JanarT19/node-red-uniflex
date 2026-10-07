@@ -25,8 +25,7 @@ module.exports = function (RED) {
         };
 
         function n(v) {
-            const x = Number(v);
-            return Number.isFinite(x) ? x : null;
+            return (v == null ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
         }
 
         function emit() {
@@ -48,14 +47,35 @@ module.exports = function (RED) {
 
         node.on("input", (msg) => {
             const t = String(msg.topic || "").trim();
-            if (t === node.roomSpTopic) s.roomSp = n(msg.payload);
-            else if (t === node.roomActTopic) s.roomAct = n(msg.payload);
-            else if (t === node.flowTopic) s.flow = n(msg.payload);
-            else if (t === node.dpTopic) s.dp = n(msg.payload);
-            else if (t === node.openFracTopic) s.openFrac = n(msg.payload);
-            else if (t === node.tankTempTopic) s.tankTemp = n(msg.payload);
-            else if (t === node.returnTempTopic) s.retTemp = n(msg.payload);
-            else return;
+            if (t === node.roomSpTopic) {
+                const v = n(msg.payload);
+                if (v === null) return;
+                s.roomSp = v;
+            } else if (t === node.roomActTopic) {
+                const v = n(msg.payload);
+                if (v === null) return;
+                s.roomAct = v;
+            } else if (t === node.flowTopic) {
+                const v = n(msg.payload);
+                if (v === null) return;
+                s.flow = v;
+            } else if (t === node.dpTopic) {
+                const v = n(msg.payload);
+                if (v === null) return;
+                s.dp = v;
+            } else if (t === node.openFracTopic) {
+                const v = n(msg.payload);
+                if (v === null) return;
+                s.openFrac = v;
+            } else if (t === node.tankTempTopic) {
+                const v = n(msg.payload);
+                if (v === null) return;
+                s.tankTemp = v;
+            } else if (t === node.returnTempTopic) {
+                const v = n(msg.payload);
+                if (v === null) return;
+                s.retTemp = v;
+            } else return;
             emit();
         });
     }

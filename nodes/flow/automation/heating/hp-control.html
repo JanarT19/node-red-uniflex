@@ -23,6 +23,8 @@
             spMaxTopic: { value: "" },  // Deprecated, kept for backward compatibility
             logLevel: { value: "basic" },
             lookAheadSec: { value: 120, validate: RED.validators.number() },
+            testPwmDuringForce: { value: false },
+            testPwmDutyPct: { value: 50, validate: RED.validators.number() },
             derivWindowSec: { value: 60, validate: RED.validators.number() },
             minSpread: { value: 3, validate: RED.validators.number() },
             persistencePath: { value: "/home/nodered/heating_state" },
@@ -259,6 +261,16 @@
         <input type="number" id="node-input-lookAheadSec" placeholder="120" min="0" step="10" style="width:80px;" />
     </div>
     <hr />
+    <b>Forced-heat PWM test</b>
+    <div class="form-row">
+        <label title="While HCMW.1 forced heating is on, ESSWW.3 follows a fixed 60 s pattern instead of the tank rule. Off during normal heating.">Test PWM</label>
+        <input type="checkbox" id="node-input-testPwmDuringForce" style="width:auto;">
+    </div>
+    <div class="form-row">
+        <label title="Percent of each clock minute spent on the lower setpoint (low relay on). 100 = always low. 0 = always the upper setpoint. 50 = 30 s low, then 30 s upper. Change this and deploy to try the next value.">Low duty %</label>
+        <input type="number" id="node-input-testPwmDutyPct" placeholder="50" min="0" max="100" step="5" style="width:80px;">
+    </div>
+    <hr />
     <b>Logging</b>
     <div class="form-row">
         <label title="Off: no logging. Basic: state changes, duty checks, SP writes. Verbose: full per-compute diagnostics.">Log level</label>
@@ -283,7 +295,8 @@
     <p class="form-tips"><b>Supply target</b> from mpc-house adjusts <b>heating</b> SP only (ESTTW.2/.3). <b>Cooling</b> SP (ESTTW.4/.5) uses fixed values from UI config.</p>
     <p class="form-tips"><b>Setpoint spread</b> is a fixed gap used by both heating and cooling pairs. Heating: SP2 is clamped to [lo,hi], SP1 = SP2 + spread (unclamped). Cooling: SP1 is clamped to [lo,hi], SP2 = SP1 - spread (unclamped).</p>
     <p class="form-tips">Heating setpoints are <b>self-tuning</b> based on low-mode duty cycle during active heating. When 6h of actual heating time accumulates, the node checks the duty (time in low mode / time heating): if <12.5% or >87.5%, adjusts ±2°C; if <25% or >75%, adjusts ±1°C. Target: keep duty in 25-75% range for optimal efficiency. Idle periods (no heat demand or high price) are excluded from the duty calculation.</p>
-    <p class="form-tips">Low mode provides PWM-like power modulation via error-threshold hysteresis (on below 0.4°C, off above 1.0°C). The duty cycle (% time in low mode during heating) is monitored to self-tune setpoints.</p>
+    <p class="form-tips">Heating low mode is only for an over-hot tank: on when the tank reaches the upper heating setpoint, off 1 C below it. Selecting the lower setpoint earlier stops the compressor, because the heat pump stops about 5 C above the setpoint that is active. The duty cycle (% time in low mode during heating) is monitored to self-tune setpoints.</p>
+    <p class="form-tips"><b>Test PWM</b> applies only while forced heating (HCMW.1) is on. The low relay then uses a 60 s clock period. Low duty % is the part of that minute on the lower setpoint. Deploy again after each duty change.</p>
     <p class="form-tips"><b>Persistence</b> saves learned setpoints and transition history to disk, so the system continues seamlessly after restart with no waiting period.</p>
 </script>
 
@@ -302,6 +315,6 @@
         <li><b>Cool SP1/SP2 out</b> -- Cooling setpoints (degC). Destination: ESTTW.4/.5. Fixed values (17/14°C default) from UI config.</li>
         <li><b>Cool mode global out</b> -- Cooling mode flag (0/1). Destination: COOLS.1. Tells floor valves to invert logic.</li>
         <li><b>Air cool enable out</b> -- Air handler valve (0/1). Destination: HK5S.1. Opens during cooling when price allows.</li>
-        <li><b>HP low mode out</b> -- 0/1. Activates when error or predicted error drops below 0.4°C, deactivates above 1.0°C.</li>
+        <li><b>HP low mode out</b> -- 0/1. Heating: on when the tank reaches the upper setpoint, off 1 C below it. Cooling still uses the 0.5 C predicted-error band. Forced-heat test PWM replaces that while the test box is ticked.</li>
     </ul>
 </script>

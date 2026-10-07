@@ -1,0 +1,184 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-monovibrator", {
+        category: "uniflex utils",
+        color: "#D4A5A5",
+        icon: "font-awesome/fa-clock-o",
+        defaults: {
+            name: { value: "" },
+            inputTopic: { value: "", required: true },
+            outputTopic: { value: "" },
+            pulseDurationSec: { value: 10, validate: RED.validators.number() },
+            offTimeSec: { value: 5, validate: RED.validators.number() },
+            activeValue: { value: 1 },
+            outputActiveValue: { value: 1 },
+            outputInactiveValue: { value: 0 }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "monovibrator";
+        },
+        paletteLabel: "monovibrator",
+
+        oneditprepare: function () {
+            const node = this;
+            let _controllers = {};
+
+            function updateTipText() {
+                const input = $("#node-input-inputTopic").val() || "<not set>";
+                const output = $("#node-input-outputTopic").val() || "<same as input>";
+                const pulse = $("#node-input-pulseDurationSec").val() || "10";
+                const off = $("#node-input-offTimeSec").val() || "5";
+                const activeVal = $("#node-input-activeValue").val() || "1";
+                
+                let tipText = `On active input (${activeVal}) to "${input}", output pulse for ${pulse}s to "${output}". `;
+                tipText += `After pulse ends, wait ${off}s before allowing next trigger.`;
+                $("#node-input-tip-text").html(tipText);
+            }
+
+            $("#node-input-inputTopic, #node-input-outputTopic, #node-input-pulseDurationSec, #node-input-offTimeSec, #node-input-activeValue").on(
+                "input change",
+                updateTipText
+            );
+
+            function queryControllerConfig() {
+                return $.getJSON("uniflex/controller-config").then(function (data) {
+                    _controllers = data || {};
+                    return _controllers;
+                });
+            }
+
+            function initializeAutocomplete($input) {
+                const allTopics = [];
+                for (const ctrl of Object.values(_controllers)) {
+                    if (ctrl.datastreams) {
+                        for (const ds of Object.values(ctrl.datastreams)) {
+                            if (ds.topic) allTopics.push(ds.topic);
+                        }
+                    }
+                }
+                $input.autocomplete({
+                    source: allTopics,
+                    minLength: 0
+                }).focus(function () {
+                    $(this).autocomplete("search", "");
+                });
+            }
+
+            queryControllerConfig().done(function () {
+                initializeAutocomplete($("#node-input-inputTopic"));
+                initializeAutocomplete($("#node-input-outputTopic"));
+            }).fail(function () {
+                console.error("Failed to get topics for autocomplete");
+            });
+
+            updateTipText();
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-monovibrator">
+    <style>
+        .form-row .help-text {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 2px;
+            margin-left: 105px;
+        }
+        .form-tips {
+            margin-top: 10px;
+            font-size: 0.9em;
+            background: #fffbe6;
+            border: 1px solid #ffe58f;
+            padding: 8px;
+            border-radius: 4px;
+        }
+        .form-divider {
+            border-top: 1px solid #ccc;
+            margin: 15px 0 10px 0;
+            padding-top: 5px;
+        }
+    </style>
+
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name" />
+    </div>
+
+    <div class="form-divider"></div>
+    <b>Topics (datastreams from read/write nodes – autocomplete)</b>
+
+    <div class="form-row">
+        <label for="node-input-inputTopic"><i class="fa fa-sign-in"></i> Input topic</label>
+        <input type="text" id="node-input-inputTopic" placeholder="trigger input" />
+        <div class="help-text">Topic that triggers the pulse. Required.</div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+        <input type="text" id="node-input-outputTopic" placeholder="optional" />
+        <div class="help-text">Topic for pulse output. If empty, no topic is set on output message.</div>
+    </div>
+
+    <div class="form-divider"></div>
+    <b>Timing</b>
+
+    <div class="form-row">
+        <label for="node-input-pulseDurationSec"><i class="fa fa-hourglass-half"></i> Pulse duration (s)</label>
+        <input type="number" id="node-input-pulseDurationSec" placeholder="10" step="1" min="1" max="3600" />
+        <div class="help-text">How long the output pulse stays active.</div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-offTimeSec"><i class="fa fa-ban"></i> Off-time (s)</label>
+        <input type="number" id="node-input-offTimeSec" placeholder="5" step="1" min="0" max="3600" />
+        <div class="help-text">After pulse ends, wait this long before allowing next trigger. Set 0 to allow immediate re-trigger.</div>
+    </div>
+
+    <div class="form-divider"></div>
+    <b>Values</b>
+
+    <div class="form-row">
+        <label for="node-input-activeValue"><i class="fa fa-bolt"></i> Active input value</label>
+        <input type="text" id="node-input-activeValue" placeholder="1" />
+        <div class="help-text">Input payload value that triggers the pulse (e.g., 1, true, "on").</div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-outputActiveValue"><i class="fa fa-toggle-on"></i> Output active value</label>
+        <input type="text" id="node-input-outputActiveValue" placeholder="1" />
+        <div class="help-text">Payload value sent when pulse is ON.</div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-outputInactiveValue"><i class="fa fa-toggle-off"></i> Output inactive value</label>
+        <input type="text" id="node-input-outputInactiveValue" placeholder="0" />
+        <div class="help-text">Payload value sent when pulse ends.</div>
+    </div>
+
+    <div class="form-tips" id="node-input-tip-text"></div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-monovibrator">
+    <p>Monovibrator (one-shot / monostable multivibrator).</p>
+    <p>Outputs a pulse of configurable duration when triggered by an active input.</p>
+    
+    <h4>Behavior</h4>
+    <ul>
+        <li><b>Trigger:</b> When input matches the "active input value", output goes active.</li>
+        <li><b>Non-retriggerable:</b> Additional triggers during the pulse are ignored.</li>
+        <li><b>Pulse end:</b> After "pulse duration" seconds, output goes inactive.</li>
+        <li><b>Off-time:</b> After pulse ends, the node waits "off-time" seconds before accepting new triggers.</li>
+    </ul>
+
+    <h4>Timing Diagram</h4>
+    <pre>
+Input:  ____▔▔____▔▔▔▔▔____▔▔____
+Output: ____▔▔▔▔▔▔▔▔▔▔▔_________▔▔▔▔▔▔▔▔▔▔▔
+             |←pulse→|←off→|   |←pulse→|
+    </pre>
+    <p>Note: The second input during the pulse is ignored. The third input during off-time is also ignored.</p>
+
+    <h4>Status</h4>
+    <ul>
+        <li><b>Green dot:</b> Pulse active, shows remaining time.</li>
+        <li><b>Yellow ring:</b> In off-time, waiting before next trigger allowed.</li>
+        <li><b>Grey ring:</b> Idle, ready to trigger.</li>
+    </ul>
+</script>

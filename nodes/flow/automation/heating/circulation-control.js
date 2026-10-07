@@ -34,8 +34,7 @@ module.exports = function (RED) {
             return Math.max(lo, Math.min(hi, v));
         }
         function as01(v) {
-            const n = Number(v);
-            return Number.isFinite(n) && n !== 0 ? 1 : 0;
+            return (v == null || !Number.isFinite(Number(v)) ? null : (Number(v) !== 0 ? 1 : 0));
         }
         function sendChanged(topic, payload) {
             if (!topic) return;
@@ -80,13 +79,25 @@ module.exports = function (RED) {
 
         node.on("input", (msg) => {
             const t = String(msg.topic || "").trim();
-            const n = Number(msg.payload);
-            if (t === node.flowTargetTopic) flowTarget = Number.isFinite(n) ? n : null;
-            else if (t === node.measuredFlowTopic) measuredFlow = Number.isFinite(n) ? n : null;
-            else if (t === node.openFracTopic) openFrac = Number.isFinite(n) ? n : null;
-            else if (t === node.safeModeTopic) safeMode = as01(msg.payload);
-            else if (t === node.testActiveTopic) testActive = as01(msg.payload);
-            else return;
+            const n = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+            if (t === node.flowTargetTopic) {
+                if (n === null) return;
+                flowTarget = n;
+            } else if (t === node.measuredFlowTopic) {
+                if (n === null) return;
+                measuredFlow = n;
+            } else if (t === node.openFracTopic) {
+                if (n === null) return;
+                openFrac = n;
+            } else if (t === node.safeModeTopic) {
+                const bit = as01(msg.payload);
+                if (bit === null) return;
+                safeMode = bit;
+            } else if (t === node.testActiveTopic) {
+                const bit = as01(msg.payload);
+                if (bit === null) return;
+                testActive = bit;
+            } else return;
             compute();
         });
     }

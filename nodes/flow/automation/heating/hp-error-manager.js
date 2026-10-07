@@ -274,7 +274,9 @@ module.exports = function (RED) {
                                 bitValues[baseTopic] = {};
                             }
                             for (let i = 0; i < Math.min(16, msg.payload.length); i++) {
-                                bitValues[baseTopic][i] = Number(msg.payload[i]) ? 1 : 0;
+                                const bit = (msg.payload[i] == null || !Number.isFinite(Number(msg.payload[i])) ? null : (Number(msg.payload[i]) !== 0 ? 1 : 0));
+                                if (bit === null) continue;
+                                bitValues[baseTopic][i] = bit;
                             }
                             errorCodes[baseTopic] = combineBits(baseTopic);
                             compute();
@@ -287,15 +289,16 @@ module.exports = function (RED) {
                         if (!bitValues[baseTopic]) {
                             bitValues[baseTopic] = {};
                         }
-                        const bitValue = Number(msg.payload) ? 1 : 0;
+                        const bitValue = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                        if (bitValue === null) return;
                         bitValues[baseTopic][bit] = bitValue;
 
                         // Recombine bits into 16-bit value
                         errorCodes[baseTopic] = combineBits(baseTopic);
                     } else if (topic === baseTopic) {
                         // Direct topic without member - treat as combined value
-                        const newErrorCode = Number(msg.payload);
-                        if (!isNaN(newErrorCode)) {
+                        const newErrorCode = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                        if (newErrorCode !== null) {
                             // Mask to 16 bits (0-65535)
                             const maskedCode = newErrorCode & 0xffff;
                             errorCodes[baseTopic] = maskedCode;

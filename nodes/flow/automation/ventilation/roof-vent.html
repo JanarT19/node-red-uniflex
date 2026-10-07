@@ -1,0 +1,191 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-roof-vent", {
+        category: "uniflex home",
+        color: "#B0E0E6",
+        icon: "font-awesome/fa-cloud",
+        defaults: {
+            name: { value: "" },
+            tempTopic: { value: "TAVW.1" },
+            thresholdValveTopic: { value: "TAVW.2" },
+            thresholdValveC: { value: 25, validate: RED.validators.number() },
+            thresholdVentTopic: { value: "TAVW.3" },
+            thresholdVentOnC: { value: 28, validate: RED.validators.number() },
+            thresholdVentHighTopic: { value: "TAVW.4" },
+            thresholdVentHighC: { value: 32, validate: RED.validators.number() },
+            outVentOnTopic: { value: "TADW.1" },
+            outVentHighTopic: { value: "TADW.2" },
+            outValveOpenTopic: { value: "TADW.3" },
+            hysteresisC: { value: 0.5, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () { return this.name || "roof vent"; },
+        paletteLabel: "roof vent",
+
+        oneditprepare: function () {
+            let _controllers = {};
+
+            function readThresholds() {
+                return {
+                    valve: Number($("#node-input-thresholdValveC").val()),
+                    vent: Number($("#node-input-thresholdVentOnC").val()),
+                    high: Number($("#node-input-thresholdVentHighC").val())
+                };
+            }
+
+            function updateThresholdWarning() {
+                const t = readThresholds();
+                const ok = Number.isFinite(t.valve) && Number.isFinite(t.vent) && Number.isFinite(t.high)
+                    && t.valve < t.vent && t.vent < t.high;
+                const el = $("#node-input-threshold-warn");
+                if (ok) {
+                    el.hide().text("");
+                } else {
+                    el.show().text(
+                        "Warning: thresholds must increase in order: valve open < ventilator ON < ventilator high."
+                    );
+                }
+            }
+
+            $("#node-input-thresholdValveC, #node-input-thresholdVentOnC, " +
+              "#node-input-thresholdVentHighC, #node-input-hysteresisC")
+                .on("input change", updateThresholdWarning);
+
+            function initAutocomplete(el) {
+                el.autocomplete({
+                    minLength: 0,
+                    source: function (req, res) {
+                        const term = (req.term || "").toLowerCase();
+                        const topics = (_controllers?.controllers || []).flatMap(c => c.formattedTopics || []);
+                        res(topics.filter(item => {
+                            const label = String(item.label || item.topic || "").toLowerCase();
+                            const topic = String(item.topic || item.value || "").toLowerCase();
+                            return label.indexOf(term) >= 0 || topic.indexOf(term) >= 0;
+                        }));
+                    },
+                    focus: function (e) { e.preventDefault(); },
+                    select: function (e, ui) {
+                        e.preventDefault();
+                        el.val(ui.item.topic || ui.item.value || ui.item.label || "");
+                    }
+                }).on("focus", function () {
+                    el.autocomplete("search", el.val() || "");
+                });
+            }
+
+            $.getJSON("uniflex/controller-config", function (data) {
+                _controllers = data || {};
+                [
+                    "tempTopic",
+                    "thresholdValveTopic", "thresholdVentTopic", "thresholdVentHighTopic",
+                    "outVentOnTopic", "outVentHighTopic", "outValveOpenTopic"
+                ].forEach(function (id) {
+                    initAutocomplete($("#node-input-" + id));
+                });
+            }).fail(function () {
+                _controllers = {};
+            });
+
+            updateThresholdWarning();
+        }
+    });
+</script>
+
+<style type="text/css">
+    .rv-div .form-row { margin-bottom: 10px; }
+    .rv-div .form-row label { width: 38% !important; vertical-align: middle; }
+    .rv-div .form-row input[type="text"] { width: 42% !important; }
+    .rv-div .form-row input[type="number"] { width: 80px !important; margin-left: 6px; }
+    .rv-div .help-text { font-size: 0.8em; color: #666; margin-top: 1px; margin-bottom: 6px; }
+    .rv-div .form-divider { border-top: 1px solid #ccc; margin: 8px 0; }
+    .rv-threshold-warn {
+        color: #b45309;
+        background: #fff7ed;
+        border: 1px solid #fdba74;
+        padding: 6px 8px;
+        margin: 6px 0 10px 0;
+        font-size: 0.85em;
+    }
+    .rv-threshold-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+    .rv-threshold-row label { width: 38% !important; flex-shrink: 0; }
+    .rv-threshold-row .rv-topic { flex: 1; min-width: 0; }
+    .rv-threshold-row .rv-unit { font-size: 0.85em; color: #666; white-space: nowrap; }
+</style>
+
+<script type="text/html" data-template-name="uniflex-roof-vent">
+    <div class="rv-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="roof-vent" />
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Temperature input</b>
+        <div class="form-row">
+            <label for="node-input-tempTopic">Topic</label>
+            <input type="text" id="node-input-tempTopic" placeholder="TAVW.1" />
+            <div class="help-text">Wintergarden temperature. Value in degrees C (dC conversion in read-data-streams).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Thresholds (node config, degrees C)</b>
+        <div class="help-text">Control compares temperature against the threshold values on the right (degrees C). If iolayer read-back on the topic differs, node overwrites it with the configured value.</div>
+        <div id="node-input-threshold-warn" class="rv-threshold-warn" style="display:none;"></div>
+
+        <div class="rv-threshold-row">
+            <label for="node-input-thresholdValveTopic">Valve open</label>
+            <input type="text" id="node-input-thresholdValveTopic" class="rv-topic" placeholder="TAVW.2" />
+            <input type="number" id="node-input-thresholdValveC" step="0.1" />
+            <span class="rv-unit">C</span>
+        </div>
+        <div class="rv-threshold-row">
+            <label for="node-input-thresholdVentTopic">Ventilator ON</label>
+            <input type="text" id="node-input-thresholdVentTopic" class="rv-topic" placeholder="TAVW.3" />
+            <input type="number" id="node-input-thresholdVentOnC" step="0.1" />
+            <span class="rv-unit">C</span>
+        </div>
+        <div class="rv-threshold-row">
+            <label for="node-input-thresholdVentHighTopic">Ventilator high</label>
+            <input type="text" id="node-input-thresholdVentHighTopic" class="rv-topic" placeholder="TAVW.4" />
+            <input type="number" id="node-input-thresholdVentHighC" step="0.1" />
+            <span class="rv-unit">C</span>
+        </div>
+
+        <div class="form-row" style="margin-top:12px;">
+            <label for="node-input-hysteresisC">Hysteresis</label>
+            <input type="number" id="node-input-hysteresisC" min="0" max="5" step="0.1" />
+            <span class="rv-unit">C</span>
+            <div class="help-text">Switch-off at threshold minus hysteresis. Default: 0.5 C.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Control outputs (0/1)</b>
+        <div class="form-row">
+            <label for="node-input-outVentOnTopic">Ventilator ON</label>
+            <input type="text" id="node-input-outVentOnTopic" placeholder="TADW.1" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-outVentHighTopic">Ventilator high</label>
+            <input type="text" id="node-input-outVentHighTopic" placeholder="TADW.2" />
+        </div>
+        <div class="form-row">
+            <label for="node-input-outValveOpenTopic">Valve open ON</label>
+            <input type="text" id="node-input-outValveOpenTopic" placeholder="TADW.3" />
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-roof-vent">
+    <h3>Roof vent</h3>
+    <p>Controls wintergarden roof ventilation from temperature thresholds with hysteresis.</p>
+    <p>All values in degrees C. dC conversion is handled by read-data-streams and write-data-streams.</p>
+    <h4>Logic</h4>
+    <ul>
+        <li><b>TAVW.1</b>: actual temperature (degrees C)</li>
+        <li>Threshold values are set in this node (degrees C); control compares TAVW.1 against them</li>
+        <li>On deploy and on iolayer mismatch: threshold values are written to TAVW.2, TAVW.3, TAVW.4</li>
+        <li>When temp crosses threshold (rising): output turns ON</li>
+        <li>When temp falls below threshold minus hysteresis: output turns OFF</li>
+        <li>Order must be: valve open &lt; ventilator ON &lt; ventilator high</li>
+    </ul>
+</script>

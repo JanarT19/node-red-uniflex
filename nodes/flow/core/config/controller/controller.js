@@ -19,6 +19,7 @@ module.exports = function (RED) {
 
         // Queried from the controller via HTTP
         node.services = {};
+        node.servicesError = null;
         node.allStates = {};
         node.channels = {};
         node.status = {};
@@ -96,6 +97,7 @@ module.exports = function (RED) {
                         httpPort,
 
                         services,
+                        servicesError,
                         allStates,
                         channels,
                         status,
@@ -132,6 +134,7 @@ module.exports = function (RED) {
                         httpPort,
 
                         services,
+                        servicesError,
                         allStates,
                         channels,
                         status,
@@ -171,6 +174,7 @@ module.exports = function (RED) {
                     httpPort: node.httpPort,
 
                     services: node.services,
+                    servicesError: node.servicesError,
                     allStates: node.allStates,
                     channels: node.channels,
                     status: node.status,
@@ -222,8 +226,12 @@ module.exports = function (RED) {
                             querySqlChannels("dichannels", draftNode),
                             querySqlChannels("dochannels", draftNode)
                         ])
-                            .then(() => {
-                                node.debug("All queries completed successfully!");
+                            .then((results) => {
+                                if (results[0] === null) {
+                                    node.warn(`Controller (${uniqueId}) metadata refresh completed without valid services.json`);
+                                } else {
+                                    node.debug("All queries completed successfully!");
+                                }
 
                                 formatChannels(draftNode);
                                 filterUsedServices(draftNode);
@@ -241,8 +249,12 @@ module.exports = function (RED) {
                         node.debug(`Periodical sync for controller (${uniqueId})...`);
 
                         Promise.all([queryServices(), queryAllStates()])
-                            .then(() => {
-                                node.debug("Periodical sync completed successfully!");
+                            .then((results) => {
+                                if (results[0] === null) {
+                                    node.warn(`Controller (${uniqueId}) periodical sync completed without valid services.json`);
+                                } else {
+                                    node.debug("Periodical sync completed successfully!");
+                                }
 
                                 filterUsedServices();
                             })
@@ -505,19 +517,9 @@ module.exports = function (RED) {
                                 }
                             }
                         } catch (error) {
-                            node.error(`Failed to parse HTTP response: ${error}`, { error });
-
-                            // Retry if necessary
-                            if (retries > 0) {
-                                node.warn(`Retrying... (${retries} attempts left)`);
-
-                                setTimeout(() => {
-                                    resolve(httpQuery(options, retries - 1));
-                                }, retryTime);
-                            } else {
-                                node.error(`Failed to parse HTTP response: ${error}`, { error });
-                                reject(error);
-                            }
+                            const parseError = new Error(`Invalid JSON from ${options.path}: ${error.message}`);
+                            node.error(parseError.message);
+                            reject(parseError);
                         }
                     });
                 });
@@ -573,21 +575,24 @@ module.exports = function (RED) {
                 path: "/services.json",
                 method: "GET"
             };
+            const configuredNode = draftNode || node;
 
             try {
                 const parsedData = await httpQuery(options);
+                if (!Array.isArray(parsedData) || !parsedData[0] || typeof parsedData[0].services !== "object" || Array.isArray(parsedData[0].services)) {
+                    throw new Error("Invalid services.json structure: expected [{\"services\": {...}}]");
+                }
                 const services = parsedData[0].services;
 
                 // Update node property
-                if (draftNode) {
-                    draftNode.services = services;
-                } else {
-                    node.services = services;
-                }
+                configuredNode.services = services;
+                configuredNode.servicesError = null;
 
                 return services;
             } catch (error) {
-                console.error("queryServices failed:", error);
+                configuredNode.servicesError = `Invalid or unavailable services.json: ${error.message}`;
+                node.error(configuredNode.servicesError);
+                return null;
             }
         }
 

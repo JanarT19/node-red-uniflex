@@ -1,0 +1,374 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-display-control", {
+        category: "uniflex display",
+        color: "#5B9BD5",
+        icon: "font-awesome/fa-desktop",
+        defaults: {
+            name: {
+                value: "",
+                validate: function (v) {
+                    return typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9_-]+$/.test(v) && v.length <= 50;
+                }
+            },
+            levelTopic: { value: "LVW.1", required: true },
+            levelLoTopic: { value: "", required: false },
+            levelHiTopic: { value: "", required: false },
+            currentTopic: { value: "", required: false },
+            drwRow1Topic: { value: "DRW.1", required: true },
+            drwRow2Topic: { value: "DRW.2", required: true },
+            dcwBlinkRow1Topic: { value: "DCW.1", required: false },
+            dcwBlankRow1Topic: { value: "", required: false },
+            dcwBlinkRow2Topic: { value: "", required: false },
+            dcwBlankRow2Topic: { value: "", required: false },
+            dcwDecimalRow1Topic: { value: "", required: false },
+            dcwDecimalRow2Topic: { value: "", required: false },
+            levelScale: {
+                value: 100,
+                validate: RED.validators.number()
+            },
+            currentScale: {
+                value: 10,
+                validate: RED.validators.number()
+            },
+            levelLo: {
+                value: 0.2,
+                validate: RED.validators.number()
+            },
+            levelHi: {
+                value: 1.0,
+                validate: RED.validators.number()
+            },
+            currentBlankThreshold: {
+                value: 0.2,
+                validate: RED.validators.number()
+            },
+            currentHiLimit: {
+                value: 10.0,
+                validate: RED.validators.number()
+            },
+            enableSystemLog: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        label: function () {
+            return this.name || "display control";
+        },
+        paletteLabel: "display control",
+
+        oneditprepare: function () {
+            let _controllers = {};
+
+            function updateTipText() {
+                const level = $("#node-input-levelTopic").val() || "<level>";
+                const loTopic = $("#node-input-levelLoTopic").val();
+                const hiTopic = $("#node-input-levelHiTopic").val();
+                const current = $("#node-input-currentTopic").val() || "<current>";
+                const r1 = $("#node-input-drwRow1Topic").val() || "DRW.1";
+                const r2 = $("#node-input-drwRow2Topic").val() || "DRW.2";
+                const scale1 = $("#node-input-levelScale").val() || "100";
+                const scale2 = $("#node-input-currentScale").val() || "10";
+                const lo = loTopic || $("#node-input-levelLo").val() || "0.2";
+                const hi = hiTopic || $("#node-input-levelHi").val() || "1.0";
+                const blank = $("#node-input-currentBlankThreshold").val() || "0.2";
+                const hilim = $("#node-input-currentHiLimit").val() || "10.0";
+                const loSrc = loTopic ? loTopic : `fixed ${lo}`;
+                const hiSrc = hiTopic ? hiTopic : `fixed ${hi}`;
+
+                const tipText =
+                    `${r1}=${level} x${scale1}, blink if out of [${loSrc}, ${hiSrc}]; ` +
+                    `${r2}=${current} x${scale2}; empty DCW topic = not managed by NR`;
+                $("#node-input-tip-text").text(tipText);
+            }
+
+            $("#node-input-levelTopic, #node-input-levelLoTopic, #node-input-levelHiTopic, #node-input-currentTopic, " +
+                "#node-input-drwRow1Topic, #node-input-drwRow2Topic, #node-input-dcwBlinkRow1Topic, " +
+                "#node-input-dcwBlankRow1Topic, #node-input-dcwBlinkRow2Topic, #node-input-dcwBlankRow2Topic, " +
+                "#node-input-dcwDecimalRow1Topic, #node-input-dcwDecimalRow2Topic, #node-input-levelScale, " +
+                "#node-input-currentScale, #node-input-levelLo, #node-input-levelHi, " +
+                "#node-input-currentBlankThreshold, #node-input-currentHiLimit")
+                .on("input change", updateTipText);
+
+            queryControllerConfig();
+            updateTipText();
+
+            function queryControllerConfig() {
+                $.getJSON("uniflex/controller-config", function (data) {
+                    _controllers = data;
+                    const selectors =
+                        "#node-input-levelTopic, #node-input-levelLoTopic, #node-input-levelHiTopic, #node-input-currentTopic, " +
+                        "#node-input-drwRow1Topic, #node-input-drwRow2Topic, #node-input-dcwBlinkRow1Topic, " +
+                        "#node-input-dcwBlankRow1Topic, #node-input-dcwBlinkRow2Topic, #node-input-dcwBlankRow2Topic, " +
+                        "#node-input-dcwDecimalRow1Topic, #node-input-dcwDecimalRow2Topic";
+                    $(selectors).each(function () {
+                        initializeAutocomplete($(this));
+                    });
+                }).fail(function () {
+                    console.error("Failed to get topics!");
+                    _controllers = {};
+                });
+            }
+
+            function initializeAutocomplete(element) {
+                element
+                    .autocomplete({
+                        minLength: 0,
+                        source: function (request, response) {
+                            const term = request.term.toLowerCase();
+                            const selection = getTopics();
+                            const matches = selection.filter((obj) => obj.label.toLowerCase().indexOf(term) > -1);
+                            matches.sort((a, b) => {
+                                const topicA = (a.topic || a.label || "").toLowerCase();
+                                const topicB = (b.topic || b.label || "").toLowerCase();
+                                return topicA.localeCompare(topicB);
+                            });
+                            response(matches);
+                        },
+                        focus: function (event) {
+                            event.preventDefault();
+                        },
+                        select: function (event, ui) {
+                            event.preventDefault();
+                            element.val(ui.item.topic);
+                        }
+                    })
+                    .on("focus", function () {
+                        element.autocomplete("search", element.val() || "");
+                    })
+                    .autocomplete("instance")._renderItem = function (ul, item) {
+                        const term = this.term.trim();
+                        const label = item.label;
+                        let highlightedLabel = label;
+                        if (term) {
+                            const regex = new RegExp("(" + term.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") + ")", "ig");
+                            highlightedLabel = label.replace(regex, '<strong style="color:#e65; font-weight:bold">$1</strong>');
+                        }
+                        return $("<li></li>").data("ui-autocomplete-item", item).append(`<div>${highlightedLabel}</div>`).appendTo(ul);
+                    };
+            }
+
+            function getTopics() {
+                const result = [];
+                const controllers = _controllers?.controllers || [];
+                for (const controller of controllers) {
+                    result.push(...controller.formattedTopics);
+                }
+                return result.sort((a, b) => {
+                    const topicA = (a.topic || a.label || "").toLowerCase();
+                    const topicB = (b.topic || b.label || "").toLowerCase();
+                    return topicA.localeCompare(topicB);
+                });
+            }
+        }
+    });
+</script>
+
+<style type="text/css">
+    .uniflex-display-control-div .form-row {
+        margin-bottom: 10px;
+    }
+
+    .uniflex-display-control-div .form-row label {
+        width: 33% !important;
+        vertical-align: middle;
+    }
+
+    .uniflex-display-control-div .form-row div,
+    .uniflex-display-control-div .form-row input,
+    .uniflex-display-control-div .form-row textarea {
+        max-width: 66% !important;
+    }
+
+    .uniflex-display-control-div .form-tips {
+        max-width: 100% !important;
+        text-align: center;
+    }
+
+    .uniflex-display-control-div .help-text {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 1px;
+        margin-bottom: 6px;
+    }
+
+    .uniflex-display-control-div .form-divider {
+        border-top: 1px solid #ccc;
+        margin: 5px 0;
+    }
+
+    .uniflex-display-control-div .ui-autocomplete {
+        max-height: 250px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 2000;
+        background: #fff;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .uniflex-display-control-div .ui-menu-item {
+        font-size: 12px;
+        padding: 5px;
+        cursor: pointer;
+    }
+
+    .uniflex-display-control-div .ui-menu-item:hover {
+        background-color: #f5f5f5;
+    }
+</style>
+
+<script type="text/html" data-template-name="uniflex-display-control">
+    <div class="uniflex-display-control-div">
+        <div class="form-row">
+            <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+            <input type="text" id="node-input-name" placeholder="e.g. tabloo" />
+            <div class="help-text">Unique identifier. Letters, numbers, underscore, hyphen.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Inputs</b>
+
+        <div class="form-row">
+            <label for="node-input-levelTopic"><i class="fa fa-tint"></i> Level actual</label>
+            <input type="text" id="node-input-levelTopic" placeholder="e.g. LVW.1" />
+            <div class="help-text">Water level (same unit as lo/hi limits).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-levelLoTopic">Level lo topic</label>
+            <input type="text" id="node-input-levelLoTopic" placeholder="e.g. LVW.4 or empty for fixed lo" />
+            <div class="help-text">Optional iolayer topic for low warn limit. Overrides fixed lo below.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-levelHiTopic">Level hi topic</label>
+            <input type="text" id="node-input-levelHiTopic" placeholder="e.g. LVW.5 or empty for fixed hi" />
+            <div class="help-text">Optional iolayer topic for high warn limit. Overrides fixed hi below.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-currentTopic"><i class="fa fa-bolt"></i> Current actual</label>
+            <input type="text" id="node-input-currentTopic" placeholder="e.g. total current topic" />
+            <div class="help-text">Pump total current in amperes (optional until wired).</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Row outputs (DRW)</b>
+
+        <div class="form-row">
+            <label for="node-input-drwRow1Topic"><i class="fa fa-sign-out"></i> Row 1 value</label>
+            <input type="text" id="node-input-drwRow1Topic" placeholder="e.g. DRW.1" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-drwRow2Topic"><i class="fa fa-sign-out"></i> Row 2 value</label>
+            <input type="text" id="node-input-drwRow2Topic" placeholder="e.g. DRW.2" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-levelScale"><i class="fa fa-calculator"></i> Row 1 scale</label>
+            <input type="number" id="node-input-levelScale" step="1" min="1" />
+            <div class="help-text">Multiply level before DRW.1. Use 100 with DCW.6 (5.00 format) when decimal managed here.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-currentScale"><i class="fa fa-calculator"></i> Row 2 scale</label>
+            <input type="number" id="node-input-currentScale" step="1" min="1" />
+            <div class="help-text">Multiply current (A) before DRW.2. Use 10 with DCW.7 (20.0 format) when decimal managed here.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Control outputs (DCW)</b>
+
+        <div class="form-row">
+            <label for="node-input-dcwBlinkRow1Topic">Row 1 blink</label>
+            <input type="text" id="node-input-dcwBlinkRow1Topic" placeholder="DCW.1 or empty" />
+            <div class="help-text">Empty = blink not managed by NR (iolayer/dichannels may handle it).</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-dcwBlankRow1Topic">Row 1 blank</label>
+            <input type="text" id="node-input-dcwBlankRow1Topic" placeholder="DCW.2 or empty" />
+            <div class="help-text">If set, always written 0. Empty = not managed by NR.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-dcwBlinkRow2Topic">Row 2 blink</label>
+            <input type="text" id="node-input-dcwBlinkRow2Topic" placeholder="DCW.3 or empty" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-dcwBlankRow2Topic">Row 2 blank</label>
+            <input type="text" id="node-input-dcwBlankRow2Topic" placeholder="DCW.4 or empty" />
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-dcwDecimalRow1Topic">Row 1 decimal</label>
+            <input type="text" id="node-input-dcwDecimalRow1Topic" placeholder="DCW.6 or empty" />
+            <div class="help-text">If set, always 1 (5.00 format). Empty = decimal managed in iolayer only.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-dcwDecimalRow2Topic">Row 2 decimal</label>
+            <input type="text" id="node-input-dcwDecimalRow2Topic" placeholder="DCW.7 or empty" />
+            <div class="help-text">If set, always 1 (20.0 format). Empty = decimal managed in iolayer only.</div>
+        </div>
+
+        <div class="form-divider"></div>
+        <b>Limits</b>
+
+        <div class="form-row">
+            <label for="node-input-levelLo">Level lo fixed</label>
+            <input type="number" id="node-input-levelLo" step="0.001" />
+            <div class="help-text">Used when level lo topic is empty.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-levelHi">Level hi fixed</label>
+            <input type="number" id="node-input-levelHi" step="0.001" />
+            <div class="help-text">Used when level hi topic is empty. Row 1 blinks outside [lo, hi].</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-currentBlankThreshold">Current blank (A)</label>
+            <input type="number" id="node-input-currentBlankThreshold" step="0.01" />
+            <div class="help-text">Row 2 blank (DCW.4=1) when current below this.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-currentHiLimit">Current hi (A)</label>
+            <input type="number" id="node-input-currentHiLimit" step="0.1" />
+            <div class="help-text">Row 2 blink (DCW.3=1) when current above this.</div>
+        </div>
+
+        <div class="form-row">
+            <label for="node-input-enableSystemLog"><i class="fa fa-list"></i> System log</label>
+            <input type="checkbox" id="node-input-enableSystemLog" style="width: auto; margin-top: 8px;" />
+        </div>
+
+        <div class="form-tips" id="node-input-tip-text"></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-display-control">
+    <h3>Display control</h3>
+    <p>Pump-station dual-line display (DRW values + DCW blink/blank/decimal bits).</p>
+    <p>Connect output to <code>write-data-streams</code>. Writes only when a topic value deviates from wanted; on deploy configured topics are written once (blind init).</p>
+    <p>Empty DCW topic fields are not written by this node (iolayer/dichannels may manage those bits).</p>
+
+    <h4>Row 1 (level)</h4>
+    <ul>
+        <li><b>DRW.1</b> = round(level * row1_scale)</li>
+        <li><b>DCW.1</b> (if topic set) = 1 when level outside [lo, hi]</li>
+        <li>Lo/hi from topics (e.g. LVW.4, LVW.5) or fixed fields</li>
+        <li><b>DCW.6</b> (if topic set) = 1 always (decimal 5.00 format)</li>
+    </ul>
+
+    <h4>Row 2 (current)</h4>
+    <ul>
+        <li><b>DRW.2</b> = round(current_A * row2_scale)</li>
+        <li><b>DCW.4</b> (if topic set) = 1 when current below blank threshold</li>
+        <li><b>DCW.3</b> (if topic set) = 1 when current above hi limit</li>
+        <li><b>DCW.7</b> (if topic set) = 1 always (decimal 20.0 format)</li>
+    </ul>
+</script>

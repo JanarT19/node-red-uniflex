@@ -74,7 +74,11 @@ module.exports = function (RED) {
                 }
 
                 // Extract value from input topic
-                const newValue = parseInt(msg.payload) === 1;
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) {
+                    return;
+                }
+                const newValue = bit === 1;
 
                 // Update cache with the new value
                 node.lastInputs[input.topic] = newValue;

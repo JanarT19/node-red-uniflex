@@ -327,7 +327,11 @@ module.exports = function (RED) {
             }
 
             if (t === node.setpointTopic) {
-                latestSetpoint = Number(msg.payload);
+                latestSetpoint = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (latestSetpoint === null) {
+                    closeValve();
+                    return;
+                }
                 if (awaitingSetpointAfterTick && pendingPeriodSec) {
                     awaitingSetpointAfterTick = false;
                     computeAndAct(pendingPeriodSec);
@@ -337,33 +341,44 @@ module.exports = function (RED) {
             }
 
             if (t === node.returnTopic) {
-                latestReturn = Number(msg.payload);
+                latestReturn = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (latestReturn === null) {
+                    closeValve();
+                }
                 return;
             }
 
             if (t === node.roomErrorTopic) {
-                roomErrorC = Number(msg.payload);
+                roomErrorC = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
                 return;
             }
 
             if (t === node.coolingModeTopic) {
-                coolingMode = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) {
+                    coolingMode = false;
+                    closeValve();
+                    return;
+                }
+                coolingMode = !!bit;
                 return;
             }
 
             if (t === node.dewPointTopic) {
-                dewPointC = Number(msg.payload);
+                dewPointC = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
                 return;
             }
 
             if (t === node.forceOpenTopic) {
-                forceOpen = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                forceOpen = bit === 1;
                 if (forceOpen) openValve();
                 return;
             }
 
             if (t === node.forceCloseTopic) {
-                forceClose = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                forceClose = bit === 1;
                 if (forceClose) closeValve();
                 return;
             }
@@ -375,12 +390,22 @@ module.exports = function (RED) {
 
                 if (t.startsWith(toutPrefix)) {
                     const member = t.slice(toutPrefix.length); // "1", "2", "3", "4"
-                    ffIolayerCache.temp[member] = Number(msg.payload);
+                    const n = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                    if (n === null) {
+                        delete ffIolayerCache.temp[member];
+                    } else {
+                        ffIolayerCache.temp[member] = n;
+                    }
                     return;
                 }
                 if (t.startsWith(windPrefix)) {
                     const member = t.slice(windPrefix.length);
-                    ffIolayerCache.wind[member] = Number(msg.payload);
+                    const n = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                    if (n === null) {
+                        delete ffIolayerCache.wind[member];
+                    } else {
+                        ffIolayerCache.wind[member] = n;
+                    }
                     return;
                 }
             }

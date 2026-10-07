@@ -1,16 +1,10 @@
 const ts = require("../../core/lib/timestamp.js");
 
-const THERMOKON_FLAT_VERSION = "1.9.2";
+const THERMOKON_FLAT_VERSION = "2.3.2";
 const INPUT_STATE_UID_FALLBACK = "local";
 const R514_ECO = 18;
 const R514_COMFORT = 2;
-const DEFAULT_R340_SEC = 65535;
-const COMFORT_PULSE_SEC = 30;
-const PIR_TICK_MS = 1000;
-const PIR_HOLD_CTX_KEY = "pirHold";
-const PIR_HOLD_CTX_STORE = "file";
-// inactiveSince=0 => eco until first PIR=1 or restored hold from context
-const PIR_DEFAULT_INACTIVE_SINCE = 0;
+const COMFORT_PULSE_SEC = 90;
 // Min gap between non-cooled panel-sync r514 writes.
 const PANEL_SYNC_MIN_MS = 5000;
 // Re-check E display and P corrective against known M r277.
@@ -25,51 +19,77 @@ function buildPreset(flatType, flat) {
     }
     if (flatType === "non-cooled-1") {
         return {
-            forceTopic: `P1N${f}W.1`,
+            forceTopic: `P1N${f}S.1`,
             modeTopics: [`MAN${f}W.1`, `MAN${f}W.2`],
             writeTopics: [`WAN${f}W.1`, `WAN${f}W.2`],
             displayTopics: [`E1N${f}W.1`, `E1N${f}W.2`],
-            pirTopics: [],
-            pirZoneIndices: [],
             sanitaryWriteTopic: "",
-            comfortPulseTopic: ""
+            comfortPulseTopic: "",
+            valveTopics: []
         };
     }
     if (flatType === "non-cooled-2") {
         return {
-            forceTopic: `P2N${f}W.1`,
+            forceTopic: `P2N${f}S.1`,
             modeTopics: [`MBN${f}W.1`, `MBN${f}W.2`, `MBN${f}W.3`],
             writeTopics: [`WBN${f}W.1`, `WBN${f}W.2`, `WBN${f}W.3`],
             displayTopics: [`E2N${f}W.1`, `E2N${f}W.2`, `E2N${f}W.3`],
-            pirTopics: [],
-            pirZoneIndices: [],
             sanitaryWriteTopic: "",
-            comfortPulseTopic: ""
+            comfortPulseTopic: "",
+            valveTopics: []
+        };
+    }
+    if (flatType === "cooled-1") {
+        if (f === "213") {
+            return {
+                forceTopic: "",
+                modeTopics: [`MCC${f}W.1`],
+                writeTopics: [],
+                displayTopics: [],
+                sanitaryWriteTopic: "",
+                sanDisplayTopic: "",
+                comfortPulseTopic: `P1C${f}S.1`,
+                valveTopics: [],
+            };
+        }
+        return {
+            forceTopic: "",
+            modeTopics: [`MAC${f}W.1`],
+            writeTopics: [],
+            displayTopics: [],
+            sanitaryWriteTopic: `WAC${f}W.1`,
+            sanDisplayTopic: `E0C${f}S.1`,
+            comfortPulseTopic: `P1C${f}S.1`,
+            valveTopics: [`VAM${f}W.2`, `VAM${f}W.3`],
         };
     }
     if (flatType === "cooled-2") {
         return {
             forceTopic: "",
-            modeTopics: [`MBC${f}V.1`],
+            modeTopics: [`MBC${f}W.1`],
             writeTopics: [],
-            displayTopics: [`E2C${f}W.1`, `E2C${f}W.2`, `E2C${f}W.3`],
-            pirTopics: [`D2C${f}W.3`, `D2C${f}W.4`],
-            pirZoneIndices: [1, 2],
-            r340ReadTopics: [`WBC${f}W.9`, `WBC${f}W.10`],
+            displayTopics: [],
             sanitaryWriteTopic: `WBC${f}W.1`,
-            comfortPulseTopic: `P2C${f}S.1`
+            sanDisplayTopic: `E0C${f}S.1`,
+            comfortPulseTopic: `P2C${f}S.1`,
+            valveTopics: [
+                `VBM${f}W.2`,
+                `VBM${f}W.3`,
+                `VBM${f}W.4`,
+                `VBM${f}W.5`
+            ],
         };
     }
+    const valveTopics = [`VAM${f}W.2`, `VAM${f}W.3`];
     return {
         forceTopic: "",
-        modeTopics: [`MAC${f}V.1`],
+        modeTopics: [`MAC${f}W.1`],
         writeTopics: [],
-        displayTopics: [`E1C${f}W.1`, `E1C${f}W.2`],
-        pirTopics: [`D1C${f}W.2`],
-        pirZoneIndices: [1],
-        r340ReadTopics: [`WAC${f}W.2`],
+        displayTopics: [],
         sanitaryWriteTopic: `WAC${f}W.1`,
-        comfortPulseTopic: `P1C${f}S.1`
+        sanDisplayTopic: `E0C${f}S.1`,
+        comfortPulseTopic: `P1C${f}S.1`,
+        valveTopics,
     };
 }
 
@@ -85,35 +105,35 @@ module.exports = function (RED) {
         node.enableDebug = config.enableDebug === true;
         node.flatType = config.flatType || "non-cooled-2";
         node.flatNumber = String(config.flatNumber || "").trim();
-        const r340HoldRaw = config.r340HoldSec;
-        const r340HoldParsed = r340HoldRaw === "" || r340HoldRaw == null ? DEFAULT_R340_SEC : Number(r340HoldRaw);
-        node.r340FallbackSec = Math.max(0, Number.isFinite(r340HoldParsed) ? r340HoldParsed : DEFAULT_R340_SEC);
-
         const preset = buildPreset(node.flatType, node.flatNumber);
         node.forceTopic = (config.forceTopic || (preset && preset.forceTopic) || "").trim();
         node.writeTopics = parseTopicList(config.writeTopics || (preset && preset.writeTopics.join(",")));
         node.modeTopics = parseTopicList(config.modeTopics || (preset && preset.modeTopics.join(",")));
         node.displayTopics = parseTopicList(config.displayTopics || (preset && preset.displayTopics.join(",")));
-        node.pirTopics = parseTopicList(config.pirTopics || (preset && preset.pirTopics.join(",")));
-        node.comfortPulseTopic = (config.comfortPulseTopic || (preset && preset.comfortPulseTopic) || "").trim();
-        node.sanitaryWriteTopic = (config.sanitaryWriteTopic || (preset && preset.sanitaryWriteTopic) || "").trim();
-        node.pirZoneIndices = parseIndexList(config.pirZoneIndices || (preset && preset.pirZoneIndices.join(",")));
-        node.r340ReadTopics = parseTopicList(config.r340ReadTopics || (preset && preset.r340ReadTopics && preset.r340ReadTopics.join(",")));
+        node.comfortPulseTopic = (
+            config.comfortPulseTopic || (preset && preset.comfortPulseTopic) || ""
+        ).trim();
+        node.sanitaryWriteTopic = (
+            config.sanitaryWriteTopic || (preset && preset.sanitaryWriteTopic) || ""
+        ).trim();
+        node.sanDisplayTopic = (
+            config.sanDisplayTopic || (preset && preset.sanDisplayTopic) || ""
+        ).trim();
+        node.valveTopics = parseTopicList(
+            config.valveTopics || (preset && preset.valveTopics && preset.valveTopics.join(",")) || ""
+        );
 
         const isNonCooled = node.flatType.startsWith("non-cooled");
         const isCooled = !isNonCooled;
-        const zoneCount = node.displayTopics.length;
+        const zoneCount = isCooled ? node.modeTopics.length : node.displayTopics.length;
 
         const modeByTopic = {};
         const displayEcoByZone = new Array(zoneCount).fill(null);
-        const pirStateByTopic = {};
-        const pirSeenByTopic = {};
         let lastWrittenWord = null;
         let lastPanelSyncMs = 0;
-        let lastSanitaryWord = null;
+        let lastSanDisplayEco = null;
         const prevModeByTopic = {};
         let pendingPanelSyncZone = null;
-        let pirTimer = null;
         let displayResyncTimer = null;
         let modeBatchTimer = null;
         let comfortPulseTimer = null;
@@ -121,75 +141,13 @@ module.exports = function (RED) {
         let lastInputUniqueId = "";
         // Full MBN array from the latest streamValues packet (source of truth for E display).
         let lastStreamModes = null;
-        const ecoSinceMsByZone = new Array(zoneCount).fill(0);
-        const lastHoldEdgeSecByZone = new Array(zoneCount).fill(null);
-        const r340ByTopic = {};
+        const valveByTopic = {};
 
         function parseTopicList(raw) {
             return String(raw || "")
                 .split(/[,;\s]+/)
                 .map((s) => s.trim())
                 .filter(Boolean);
-        }
-
-        function parseIndexList(raw) {
-            if (Array.isArray(raw)) {
-                return raw.map((n) => Number(n)).filter((n) => Number.isFinite(n));
-            }
-            return String(raw || "")
-                .split(/[,;\s]+/)
-                .map((s) => Number(s.trim()))
-                .filter((n) => Number.isFinite(n));
-        }
-
-        function pirTopicForZone(zoneIdx) {
-            const pos = node.pirZoneIndices.indexOf(zoneIdx);
-            if (pos < 0) {
-                return "";
-            }
-            return node.pirTopics[pos] || "";
-        }
-
-        function r340TopicForZone(zoneIdx) {
-            const pos = node.pirZoneIndices.indexOf(zoneIdx);
-            if (pos < 0) {
-                return "";
-            }
-            return node.r340ReadTopics[pos] || "";
-        }
-
-        function parseR340Sec(payload) {
-            if (payload == null || payload === "") {
-                return null;
-            }
-            const n = Number(payload);
-            if (!Number.isFinite(n) || n < 0) {
-                return null;
-            }
-            return Math.max(0, n);
-        }
-
-        function r340HoldSecForZone(zoneIdx) {
-            const topic = r340TopicForZone(zoneIdx);
-            if (topic && Object.prototype.hasOwnProperty.call(r340ByTopic, topic)) {
-                return r340ByTopic[topic];
-            }
-            return node.r340FallbackSec;
-        }
-
-        function r340HoldSummarySec() {
-            if (node.r340ReadTopics.length === 0) {
-                return node.r340FallbackSec;
-            }
-            const vals = node.r340ReadTopics.filter((topic) => Object.prototype.hasOwnProperty.call(r340ByTopic, topic)).map((topic) => r340ByTopic[topic]);
-            if (vals.length === 0) {
-                return node.r340FallbackSec;
-            }
-            return vals[0];
-        }
-
-        function isPirZone(zoneIdx) {
-            return node.pirZoneIndices.indexOf(zoneIdx) >= 0;
         }
 
         function parseForce(payload) {
@@ -203,20 +161,111 @@ module.exports = function (RED) {
             return payload ? 1 : 0;
         }
 
+        function parseValveDemand(payload) {
+            if (payload == null || payload === "") {
+                return null;
+            }
+            const n = Number(payload);
+            if (!Number.isFinite(n)) {
+                return payload ? 1 : 0;
+            }
+            return n >= 0.5 ? 1 : 0;
+        }
+
+        function sanModeTopic() {
+            return node.modeTopics[0] || "";
+        }
+
+        function isLivingValveReason(reason) {
+            return String(reason).indexOf("living-valve") === 0;
+        }
+
+        function isFlatVacant() {
+            if (!node.flatNumber) {
+                return false;
+            }
+            const inputStates = resolveInputStates(lastInputUniqueId || null);
+            const brn = "BRN" + node.flatNumber + "S";
+            const st = inputStates && inputStates[brn];
+            const values = st && st.values;
+            if (!Array.isArray(values) || values.length < 1) {
+                return false;
+            }
+            const raw = values[0];
+            return (raw == null ? null : (Number.isFinite(Number(raw)) ? Number(raw) : null)) === 1;
+        }
+
+        function maybeForceSanComfortFromValve(valveTopic, reason) {
+            if (!isCooled || !node.sanitaryWriteTopic || node.valveTopics.length === 0) {
+                return;
+            }
+            if (node.valveTopics.indexOf(valveTopic) < 0) {
+                return;
+            }
+            if (isFlatVacant()) {
+                if (node.enableDebug) {
+                    node.warn(tag + " L4 skip vacant san " + node.flatNumber);
+                }
+                return;
+            }
+            const sanMt = sanModeTopic();
+            if (!sanMt) {
+                return;
+            }
+            if (!(sanMt in modeByTopic)) {
+                syncModeFromInputCache(lastInputUniqueId || null, reason || "san-guard");
+            }
+            if (sanMt in modeByTopic && isComfortMode(modeByTopic[sanMt])) {
+                return;
+            }
+            writeR514(
+                R514_COMFORT,
+                [node.sanitaryWriteTopic],
+                `living-valve (${reason || "?"} ${valveTopic})`
+            );
+        }
+
+        function onValveInput(topic, payload, source) {
+            if (!isCooled || node.valveTopics.indexOf(topic) < 0) {
+                return;
+            }
+            const next = parseValveDemand(payload);
+            if (next === null) {
+                return;
+            }
+            const prev = Object.prototype.hasOwnProperty.call(valveByTopic, topic)
+                ? valveByTopic[topic]
+                : null;
+            valveByTopic[topic] = next;
+            if (next !== 1 || prev === 1) {
+                return;
+            }
+            if (prev !== 0) {
+                return;
+            }
+            maybeForceSanComfortFromValve(topic, source || topic);
+        }
+
         function isEcoMode(r277) {
-            const v = Number(r277);
+            const v = (r277 == null ? null : (Number.isFinite(Number(r277)) ? Number(r277) : null));
+            if (v === null) {
+                return false;
+            }
             return v === 18 || v === 0;
         }
 
         function isActiveEcoMode(r277) {
-            return Number(r277) === 18;
+            return (r277 == null ? null : (Number.isFinite(Number(r277)) ? Number(r277) : null)) === 18;
         }
 
         function isComfortMode(r277) {
-            return Number(r277) === 2;
+            return (r277 == null ? null : (Number.isFinite(Number(r277)) ? Number(r277) : null)) === 2;
         }
 
         function targetWordFromR277(r277) {
+            if (!(r277 != null && Number.isFinite(Number(r277)))) {
+                return null;
+            }
             if (isComfortMode(r277)) {
                 return R514_COMFORT;
             }
@@ -248,8 +297,14 @@ module.exports = function (RED) {
                     continue;
                 }
                 const mt = node.modeTopics[i];
+                if (mt && !(mt in modeByTopic)) {
+                    continue;
+                }
                 if (mt && mt in modeByTopic) {
                     const cur = modeByTopic[mt];
+                    if (!(cur != null && Number.isFinite(Number(cur)))) {
+                        continue;
+                    }
                     // E display: r277 0 or 18 = eco. W write: only skip 18; 0=standby needs r514=18.
                     if (word === R514_ECO && isActiveEcoMode(cur)) {
                         continue;
@@ -300,155 +355,25 @@ module.exports = function (RED) {
             enforceNonCooledPanelSync(zi, reason || "mode-batch");
         }
 
-        function isThermokonOff(r277) {
-            return Number(r277) === 0;
-        }
 
-        function pirActive(payload) {
-            if (payload == null || payload === "") {
-                return false;
-            }
-            const n = Number(payload);
-            if (Number.isFinite(n)) {
-                return n >= 1;
-            }
-            return !!payload;
-        }
-
-        function defaultPirState() {
-            return { active: false, inactiveSince: PIR_DEFAULT_INACTIVE_SINCE };
-        }
-
-        function normalizePirState(raw) {
-            if (!raw || typeof raw !== "object") {
-                return defaultPirState();
-            }
-            return {
-                active: !!raw.active,
-                inactiveSince: Number(raw.inactiveSince) || PIR_DEFAULT_INACTIVE_SINCE
-            };
-        }
-
-        function getPirState(topic) {
-            let st = pirStateByTopic[topic];
-            if (!st) {
-                st = defaultPirState();
-                pirStateByTopic[topic] = st;
-            }
-            return st;
-        }
-
-        function loadPirHoldFromContext() {
-            if (!isCooled || node.pirTopics.length === 0) {
-                return false;
-            }
-            let any = false;
-            try {
-                const raw = node.context().get(PIR_HOLD_CTX_KEY, PIR_HOLD_CTX_STORE);
-                if (!raw || typeof raw !== "object") {
-                    return false;
-                }
-                for (let i = 0; i < node.pirTopics.length; i++) {
-                    const topic = node.pirTopics[i];
-                    if (!Object.prototype.hasOwnProperty.call(raw, topic)) {
-                        continue;
-                    }
-                    pirStateByTopic[topic] = normalizePirState(raw[topic]);
-                    pirSeenByTopic[topic] = true;
-                    any = true;
-                }
-                if (any && node.enableDebug) {
-                    node.log(`${tag} PIR hold restored from context`);
-                }
-            } catch (err) {
-                node.warn(`${tag} PIR hold load failed: ${String(err.message || err)}`);
-            }
-            return any;
-        }
-
-        function savePirHoldToContext() {
-            if (!isCooled || node.pirTopics.length === 0) {
-                return;
-            }
-            const out = {};
-            for (let i = 0; i < node.pirTopics.length; i++) {
-                const topic = node.pirTopics[i];
-                if (!pirSeenByTopic[topic]) {
-                    continue;
-                }
-                const st = pirStateByTopic[topic];
-                if (st) {
-                    out[topic] = { active: st.active, inactiveSince: st.inactiveSince };
-                }
-            }
-            try {
-                node.context().set(PIR_HOLD_CTX_KEY, out, PIR_HOLD_CTX_STORE);
-            } catch (err) {
-                node.warn(`${tag} PIR hold save failed: ${String(err.message || err)}`);
-            }
-        }
-
-        function zoneComfort(zoneIdx) {
-            if (isPirZone(zoneIdx)) {
-                const pt = pirTopicForZone(zoneIdx);
-                const st = pirStateByTopic[pt];
-                if (!st) {
-                    return false;
-                }
-                if (st.active) {
-                    return true;
-                }
-                const elapsedSec = (Date.now() - st.inactiveSince) / 1000;
-                return elapsedSec < r340HoldSecForZone(zoneIdx);
-            }
-            const mt = node.modeTopics[zoneIdx];
-            if (!mt || !(mt in modeByTopic)) {
-                return false;
-            }
-            return isComfortMode(modeByTopic[mt]);
-        }
-
-        function cooledSanitaryDisplayEco() {
-            for (let i = 0; i < node.pirZoneIndices.length; i++) {
-                if (zoneComfort(node.pirZoneIndices[i])) {
-                    return 0;
-                }
-            }
-            return 1;
-        }
+        // Cooled san panel: only trust leaving off(0) or eco(18). Target r277 is unreliable on PIR
+        // thermokons; san has a manual panel so non-zero after 0/18 is treated as comfort intent.
 
         function zoneDisplayEco(zoneIdx) {
             const mt = node.modeTopics[zoneIdx];
-            if (isCooled) {
-                if (isPirZone(zoneIdx)) {
-                    return zoneComfort(zoneIdx) ? 0 : 1;
-                }
-                return cooledSanitaryDisplayEco();
-            }
-            if (isPirZone(zoneIdx)) {
-                if (mt && mt in modeByTopic && isThermokonOff(modeByTopic[mt])) {
-                    return 1;
-                }
-                return zoneComfort(zoneIdx) ? 0 : 1;
-            }
             if (!mt || !(mt in modeByTopic)) {
+                return null;
+            }
+            if (!(modeByTopic[mt] != null && Number.isFinite(Number(modeByTopic[mt])))) {
                 return null;
             }
             return isEcoMode(modeByTopic[mt]) ? 1 : 0;
         }
 
-        function computeCooledDisplayEcoArray() {
-            const arr = [];
-            for (let zi = 0; zi < zoneCount; zi++) {
-                arr.push(zoneDisplayEco(zi));
-            }
-            return arr;
-        }
-
         function modeSummary() {
             return node.modeTopics
                 .map((mt) => {
-                    if (!(mt in modeByTopic)) {
+                    if (!(mt in modeByTopic) || !(modeByTopic[mt] != null && Number.isFinite(Number(modeByTopic[mt])))) {
                         return "?";
                     }
                     return String(modeByTopic[mt]);
@@ -476,14 +401,17 @@ module.exports = function (RED) {
                 return null;
             }
             const arr = [];
+            let anyKnown = false;
             for (let i = 0; i < zoneCount; i++) {
-                const n = Number(modes[i]);
-                if (!Number.isFinite(n)) {
-                    return null;
+                const n = (modes[i] == null ? null : (Number.isFinite(Number(modes[i])) ? Number(modes[i]) : null));
+                if (n === null) {
+                    arr.push(null);
+                    continue;
                 }
+                anyKnown = true;
                 arr.push(isEcoMode(n) ? 1 : 0);
             }
-            return arr;
+            return anyKnown ? arr : null;
         }
 
         function computeDisplayEcoArray() {
@@ -519,9 +447,11 @@ module.exports = function (RED) {
             if (!lastStreamModes) {
                 syncModeFromInputCache(null, reason || "mode-batch");
             }
-            publishAll(reason || "mode-batch");
             if (isNonCooled) {
+                publishAll(reason || "mode-batch");
                 flushPendingPanelSync(reason || "mode-batch");
+            } else {
+                writeSanDisplayEco(reason || "mode-batch");
             }
         }
 
@@ -544,82 +474,6 @@ module.exports = function (RED) {
 
         function displayServiceKey() {
             return serviceKeyFromTopic(node.displayTopics[0] || "");
-        }
-
-        function supplementHoldKey() {
-            const ek = displayServiceKey();
-            if (ek.startsWith("E1C")) {
-                return "HAC" + ek.slice(3);
-            }
-            if (ek.startsWith("E2C")) {
-                return "HBC" + ek.slice(3);
-            }
-            return "";
-        }
-
-        function touchEcoSince(zoneIdx, eco) {
-            if (eco === 1) {
-                if (!ecoSinceMsByZone[zoneIdx]) {
-                    ecoSinceMsByZone[zoneIdx] = Date.now();
-                }
-            } else if (eco === 0) {
-                ecoSinceMsByZone[zoneIdx] = 0;
-            }
-        }
-
-        function computeHoldEdgeSecForZone(zoneIdx) {
-            if (!isCooled || !isPirZone(zoneIdx)) {
-                return null;
-            }
-            const pt = pirTopicForZone(zoneIdx);
-            const st = pirStateByTopic[pt];
-            let eco = displayEcoByZone[zoneIdx];
-            if (eco === null) {
-                eco = zoneDisplayEco(zoneIdx);
-            }
-            if (st && st.active) {
-                return null;
-            }
-            if (eco === 1) {
-                const since = ecoSinceMsByZone[zoneIdx];
-                if (since > 0) {
-                    return Math.floor(since / 1000);
-                }
-                return null;
-            }
-            if (!st || st.inactiveSince <= 0) {
-                return null;
-            }
-            const deadlineMs = st.inactiveSince + r340HoldSecForZone(zoneIdx) * 1000;
-            return Math.floor(deadlineMs / 1000);
-        }
-
-        function writeHoldSupplement(reason) {
-            if (!isCooled) {
-                return;
-            }
-            const hk = supplementHoldKey();
-            if (!hk) {
-                return;
-            }
-            const reasonStr = String(reason || "");
-            const forcePush = reasonStr === "resync" || reasonStr.indexOf("force") >= 0;
-            const arr = [];
-            let anyChange = forcePush;
-            for (let zi = 0; zi < zoneCount; zi++) {
-                const edgeSec = computeHoldEdgeSecForZone(zi);
-                arr.push(edgeSec);
-                if (lastHoldEdgeSecByZone[zi] !== edgeSec) {
-                    anyChange = true;
-                }
-            }
-            if (!anyChange) {
-                return;
-            }
-            for (let zi = 0; zi < zoneCount; zi++) {
-                lastHoldEdgeSecByZone[zi] = arr[zi];
-            }
-            node.send({ topic: hk, payload: arr });
         }
 
         function modeServiceKey() {
@@ -661,8 +515,12 @@ module.exports = function (RED) {
             let any = false;
             for (let i = 0; i < node.modeTopics.length && i < modes.length; i++) {
                 const mt = node.modeTopics[i];
-                const n = Number(modes[i]);
-                if (!Number.isFinite(n)) {
+                const n = (modes[i] == null ? null : (Number.isFinite(Number(modes[i])) ? Number(modes[i]) : null));
+                if (n === null) {
+                    if (mt in modeByTopic) {
+                        delete modeByTopic[mt];
+                        any = true;
+                    }
                     continue;
                 }
                 const prev = modeByTopic[mt];
@@ -675,66 +533,13 @@ module.exports = function (RED) {
                 }
             }
             if (modes.length >= node.modeTopics.length) {
-                lastStreamModes = modes.slice(0, node.modeTopics.length).map((v) => Number(v));
+                lastStreamModes = modes.slice(0, node.modeTopics.length).map((v) => (v == null ? null : (Number.isFinite(Number(v)) ? Number(v) : null)));
             }
             if (any) {
                 clearDisplayEcoCache();
                 node.warn(`${tag} M sync (${reason || "?"}) ${modeServiceKey()}=${modeSummary()}`);
             }
             return any;
-        }
-
-        function syncR340FromInputCache(uniqueId) {
-            if (node.r340ReadTopics.length === 0) {
-                return false;
-            }
-            const inputStates = resolveInputStates(uniqueId);
-            if (!inputStates) {
-                return false;
-            }
-            let any = false;
-            for (let i = 0; i < node.r340ReadTopics.length; i++) {
-                const topic = node.r340ReadTopics[i];
-                const m = topic.match(/^([A-Z0-9]+W)\.(\d+)$/);
-                if (!m) {
-                    continue;
-                }
-                const svcKey = m[1];
-                const member = Number(m[2]);
-                const st = inputStates[svcKey];
-                const values = st && st.values;
-                if (!Array.isArray(values) || member < 1 || member > values.length) {
-                    continue;
-                }
-                const sec = parseR340Sec(values[member - 1]);
-                if (sec === null) {
-                    continue;
-                }
-                if (r340ByTopic[topic] !== sec) {
-                    r340ByTopic[topic] = sec;
-                    any = true;
-                }
-            }
-            if (any && node.enableDebug) {
-                node.log(`${tag} r340 seeded from input cache`);
-            }
-            return any;
-        }
-
-        function onR340Input(topic, payload) {
-            const sec = parseR340Sec(payload);
-            if (sec === null) {
-                return;
-            }
-            if (r340ByTopic[topic] === sec) {
-                return;
-            }
-            r340ByTopic[topic] = sec;
-            if (node.enableDebug) {
-                node.log(`${tag} r340 ${topic}=${sec}s`);
-            }
-            publishAll("r340 read");
-            updateStatus();
         }
 
         // Fill only missing modeTopics from UDP input_states cache. Do not overwrite members
@@ -756,11 +561,8 @@ module.exports = function (RED) {
                     continue;
                 }
                 const raw = values[i];
-                if (raw == null || raw === "UNKN") {
-                    continue;
-                }
-                const n = Number(raw);
-                if (!Number.isFinite(n)) {
+                const n = (raw == null ? null : (Number.isFinite(Number(raw)) ? Number(raw) : null));
+                if (n === null) {
                     continue;
                 }
                 modeByTopic[mt] = n;
@@ -805,9 +607,12 @@ module.exports = function (RED) {
                         break;
                     }
                 }
-                if (anyKnown) {
+                if (anyKnown && isNonCooled) {
                     // Re-push all E zones with known M (retries failed setup writes).
                     writeDisplayEco("resync");
+                } else if (isCooled) {
+                    syncModeFromInputCache(null, "resync");
+                    writeSanDisplayEco("resync");
                 }
             }, DISPLAY_RESYNC_MS);
         }
@@ -817,6 +622,20 @@ module.exports = function (RED) {
                 return;
             }
             node.send(messages);
+        }
+
+        function fanOutKv(topics, word) {
+            if (!topics || topics.length === 0) {
+                return "";
+            }
+            return topics.map((t) => `${t}=${word}`).join(" ");
+        }
+
+        function logFanOut(action, reason, kvLine) {
+            if (!kvLine) {
+                return;
+            }
+            node.warn(`${tag} fan-out ${action} (${reason}) ${kvLine}`);
         }
 
         function sendTopicPayloads(entries) {
@@ -859,18 +678,22 @@ module.exports = function (RED) {
             if (!topics || topics.length === 0) {
                 return;
             }
-            const forceChange = reason === "force-change" || reason === "comfort-pulse" || isPanelSyncReason(reason);
+            const forceChange = reason === "force-change" || reason === "comfort-pulse" ||
+                isPanelSyncReason(reason) || isLivingValveReason(reason);
             if (!forceChange && lastWrittenWord === word) {
                 return;
             }
             lastWrittenWord = word;
             sendR514ToWriteNode(word, topics);
-            const line = `${tag} W r514=${word} (${reason}) -> ${topics.join(", ")}`;
-            if (forceChange) {
-                node.warn(line);
-            } else if (node.enableDebug) {
-                node.log(line);
+            let action = "W-r514";
+            if (isPanelSyncReason(reason)) {
+                action = "panel-sync";
+            } else if (reason === "comfort-pulse") {
+                action = "comfort-pulse";
+            } else if (isLivingValveReason(reason)) {
+                action = "san-comfort";
             }
+            logFanOut(action, reason, fanOutKv(topics, word));
         }
 
         function writeDisplayEco(reason) {
@@ -883,7 +706,7 @@ module.exports = function (RED) {
                 reasonStr === "comfort-pulse" ||
                 reasonStr.indexOf("comfort-pulse") >= 0;
             const svcKey = displayServiceKey();
-            const fullArr = isCooled ? computeCooledDisplayEcoArray() : computeDisplayEcoArray();
+            const fullArr = computeDisplayEcoArray();
 
             if (fullArr && svcKey && zoneCount > 1) {
                 let anyChange = forcePush;
@@ -900,7 +723,6 @@ module.exports = function (RED) {
                 }
                 for (let zi = 0; zi < zoneCount; zi++) {
                     displayEcoByZone[zi] = fullArr[zi];
-                    touchEcoSince(zi, fullArr[zi]);
                 }
                 node.send({ topic: svcKey, payload: fullArr });
                 node.warn(`${tag} E display (${reason}) -> ${svcKey}=[${fullArr.join(",")}] M=${modeSummary()}`);
@@ -936,7 +758,6 @@ module.exports = function (RED) {
                     continue;
                 }
                 displayEcoByZone[zi] = eco;
-                touchEcoSince(zi, eco);
                 if (node.displayTopics[zi]) {
                     out.push({ topic: node.displayTopics[zi], payload: eco });
                 }
@@ -948,33 +769,37 @@ module.exports = function (RED) {
             node.warn(`${tag} E display (${reason}) -> ${out.map((e) => e.topic + "=" + e.payload).join(", ")}` + ` M=${modeSummary()}`);
         }
 
-        function updateSanitaryR514(reason) {
-            if (!node.sanitaryWriteTopic || node.pirZoneIndices.length === 0) {
+        function writeSanDisplayEco(reason) {
+            if (!isCooled || !node.sanDisplayTopic) {
                 return;
             }
-            let allEco = true;
-            for (let i = 0; i < node.pirZoneIndices.length; i++) {
-                if (zoneComfort(node.pirZoneIndices[i])) {
-                    allEco = false;
-                    break;
-                }
+            const sanTopic = sanModeTopic();
+            if (!sanTopic || !(sanTopic in modeByTopic)) {
+                syncModeFromInputCache(lastInputUniqueId || null, reason || "san-display");
             }
-            const word = allEco ? R514_ECO : R514_COMFORT;
-            if (lastSanitaryWord === word) {
+            if (!sanTopic || !(sanTopic in modeByTopic)) {
                 return;
             }
-            lastSanitaryWord = word;
-            sendOut([{ topic: node.sanitaryWriteTopic, payload: word }]);
+            const eco = isEcoMode(modeByTopic[sanTopic]) ? 1 : 0;
+            const reasonStr = String(reason || "");
+            const forcePush = reasonStr === "resync" || reasonStr === "mode-batch" ||
+                reasonStr.indexOf("force") >= 0 || reasonStr.indexOf("panel-sync") >= 0;
+            if (!forcePush && lastSanDisplayEco === eco) {
+                return;
+            }
+            lastSanDisplayEco = eco;
+            node.send({ topic: node.sanDisplayTopic, payload: eco });
             if (node.enableDebug) {
-                node.log(`${tag} sanitary r514=${word} (${reason})`);
+                node.log(`${tag} san display (${reason}) -> ${node.sanDisplayTopic}=${eco}`);
             }
         }
 
         function publishAll(reason) {
-            writeDisplayEco(reason);
+            if (isNonCooled) {
+                writeDisplayEco(reason);
+            }
             if (isCooled) {
-                updateSanitaryR514(reason);
-                writeHoldSupplement(reason);
+                writeSanDisplayEco(reason);
             }
         }
 
@@ -989,12 +814,10 @@ module.exports = function (RED) {
             stopNonCooledPulseTimer();
             if (writeClear !== false && node.forceTopic) {
                 node.send({ topic: node.forceTopic, payload: 0 });
+                logFanOut("P-clear", reason || "comfort-pulse-end", `${node.forceTopic}=0`);
             }
             publishAll(reason || "comfort-pulse-end");
             updateStatus();
-            if (node.enableDebug) {
-                node.log(`${tag} non-cooled comfort pulse end (${reason || "?"})`);
-            }
         }
 
         function onNonCooledComfortPulse(val, source) {
@@ -1003,7 +826,10 @@ module.exports = function (RED) {
                     return;
                 }
                 if (node.writeTopics.length > 0) {
-                    writeR514(R514_COMFORT, node.writeTopics, "comfort-pulse");
+                    const topics = writeTopicsNeedingWord(R514_COMFORT);
+                    if (topics.length > 0) {
+                        writeR514(R514_COMFORT, topics, "comfort-pulse");
+                    }
                 }
                 stopNonCooledPulseTimer();
                 nonCooledPulseTimer = setTimeout(() => {
@@ -1012,42 +838,11 @@ module.exports = function (RED) {
                 }, COMFORT_PULSE_SEC * 1000);
                 publishAll("comfort-pulse");
                 updateStatus();
-                node.warn(`${tag} non-cooled comfort pulse start (${source}) ` + `${COMFORT_PULSE_SEC}s -> ${node.writeTopics.join(",") || "?"}`);
                 return;
             }
             stopNonCooledPulseTimer();
             publishAll(source || "comfort-pulse-off");
             updateStatus();
-        }
-
-        function onPirInput(topic, payload) {
-            const active = pirActive(payload);
-            const st = getPirState(topic);
-            if (!pirSeenByTopic[topic]) {
-                pirSeenByTopic[topic] = true;
-                st.active = active;
-                if (active) {
-                    st.inactiveSince = Date.now();
-                } else {
-                    st.inactiveSince = PIR_DEFAULT_INACTIVE_SINCE;
-                }
-                savePirHoldToContext();
-                if (node.enableDebug) {
-                    node.log(`${tag} PIR first sample ${topic}=${active ? 1 : 0}`);
-                }
-                publishAll(topic);
-                return;
-            }
-            if (active === st.active) {
-                return;
-            }
-            st.active = active;
-            st.inactiveSince = Date.now();
-            savePirHoldToContext();
-            if (node.enableDebug) {
-                node.log(`${tag} PIR ${topic}=${active ? 1 : 0}`);
-            }
-            publishAll(topic);
         }
 
         function stopComfortPulseTimer() {
@@ -1057,51 +852,29 @@ module.exports = function (RED) {
             }
         }
 
-        function forceComfortAllPirZones(reason) {
-            for (let i = 0; i < node.pirTopics.length; i++) {
-                const topic = node.pirTopics[i];
-                const st = getPirState(topic);
-                pirSeenByTopic[topic] = true;
-                st.active = true;
-                st.inactiveSince = Date.now();
-            }
-            savePirHoldToContext();
-            publishAll(reason || "comfort-pulse");
-        }
-
-        function endComfortPulse(reason, writeClear) {
-            stopComfortPulseTimer();
-            const now = Date.now();
-            for (let i = 0; i < node.pirTopics.length; i++) {
-                const topic = node.pirTopics[i];
-                const st = getPirState(topic);
-                if (st.active) {
-                    st.active = false;
-                    st.inactiveSince = now;
-                }
-            }
-            savePirHoldToContext();
-            if (writeClear !== false && node.comfortPulseTopic) {
-                node.send({ topic: node.comfortPulseTopic, payload: 0 });
-            }
-            publishAll(reason || "comfort-pulse-end");
-            updateStatus();
-            if (node.enableDebug) {
-                node.log(`${tag} comfort pulse end (${reason || "?"})`);
-            }
-        }
-
         function startComfortPulse(source) {
-            forceComfortAllPirZones(source);
+            if (!node.comfortPulseTopic || comfortPulseTimer) {
+                return;
+            }
+            node.send({ topic: node.comfortPulseTopic, payload: 1 });
+            logFanOut("comfort-pulse", source, `${node.comfortPulseTopic}=1`);
             stopComfortPulseTimer();
             comfortPulseTimer = setTimeout(() => {
                 comfortPulseTimer = null;
-                endComfortPulse("comfort-pulse-timeout");
+                node.send({ topic: node.comfortPulseTopic, payload: 0 });
+                logFanOut("comfort-pulse", "comfort-pulse-timeout", `${node.comfortPulseTopic}=0`);
+                updateStatus();
             }, COMFORT_PULSE_SEC * 1000);
             updateStatus();
-            if (node.enableDebug) {
-                node.log(`${tag} comfort pulse start (${source}) ${COMFORT_PULSE_SEC}s`);
+        }
+
+        function endComfortPulse(source, writeClear) {
+            stopComfortPulseTimer();
+            if (writeClear !== false && node.comfortPulseTopic) {
+                node.send({ topic: node.comfortPulseTopic, payload: 0 });
+                logFanOut("comfort-pulse", source || "comfort-pulse-end", `${node.comfortPulseTopic}=0`);
             }
+            updateStatus();
         }
 
         function onComfortPulseInput(payload, source) {
@@ -1125,28 +898,6 @@ module.exports = function (RED) {
             scheduleModeBatch(topic);
         }
 
-        function onPirTick() {
-            if (!isCooled || node.pirTopics.length === 0) {
-                return;
-            }
-            let anyChange = false;
-            for (let zi = 0; zi < zoneCount; zi++) {
-                if (!isPirZone(zi)) {
-                    continue;
-                }
-                const nextEco = zoneDisplayEco(zi);
-                if (nextEco !== null && displayEcoByZone[zi] !== nextEco) {
-                    anyChange = true;
-                    break;
-                }
-            }
-            if (anyChange) {
-                publishAll("r340 tick");
-            } else {
-                updateSanitaryR514("r340 tick");
-            }
-        }
-
         function updateStatus() {
             if (isNonCooled && node.forceTopic) {
                 const pulseText = nonCooledPulseTimer ? " comfort pulse" : "";
@@ -1157,14 +908,12 @@ module.exports = function (RED) {
                 });
                 return;
             }
-            if (isCooled && node.pirTopics.length > 0) {
-                const anyComfort = node.pirZoneIndices.some((zi) => zoneComfort(zi));
-                const pulseText = comfortPulseTimer ? " comfort pulse" : "";
-                const r340Txt = node.r340ReadTopics.length > 0 ? ` r340=${r340HoldSummarySec()}s` : "";
+            if (isCooled) {
+                const pulseText = comfortPulseTimer ? " P pulse" : "";
                 node.status({
-                    fill: anyComfort ? "green" : "yellow",
+                    fill: comfortPulseTimer ? "green" : "yellow",
                     shape: node.enableDebug ? "ring" : "dot",
-                    text: `${node.flatType} ${node.flatNumber || "?"} PIR${r340Txt}${pulseText}`
+                    text: `${node.flatType} ${node.flatNumber || "?"} cooled${pulseText}`
                 });
                 return;
             }
@@ -1206,15 +955,10 @@ module.exports = function (RED) {
                 return;
             }
 
-            if (node.pirTopics.indexOf(t) >= 0) {
-                onPirInput(t, msg.payload);
-                updateStatus();
-                return;
-            }
-
-            if (node.r340ReadTopics.indexOf(t) >= 0) {
+            if (isCooled && node.valveTopics.indexOf(t) >= 0) {
                 rememberController(msg);
-                onR340Input(t, msg.payload);
+                onValveInput(t, msg.payload, t);
+                updateStatus();
                 return;
             }
 
@@ -1223,15 +967,22 @@ module.exports = function (RED) {
                 if (Array.isArray(msg.streamValues) && msg.streamValues.length > 0) {
                     applyModeValues(msg.streamValues, t);
                 } else {
-                    const n = Number(msg.payload);
-                    if (Number.isFinite(n) && modeByTopic[t] !== n) {
+                    const n = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                    if (n === null) {
+                        if (t in modeByTopic) {
+                            delete modeByTopic[t];
+                            clearDisplayEcoCache();
+                            lastStreamModes = null;
+                            rebuildLastStreamModesFromTopics();
+                        }
+                    } else if (modeByTopic[t] !== n) {
                         const prev = modeByTopic[t];
                         modeByTopic[t] = n;
                         noteModeTopicChange(t, n, prev);
                         clearDisplayEcoCache();
                         lastStreamModes = null;
                         rebuildLastStreamModesFromTopics();
-                    } else if (Number.isFinite(n)) {
+                    } else {
                         prevModeByTopic[t] = n;
                     }
                 }
@@ -1241,24 +992,23 @@ module.exports = function (RED) {
             }
         });
 
-        if (isCooled && node.pirTopics.length > 0) {
-            syncR340FromInputCache(lastInputUniqueId);
-            const restored = loadPirHoldFromContext();
-            publishAll(restored ? "pir-restore" : "startup");
-            pirTimer = setInterval(onPirTick, PIR_TICK_MS);
+        if (isNonCooled) {
+            publishAll("startup");
+        } else if (isCooled) {
+            writeSanDisplayEco("startup");
         }
 
         node.log(
             `${tag} started v${THERMOKON_FLAT_VERSION} type=${node.flatType} flat=${node.flatNumber || "?"}` +
-                ` zones=${zoneCount} PIR=${node.pirTopics.length} r340=${r340HoldSummarySec()}s` +
-                ` r340Topics=${node.r340ReadTopics.length ? node.r340ReadTopics.join(",") : "none"}` +
-                ` comfortPulse=${node.comfortPulseTopic || "none"} force=${node.forceTopic || "none"}`
+            ` zones=${zoneCount}` +
+            ` valves=${node.valveTopics.length}` +
+            ` comfortPulse=${node.comfortPulseTopic || "none"} force=${node.forceTopic || "none"}`
         );
-        if (isCooled && node.pirTopics.length > 0 && node.r340ReadTopics.length === 0) {
-            node.warn(`${tag} cooled flat missing WAC/WBC r340 read topics`);
-        }
         if (isNonCooled && (!node.forceTopic || node.writeTopics.length === 0)) {
             node.warn(`${tag} non-cooled flat missing P comfort topic or W r514 writeTopics`);
+        }
+        if (isCooled && node.sanitaryWriteTopic && node.valveTopics.length === 0) {
+            node.warn(`${tag} cooled flat missing valveTopics for L4 san r514 follow`);
         }
         updateStatus();
         startDisplayResyncTimer();
@@ -1268,10 +1018,6 @@ module.exports = function (RED) {
             stopModeBatchTimer();
             stopComfortPulseTimer();
             stopNonCooledPulseTimer();
-            if (pirTimer) {
-                clearInterval(pirTimer);
-                pirTimer = null;
-            }
             node.status({});
         });
     }

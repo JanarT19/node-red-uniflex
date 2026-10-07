@@ -31,7 +31,7 @@ module.exports = function (RED) {
         node.currentTimeWidth = parseInt(config.currentTimeWidth) || 2;
         node.enableLogging = config.enableLogging !== false;
 
-        const VERSION = "0.3.0";
+        const VERSION = "0.3.1-plan-cover";
         const log = (msg) => node.enableLogging && node.log(`[diagram-creator v${VERSION}] ${msg}`);
         const warn = (msg) => node.warn(`[diagram-creator v${VERSION}] ${msg}`);
         const err = (msg) => node.error(`[diagram-creator v${VERSION}] ${msg}`);
@@ -94,10 +94,18 @@ module.exports = function (RED) {
         // Matches the format expected by webui renderer (Google Charts options)
         function generateSettings() {
             if (node.chartType === "timeline") {
-                // Timeline chart settings (onoff.settings.json format)
+                // Timeline chart settings (onoff.settings.json format).
+                // Three rows plus the time axis fit in about 190 px. A taller chart
+                // leaves an empty band under the last row.
+                const timelineRows = [];
+                for (const s of node.timelineSeries || []) {
+                    const label = (s.rowLabel || s.title || "").trim();
+                    if (label && timelineRows.indexOf(label) < 0) timelineRows.push(label);
+                }
+                const autoHeight = 32 + timelineRows.length * 52;
                 const settings = {
                     width: node.chartWidth,
-                    height: node.chartHeight,
+                    height: Math.max(node.chartHeight || 0, autoHeight),
                     backgroundColor: node.backgroundColor,
                     fontSize: 16,
                     hAxis: {
@@ -269,7 +277,7 @@ module.exports = function (RED) {
                 // ================================================================
                 if (node.chartType === "timeline") {
                     // Timeline format: [Role, Name (kWh label), Style, Start, End]
-                    // The Name column shows the kWh value on the bar
+                    // Event value is planned or actual kWh ("1.5"). Non-zero means the block is ON.
                     const columns = [
                         { type: "string", id: "Role" },
                         { type: "string", id: "Name" }, // Will contain kWh value
@@ -279,7 +287,10 @@ module.exports = function (RED) {
                     ];
 
                     const rows = [];
+                    const bars = [];
                     const seriesToQuery = node.timelineSeries || [];
+                    const rowLabels = [];
+                    const rowHasSpan = {};
 
                     // Add invisible placeholder rows at start and end to define chart time range
                     // These use the first series' row label with opacity: 0
@@ -293,6 +304,7 @@ module.exports = function (RED) {
                         if (!s.title) continue;
 
                         const rowLabel = s.rowLabel || s.title;
+                        if (rowLabels.indexOf(rowLabel) < 0) rowLabels.push(rowLabel);
                         // Format style for Google Charts: if just a color like "#ff0000", convert to CSS style
                         let style = s.style || null;
                         if (style && /^#[0-9a-fA-F]{3,6}$/.test(style.trim())) {
@@ -347,47 +359,151 @@ module.exports = function (RED) {
                                     if (evtEnd < startTs || evtStart > endTs) continue;
 
                                     // Log raw event timestamps before clipping
-                                    log(`  ${s.title} event: ${fmtTs(evtStart)} (ts=${evtStart}) → ${fmtTs(evtEnd)} (ts=${evtEnd})`);
+                                    log(`  ${s.title} event: ${fmtTs(evtStart)} (ts=${evtStart}) -> ${fmtTs(evtEnd)} (ts=${evtEnd})`);
 
                                     // Clip to time range
                                     evtStart = Math.max(evtStart, startTs);
                                     evtEnd = Math.min(evtEnd, endTs);
 
-                                    const startISO = toLocalISOString(evtStart);
-                                    const endISO = toLocalISOString(evtEnd);
-
-                                    // Use value as-is from calendar (mpc-house formats as "E kWh (P kW)")
-                                    // For numeric values, add " kWh" suffix for display
+                                    // Value is kWh (number or numeric string). Legacy "1.2 kWh (...)" still parses.
                                     let displayValue = "";
-                                    if (evt.value !== undefined && evt.value !== null && evt.value !== 1) {
-                                        if (typeof evt.value === "string") {
-                                            // Already formatted string from mpc-house
+                                    if (evt.value !== undefined && evt.value !== null && evt.value !== "") {
+                                        const num = typeof evt.value === "number" ? evt.value : parseFloat(String(evt.value).trim());
+                                        if (Number.isFinite(num)) {
+                                            displayValue = num.toFixed(1) + " kWh";
+                                        } else if (typeof evt.value === "string") {
                                             displayValue = evt.value;
-                                        } else {
-                                            // Legacy numeric value - format with kWh
-                                            displayValue = `${Math.round(evt.value)} kWh`;
                                         }
                                     }
 
-                                    rows.push([rowLabel, displayValue, style, startISO, endISO]);
-                                    eventCount++;
+                                    if (evtEnd > evtStart) {
+                                        bars.push({
+                                            rowLabel: rowLabel,
+                                            title: s.title,
+                                            displayValue: displayValue,
+                                            style: style,
+                                            start: evtStart,
+                                            end: evtEnd
+                                        });
+                                        eventCount++;
+                                    }
                                 }
                                 log(`Timeline: ${eventCount} events for ${s.title} (${rowLabel})`);
                             } else {
-                                // Add placeholder rows to ensure the row appears in chart
-                                // (invisible events at start and end of range)
-                                const startISO = toLocalISOString(startTs);
-                                const endISO = toLocalISOString(endTs);
-                                rows.push([rowLabel, "", "opacity: 0", startISO, startISO]);
-                                rows.push([rowLabel, "", "opacity: 0", endISO, endISO]);
-                                log(`Timeline: no events for ${s.title}, added placeholders`);
+                                log(`Timeline: no events for ${s.title}`);
                             }
                         } catch (e) {
                             warn(`Failed to load timeline series ${s.title}: ${e.message}`);
-                            // Add placeholder
-                            const startISO = toLocalISOString(startTs);
-                            rows.push([rowLabel, "", "opacity: 0", startISO, startISO]);
                         }
+                    }
+
+                    // Plan (_ena) yields to actual (_run) on the same row. Google Charts
+                    // opens a second track for any time overlap, which pushes later rows
+                    // (SaunaPreheat) out of the fixed chart height. A light plan bar
+                    // remains only in the minutes the actual run does not occupy.
+                    function mergeSpans(spans) {
+                        const sorted = spans.filter((s) => s[1] > s[0]).sort((a, b) => a[0] - b[0]);
+                        const out = [];
+                        for (let i = 0; i < sorted.length; i++) {
+                            const s = sorted[i];
+                            if (out.length === 0 || s[0] > out[out.length - 1][1]) {
+                                out.push([s[0], s[1]]);
+                            } else if (s[1] > out[out.length - 1][1]) {
+                                out[out.length - 1][1] = s[1];
+                            }
+                        }
+                        return out;
+                    }
+
+                    function subtractSpans(start, end, covers) {
+                        let pieces = [[start, end]];
+                        for (let i = 0; i < covers.length; i++) {
+                            const cs = covers[i][0];
+                            const ce = covers[i][1];
+                            const next = [];
+                            for (let p = 0; p < pieces.length; p++) {
+                                const ps = pieces[p][0];
+                                const pe = pieces[p][1];
+                                if (ce <= ps || cs >= pe) {
+                                    next.push([ps, pe]);
+                                    continue;
+                                }
+                                if (cs > ps) next.push([ps, cs]);
+                                if (ce < pe) next.push([ce, pe]);
+                            }
+                            pieces = next;
+                        }
+                        return pieces.filter((s) => s[1] > s[0]);
+                    }
+
+                    const byRow = {};
+                    for (let i = 0; i < bars.length; i++) {
+                        const b = bars[i];
+                        if (!byRow[b.rowLabel]) byRow[b.rowLabel] = [];
+                        byRow[b.rowLabel].push(b);
+                    }
+
+                    for (let r = 0; r < rowLabels.length; r++) {
+                        const label = rowLabels[r];
+                        const group = byRow[label] || [];
+                        const actualSpans = [];
+                        for (let i = 0; i < group.length; i++) {
+                            if (/_run$/.test(group[i].title) && group[i].end > group[i].start) {
+                                actualSpans.push([group[i].start, group[i].end]);
+                            }
+                        }
+                        const covers = mergeSpans(actualSpans);
+                        for (let i = 0; i < group.length; i++) {
+                            const b = group[i];
+                            if (/_ena$/.test(b.title) && covers.length > 0) {
+                                const pieces = subtractSpans(b.start, b.end, covers);
+                                if (pieces.length === 0) {
+                                    log(`Timeline: plan ${b.title} fully covered by actual on ${label}`);
+                                    continue;
+                                }
+                                if (pieces.length !== 1 || pieces[0][0] !== b.start || pieces[0][1] !== b.end) {
+                                    log(`Timeline: plan ${b.title} covered by actual on ${label}, ${pieces.length} piece(s) left`);
+                                }
+                                let labelIdx = 0;
+                                let labelLen = -1;
+                                for (let p = 0; p < pieces.length; p++) {
+                                    const len = pieces[p][1] - pieces[p][0];
+                                    if (len > labelLen) {
+                                        labelLen = len;
+                                        labelIdx = p;
+                                    }
+                                }
+                                for (let p = 0; p < pieces.length; p++) {
+                                    rows.push([
+                                        label,
+                                        p === labelIdx ? b.displayValue : "",
+                                        b.style,
+                                        toLocalISOString(pieces[p][0]),
+                                        toLocalISOString(pieces[p][1])
+                                    ]);
+                                    rowHasSpan[label] = true;
+                                }
+                            } else {
+                                rows.push([
+                                    label,
+                                    b.displayValue,
+                                    b.style,
+                                    toLocalISOString(b.start),
+                                    toLocalISOString(b.end)
+                                ]);
+                                if (b.end > b.start) rowHasSpan[label] = true;
+                            }
+                        }
+                    }
+
+                    // Google Charts drops a row whose bars all have equal start and end.
+                    // One invisible bar across the window keeps an empty row, such as GasHeater.
+                    const emptyEndISO = endTs > startTs ? endISORng : toLocalISOString(startTs + 60);
+                    for (let i = 0; i < rowLabels.length; i++) {
+                        const label = rowLabels[i];
+                        if (rowHasSpan[label]) continue;
+                        rows.push([label, "", "opacity: 0", startISORng, emptyEndISO]);
+                        log(`Timeline: empty row ${label}`);
                     }
 
                     rowCount = rows.length;
@@ -489,12 +605,18 @@ module.exports = function (RED) {
                             const isPrice = s.type === "price" || s.type == null;
                             const toEurMwh = (v) => (isPrice && v != null ? v / 100 : v);
 
-                            // Use the current timestamp for data lookup
+                            // Use the current timestamp for data lookup.
+                            // Measured series are 0 after now. A null is dropped by the
+                            // stepped chart, which then keeps the last kW to the right edge.
+                            // Plans still hold their last value.
                             const lookupTs = ts;
+                            const isActual = s.title.indexOf("actual_") === 0;
 
                             let value = null;
                             let usedTs = null;
-                            if (dataMap.has(lookupTs)) {
+                            if (isActual && lookupTs > now) {
+                                value = 0;
+                            } else if (dataMap.has(lookupTs)) {
                                 value = dataMap.get(lookupTs);
                                 usedTs = lookupTs;
                             } else {

@@ -344,8 +344,8 @@ module.exports = function (RED) {
                 return;
             }
             if (t === node.setpointTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) latestSetpoint = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) latestSetpoint = v;
                 if (awaitingSetpointAfterTick && pendingPeriodSec) {
                     verbose(`setpoint received (${v}) after tick → calling computeAndAct(${pendingPeriodSec})`);
                     awaitingSetpointAfterTick = false;
@@ -355,39 +355,43 @@ module.exports = function (RED) {
                 return;
             }
             if (t === node.returnTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) {
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) {
                     latestReturn = v;
                     updateSurfaceEstimate(v, Math.floor(Date.now() / 1000));
                 }
                 return;
             }
             if (t === node.roomErrorTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) roomErrorC = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) roomErrorC = v;
                 return;
             }
             if (t === node.roomSetpointTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) latestRoomSetpoint = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) latestRoomSetpoint = v;
                 return;
             }
             if (t === node.roomActualTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) latestRoomActual = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) latestRoomActual = v;
                 return;
             }
             if (t === node.coolingModeTopic) {
-                coolingMode = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                coolingMode = !!bit;
                 return;
             }
             if (t === node.dewPointTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) dewPointC = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) dewPointC = v;
                 return;
             }
             if (t === node.forceOpenTopic) {
-                const v = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                const v = !!bit;
                 if (forceOpenRoom === v) return;
                 forceOpenRoom = v;
                 node.log(`[mpc-floor:${node.name}] force open (room) ${v ? 1 : 0} (topic=${t})`);
@@ -398,7 +402,9 @@ module.exports = function (RED) {
                 return;
             }
             if (t === node.supervisorForceOpenTopic) {
-                const v = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                const v = !!bit;
                 if (forceOpenSupervisor === v) return;
                 forceOpenSupervisor = v;
                 node.log(`[mpc-floor:${node.name}] force open (supervisor) ${v ? 1 : 0} (topic=${t})`);
@@ -409,7 +415,9 @@ module.exports = function (RED) {
                 return;
             }
             if (t === node.forceCloseTopic) {
-                const v = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                const v = !!bit;
                 if (forceClose === v) return;
                 forceClose = v;
                 node.log(`[mpc-floor:${node.name}] force close ${v ? 1 : 0} (topic=${t})`);
@@ -420,7 +428,9 @@ module.exports = function (RED) {
                 return;
             }
             if (node.verboseLoggingTopic && t === node.verboseLoggingTopic) {
-                node._verboseFromMsg = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                node._verboseFromMsg = !!bit;
                 verbose(`verbose logging ${node._verboseFromMsg ? "ON" : "OFF"} (from topic)`);
                 return;
             }

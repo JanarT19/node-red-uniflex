@@ -1,0 +1,200 @@
+<style>
+    .comfort-mgr-table { border-collapse: collapse; width: 100%; margin: 4px 0 10px 0; }
+    .comfort-mgr-table th, .comfort-mgr-table td { padding: 3px 10px; text-align: left; border-bottom: 1px solid #ddd; }
+    .comfort-mgr-table input[type="checkbox"] {
+        width: 16px !important;
+        height: 16px !important;
+        margin: 0 !important;
+        vertical-align: middle;
+    }
+</style>
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-comfort-manager", {
+        category: "heating-control",
+        color: "#87CEEB",
+        defaults: {
+            name: { value: "comfort manager" },
+            roomRows: { value: "" },
+            roomToFowMap: { value: "" },
+            avgErrTopic: { value: "TERW.1" },
+            coolLimitTopic: { value: "TERW.3" },
+            coolPriceLimit: { value: 50, required: true },
+            coolPriceHyst: { value: 5, required: true },
+            staleThresholdHours: { value: 2, required: true },
+            spotPriceTopic: { value: "PRENW.3" },
+            hcmwForceHeatTopic: { value: "HCMW.1" },
+            hcmwForceCoolTopic: { value: "HCMW.2" },
+            coolingRequiredTopic: { value: "heating/coolingRequired" },
+            heatOutTopic: { value: "MPCGW.8" },
+            coolOutTopic: { value: "MPCGW.9" }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-th",
+        label: function () {
+            return this.name || "comfort manager";
+        },
+        paletteLabel: "comfort manager",
+        oneditprepare: function () {
+            const defaults = [
+                { name: "M3_air", heat: true, cool: true },
+                { name: "M2_air", heat: true, cool: true },
+                { name: "1k_shower_air", heat: true, cool: true },
+                { name: "kab_air", heat: true, cool: true },
+                { name: "M1_air", heat: true, cool: true },
+                { name: "rodu_air", heat: true, cool: true },
+                { name: "2k_dush", heat: true, cool: true },
+                { name: "elu_air", heat: true, cool: true },
+                { name: "hall_air", heat: true, cool: true },
+                { name: "MB_air", heat: true, cool: true },
+                { name: "MBgarde_air", heat: true, cool: true },
+                { name: "MBvann_air", heat: true, cool: true },
+                { name: "WG_air", heat: false, cool: false }
+            ];
+            let rows = [];
+            try {
+                const raw = (this.roomRows || "").trim();
+                if (raw) rows = JSON.parse(raw);
+            } catch (e) {
+                rows = [];
+            }
+            if (!Array.isArray(rows) || rows.length === 0) rows = defaults;
+
+            const tbody = $("#comfort-room-table tbody");
+            tbody.empty();
+            rows.forEach(function (r) {
+                const name = String(r.name || "").trim();
+                if (!name) return;
+                const tr = $("<tr/>");
+                tr.append($("<td/>").text(name).attr("data-name", name));
+                tr.append(
+                    $("<td/>").append(
+                        $('<input type="checkbox" class="room-heat">')
+                            .prop("checked", !!r.heat)
+                            .attr("title", "Counts toward heating demand. HCMW.1 holds this room's floor feedforward at the full charge amount.")
+                    )
+                );
+                tr.append(
+                    $("<td/>").append(
+                        $('<input type="checkbox" class="room-cool">')
+                            .prop("checked", !!r.cool)
+                            .attr("title", "Auto-open when hot and the price is low. HCMW.2 forces this room's valve open.")
+                    )
+                );
+                tbody.append(tr);
+            });
+        },
+        oneditsave: function () {
+            const rows = [];
+            $("#comfort-room-table tbody tr").each(function () {
+                const name = $(this).find("td").first().attr("data-name");
+                if (!name) return;
+                rows.push({
+                    name: name,
+                    heat: $(this).find(".room-heat").prop("checked") === true,
+                    cool: $(this).find(".room-cool").prop("checked") === true
+                });
+            });
+            $("#node-input-roomRows").val(JSON.stringify(rows));
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-comfort-manager">
+    <div class="form-row">
+        <div title="Decides which rooms may be heated or cooled. Heat tick feeds the house heating demand and, while HCMW.1 is on, raises that room's floor feedforward. Cool tick allows auto-open when the room is hot and the price is low, and forces the valve open while HCMW.2 is on. Room temperatures are read from the room forecasts. Wire the input from the link that carries HCMW.1, HCMW.2 and the spot price."
+            style="margin:0 0 8px 0; color:#555;">
+            Which rooms may be heated or cooled, on their own or from HCMW.
+            Auto-cool uses TERW.1 against TERW.3, with a 0.1 C band.
+            Wire the input from the link that carries HCMW, TERW and the spot price.
+        </div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-name" title="Canvas label only."><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="comfort manager" title="Canvas label only.">
+    </div>
+    <div class="form-row" style="display:block;">
+        <input type="hidden" id="node-input-roomRows">
+        <table class="comfort-mgr-table" id="comfort-room-table">
+            <thead>
+                <tr>
+                    <th title="mpc-room-advanced node name">Room</th>
+                    <th title="Counts toward heating demand. While HCMW.1 is on, floor feedforward stays at the full charge amount.">Heat</th>
+                    <th title="Included when auto-cool opens the floors. While HCMW.2 is on, the valve is forced open.">Cool</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    <div class="form-row">
+        <label for="node-input-avgErrTopic" title="Live average room temperature error, degrees C. Auto-cool compares this with the limit.">Avg error in</label>
+        <input type="text" id="node-input-avgErrTopic" placeholder="TERW.1" title="Default TERW.1. Must arrive on the input wire.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolLimitTopic" title="Cooling starts only above this limit plus 0.1 C, and stops only below it minus 0.1 C. Values in between, including equality, keep the previous state.">Cool limit in</label>
+        <input type="text" id="node-input-coolLimitTopic" placeholder="TERW.3" title="Default TERW.3, the hilim. Must arrive on the input wire.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolPriceLimit" title="Auto cooling is allowed only while the spot price is below this. HCMW.2 ignores the price.">Price on (EUR/MWh)</label>
+        <input type="number" id="node-input-coolPriceLimit" step="1" style="width:80px" title="Spot price must be below this for auto cooling. Default 50.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolPriceHyst" title="Once auto cooling is allowed, it stays allowed until the price rises above price-on plus this.">Price hysteresis</label>
+        <input type="number" id="node-input-coolPriceHyst" step="1" style="width:80px" title="EUR/MWh added to the price-on limit before auto cooling is blocked again. Default 5.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-staleThresholdHours" title="Room forecasts older than this are ignored. If no heat-ticked room is fresh, heating demand is forced on.">Stale forecast (h)</label>
+        <input type="number" id="node-input-staleThresholdHours" style="width:80px" title="Hours. Default 2.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomToFowMap" title="JSON object of room name to FOW topic list. Leave empty to use the built-in k20 map. A cool tick with no entry here cannot open a valve.">Room to FOW map</label>
+        <input type="text" id="node-input-roomToFowMap" placeholder="empty = k20 defaults" title="Example: {&quot;elu_air&quot;:[&quot;FOW.2&quot;]}. Empty uses the built-in map.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-spotPriceTopic" title="Input topic for the electricity spot price used by the auto-cooling price gate.">Spot price in</label>
+        <input type="text" id="node-input-spotPriceTopic" placeholder="PRENW.3" title="Must arrive on the input wire. Default PRENW.3.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-hcmwForceHeatTopic" title="Input topic. While this is 1, heat-ticked rooms get the full charge feedforward so the floors take heat.">HCMW force heat</label>
+        <input type="text" id="node-input-hcmwForceHeatTopic" placeholder="HCMW.1" title="Default HCMW.1. Must arrive on the input wire.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-hcmwForceCoolTopic" title="Input topic. While this is 1, cool-ticked room valves are forced open and their feedforward goes negative. If both HCMW bits are on, cooling wins.">HCMW force cool</label>
+        <input type="text" id="node-input-hcmwForceCoolTopic" placeholder="HCMW.2" title="Default HCMW.2. Must arrive on the input wire.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolingRequiredTopic" title="Output 0/1 for hp-control auto cooling. Stays 0 while HCMW force heat or force cool is on, because those bits drive the heat pump directly.">Cooling required out</label>
+        <input type="text" id="node-input-coolingRequiredTopic" placeholder="heating/coolingRequired" title="Also stored on the flow context as coolingRequired.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-heatOutTopic" title="Monitor output, 1 when any heat-ticked room is cold or will go cold.">Heat monitor out</label>
+        <input type="text" id="node-input-heatOutTopic" placeholder="MPCGW.8" title="Also stored on the flow context as heatingRequired, which mpc-house reads.">
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolOutTopic" title="Monitor output, 1 while auto cooling is active.">Cool monitor out</label>
+        <input type="text" id="node-input-coolOutTopic" placeholder="MPCGW.9" title="Same value as cooling required. Forced HCMW cooling does not set this bit.">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-comfort-manager">
+    <p>Which rooms may be heated or cooled, automatically or from HCMW.</p>
+    <p><b>Heat</b> tick: the room counts toward <code>heatingRequired</code> (read by mpc-house).
+    While <code>HCMW.1</code> is on, that room's floor feedforward is held at the full charge amount
+    so the valves open and the heat pump actually heats the house.</p>
+    <p><b>Cool</b> tick: the room is opened when auto-cool is on.
+    Auto-cool follows <code>TERW.1</code> against <code>TERW.3</code>.
+    It starts only more than 0.1 C above the limit, and stops only more than 0.1 C below it.
+    The spot price must also be under the limit.
+    While <code>HCMW.2</code> is on, those valves are forced open.
+    While <code>HCMW.1</code> is on, auto-cool stays off.</p>
+    <h3>Input</h3>
+    <p>Wire the input from the same link that already feeds hp-control (<code>HCMW.1</code>,
+    <code>HCMW.2</code>, <code>TERW.1</code>, <code>TERW.3</code>, <code>PRENW.3</code>).
+    Other topics on that wire are ignored.
+    Heating still reads room forecasts written by mpc-room-advanced.
+    The node also checks on its own, 15 s after start and then every 5 min.</p>
+    <h3>Output</h3>
+    <p>One output carries <code>MPCGW.8</code> (heating demand), <code>heating/coolingRequired</code> and
+    <code>MPCGW.9</code> (auto cooling), and <code>FOW.n</code> valve force-open. Wire it to the
+    write node and to hp-control, the same way the old overheat checker was wired.</p>
+</script>

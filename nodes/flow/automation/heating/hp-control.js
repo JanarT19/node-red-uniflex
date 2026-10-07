@@ -1,5 +1,5 @@
 const ts = require("../../core/lib/timestamp.js");
-const NODE_VERSION = "2.3.0-room-cool-arb";
+const NODE_VERSION = "2.3.7-test-pwm";
 module.exports = function (RED) {
     const fs = require("fs");
     const path = require("path");
@@ -13,15 +13,15 @@ module.exports = function (RED) {
         node.tankSetpointTopic = (config.tankSetpointTopic || "").trim(); // From mpc-house
         node.targetTopic = (config.targetTopic || config.tankTargetTopic || config.heatTargetTopic || "").trim();
         // Tank setpoint to HP setpoint conversion (heat exchanger temperature drop)
-        node.deltaT_base = Math.max(0, cfgNum(config.deltaT_base, 4.0)); // °C base offset
-        node.deltaT_slope = Math.max(0, cfgNum(config.deltaT_slope, 0.3)); // °C per kW
+        node.deltaT_base = Math.max(0, cfgNum(config.deltaT_base, 4.0)); // C base offset
+        node.deltaT_slope = Math.max(0, cfgNum(config.deltaT_slope, 0.3)); // C per kW
         node.enableCmdTopic = (config.enableCmdTopic || config.enableHeatCmdTopic || "").trim();
         node.hcmwForceHeatTopic = (config.hcmwForceHeatTopic || "HCMW.1").trim();
         node.hcmwForceCoolTopic = (config.hcmwForceCoolTopic || "HCMW.2").trim();
 
         // HP setpoint limits (fixed configuration, not dynamic topics)
-        node.spMin = Math.max(0, cfgNum(config.spMin, 28)); // °C
-        node.spMax = Math.max(0, cfgNum(config.spMax, 51)); // °C
+        node.spMin = Math.max(0, cfgNum(config.spMin, 28)); // C
+        node.spMax = Math.max(0, cfgNum(config.spMax, 51)); // C
 
         // Deprecated dynamic clamp topics (kept for backward compatibility, but ignored if spMin/spMax configured)
         node.spMinTopic = (config.spMinTopic || "").trim();
@@ -74,7 +74,7 @@ module.exports = function (RED) {
         node.valveGateChargeMinKwh = cfgNum(config.valveGateChargeMinKwh, 2.0); // min remaining HP plan (kWh)
         node.gasEnableTopic = (config.gasEnableTopic || "ISETW.4").trim(); // Gas heat request
         node.outErrorKey = (config.outErrorKey || "ESMSW").trim(); // Key only, will append .1-.5
-        node.bumpTempBias = cfgNum(config.bumpTempBias, 2.0); // °C bias below SP2 (ESTTW.3)
+        node.bumpTempBias = cfgNum(config.bumpTempBias, 2.0); // C bias below SP2 (ESTTW.3)
 
         // ESMSW bit definitions (member numbers)
         const ESMW_BIT_HP_NORUN = 1; // ESMSW.1: Compressor stalled after bump
@@ -158,11 +158,17 @@ module.exports = function (RED) {
         let prevVerboseKey = "";
         let lastVerboseLogTs = 0;
         let usingFallback = false; // Track fallback mode to avoid log spam
+        let leadLogged = false;
         const VERBOSE_MIN_LOG_SEC = 60;
         let enableCmdWaitingLogTimer = null; // Periodic warning if enableCmdTopic never arrives
         const lastSent = {};
-        const LOW_MODE_ON_BELOW_ERR_C = 0.4;
-        const LOW_MODE_OFF_ABOVE_ERR_C = 1.0;
+        const LOW_MODE_ERR_C = 0.5;
+        const LOW_HOT_HYST_C = 1;
+        const TEST_PWM_PERIOD_SEC = 60;
+        node.testPwmDuringForce = config.testPwmDuringForce === true || config.testPwmDuringForce === "true";
+        node.testPwmDutyPct = Number(config.testPwmDutyPct);
+        if (!Number.isFinite(node.testPwmDutyPct)) node.testPwmDutyPct = 50;
+        node.testPwmDutyPct = Math.max(0, Math.min(100, node.testPwmDutyPct));
         const SP_MIN_WRITE_SEC = 12 * 3600;
 
         // Setpoint monitoring and auto-correction
@@ -176,14 +182,13 @@ module.exports = function (RED) {
         let coolSp2Actual = null;
         let lastSpCheckTs = 0;
         const SP_CHECK_INTERVAL_SEC = 300; // Check every 5 minutes
-        const SP_TOLERANCE_C = 0.5; // Allow 0.5°C deviation
+        const SP_TOLERANCE_C = 0.5; // Allow 0.5C deviation
 
         function clamp(v, lo, hi) {
             return Math.max(lo, Math.min(hi, v));
         }
         function as01(v) {
-            const n = Number(v);
-            return Number.isFinite(n) && n !== 0 ? 1 : 0;
+            return (v == null || !Number.isFinite(Number(v)) ? null : (Number(v) !== 0 ? 1 : 0));
         }
         function sendChanged(topic, payload) {
             if (!topic) return false;
@@ -191,6 +196,20 @@ module.exports = function (RED) {
             lastSent[topic] = payload;
             node.send({ topic, payload });
             return true;
+        }
+
+        function failSafeDisable(reason) {
+            heatEnabled = 0;
+            coolEnabled = 0;
+            coolModeGlobal = 0;
+            airCoolEnable = 0;
+            sendChanged(node.outHeatEnableTopic, 0);
+            sendChanged(node.outCoolEnableTopic, 0);
+            sendChanged(node.outCoolModeGlobalTopic, 0);
+            if (node.outHewCoolTopic) sendChanged(node.outHewCoolTopic, 0);
+            sendChanged(node.outAirCoolEnableTopic, 0);
+            sendChanged(node.outLowModeTopic, 0);
+            node.status({ fill: "grey", shape: "ring", text: reason || "unknown input" });
         }
 
         // Persistence: load/save state to file
@@ -209,7 +228,7 @@ module.exports = function (RED) {
                 // Trim transitions based on heating time (not wall clock time)
                 trimTransitionBuffers();
                 node.log(
-                    `[hp-control:${node.name}] State loaded: SP1=${targetSp1}, SP2=${targetSp2}, tankSP=${tankSetpoint != null ? tankSetpoint.toFixed(1) : "null"}°C, P_max=${P_max_12h != null ? P_max_12h.toFixed(1) : "null"}kW, heatTrans=${heatEnableTransitions.length}, lowTrans=${lowModeTransitions.length}`
+                    `[hp-control:${node.name}] State loaded: SP1=${targetSp1}, SP2=${targetSp2}, tankSP=${tankSetpoint != null ? tankSetpoint.toFixed(1) : "null"}C, P_max=${P_max_12h != null ? P_max_12h.toFixed(1) : "null"}kW, heatTrans=${heatEnableTransitions.length}, lowTrans=${lowModeTransitions.length}`
                 );
                 return true;
             } catch (e) {
@@ -235,7 +254,7 @@ module.exports = function (RED) {
                 };
                 fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
                 node.log(
-                    `[hp-control:${node.name}] State saved: SP1=${targetSp1}, SP2=${targetSp2}, tankSP=${tankSetpoint != null ? tankSetpoint.toFixed(1) : "null"}°C, P_max=${P_max_12h != null ? P_max_12h.toFixed(1) : "null"}kW`
+                    `[hp-control:${node.name}] State saved: SP1=${targetSp1}, SP2=${targetSp2}, tankSP=${tankSetpoint != null ? tankSetpoint.toFixed(1) : "null"}C, P_max=${P_max_12h != null ? P_max_12h.toFixed(1) : "null"}kW`
                 );
             } catch (e) {
                 node.error(`[hp-control:${node.name}] Failed to save state: ${e.message}`);
@@ -409,9 +428,12 @@ module.exports = function (RED) {
         }
 
         function getClampLimits() {
-            // Use configured limits (or dynamic if provided for backward compatibility)
-            let lo = Number.isFinite(spMinDyn) && spMinDyn > 0 ? spMinDyn : node.spMin;
-            let hi = Number.isFinite(spMaxDyn) && spMaxDyn > 0 ? spMaxDyn : node.spMax;
+            // Configured spMin/spMax are the HP register limits.
+            // HTSW.3/.4 are the tank operating limits and must not pull the HP pair down.
+            let lo = node.spMin;
+            let hi = node.spMax;
+            if (!(lo > 0) && Number.isFinite(spMinDyn) && spMinDyn > 0) lo = spMinDyn;
+            if (!(hi > 0) && Number.isFinite(spMaxDyn) && spMaxDyn > 0) hi = spMaxDyn;
             if (lo > hi) {
                 const tmp = lo;
                 lo = hi;
@@ -488,8 +510,8 @@ module.exports = function (RED) {
             if (!node.outCoolSp1Topic && !node.outCoolSp2Topic) return false;
 
             // Always use fixed setpoints from UI config
-            const coolSp1 = node.coolSpUpper; // e.g., 17°C
-            const coolSp2 = node.coolSpLower; // e.g., 14°C
+            const coolSp1 = node.coolSpUpper; // e.g., 17C
+            const coolSp2 = node.coolSpLower; // e.g., 14C
 
             const sp1Val = Number(coolSp1.toFixed(2));
             const sp2Val = Number(coolSp2.toFixed(2));
@@ -525,8 +547,8 @@ module.exports = function (RED) {
                 if (c2Sent) coolSp2Actual = sp2Val;
 
                 if (node.logLevel !== "off" && (sp1NeedsWrite || sp2NeedsWrite)) {
-                    const sp1Msg = c1Sent ? `SP1: ${prevCoolActual1.toFixed(2)}°C → ${sp1Val}°C (${node.outCoolSp1Topic})` : `SP1: dedup`;
-                    const sp2Msg = c2Sent ? `SP2: ${prevCoolActual2.toFixed(2)}°C → ${sp2Val}°C (${node.outCoolSp2Topic})` : `SP2: dedup`;
+                    const sp1Msg = c1Sent ? `SP1: ${prevCoolActual1.toFixed(2)}C -> ${sp1Val}C (${node.outCoolSp1Topic})` : `SP1: dedup`;
+                    const sp2Msg = c2Sent ? `SP2: ${prevCoolActual2.toFixed(2)}C -> ${sp2Val}C (${node.outCoolSp2Topic})` : `SP2: dedup`;
                     node.log(`[hp-control:${node.name}] WRITE cooling: ${sp1Msg}, ${sp2Msg}`);
                 }
 
@@ -602,7 +624,7 @@ module.exports = function (RED) {
                 bumpInProgress = true;
                 bumpActivatedAt = nowSec;
                 node.log(
-                    `[hp-control:${node.name}] HP BUMPED: tank=${tankActual.toFixed(1)}°C < ESTTW.3-${node.bumpTempBias}°C=${(heatSp2Written - node.bumpTempBias).toFixed(1)}°C, speed=0 for ${((nowSec - compSpeedZeroSince) / 60).toFixed(0)}min`
+                    `[hp-control:${node.name}] HP BUMPED: tank=${tankActual.toFixed(1)}C < ESTTW.3-${node.bumpTempBias}C=${(heatSp2Written - node.bumpTempBias).toFixed(1)}C, speed=0 for ${((nowSec - compSpeedZeroSince) / 60).toFixed(0)}min`
                 );
                 node.status({ fill: "yellow", shape: "ring", text: "hp bumped" });
             }
@@ -668,8 +690,10 @@ module.exports = function (RED) {
 
         function compute(forceSetpointWrite, heatSpOnly) {
             syncCoolingRequiredFromContext();
-            if (tankTemp == null) return;
-            if (target == null) return;
+            if (tankTemp == null || target == null) {
+                failSafeDisable("unknown tank/target");
+                return;
+            }
             // Wait for hp_enable unless HCMW forces heat/cool (forced mode bootstraps via tank-control).
             if (enableCmd === null && !forceCool && !forceHeat) {
                 if (!enableCmdWaitingLogTimer) {
@@ -711,7 +735,7 @@ module.exports = function (RED) {
                 airCoolEnable = coolActive;
             }
 
-            const hpRunAllowed = enableCmd || forceCool || forceHeat;
+            const hpRunAllowed = enableCmd === 1 || forceCool === 1 || forceHeat === 1;
             let wantHeat = 0;
             if (hpRunAllowed && !coolActive) {
                 if (forceHeat) {
@@ -788,22 +812,42 @@ module.exports = function (RED) {
             const guarded = applyHpRunModeGuard(wantHeat, wantCool);
             heatEnabled = guarded.heat;
             coolEnabled = guarded.cool;
-            const maxActiveErr = Math.max(heatEnabled ? heatErr : 0, coolEnabled ? coolErr : 0, 0);
             sendChanged(node.outHeatEnableTopic, heatEnabled);
             sendChanged(node.outCoolEnableTopic, coolEnabled);
             sendChanged(node.outCoolModeGlobalTopic, coolModeGlobal); // COOLS.1
             if (node.outHewCoolTopic) sendChanged(node.outHewCoolTopic, coolModeGlobal);
             sendChanged(node.outAirCoolEnableTopic, airCoolEnable); // HK5S.1
 
-            const predictedErr = maxActiveErr - Math.max(0, tankRateCph / 3600) * node.lookAheadSec;
-            if (heatEnabled || coolEnabled) {
-                if (!lowMode && (maxActiveErr < LOW_MODE_ON_BELOW_ERR_C || predictedErr < LOW_MODE_ON_BELOW_ERR_C)) {
-                    lowMode = 1;
-                } else if (lowMode && maxActiveErr > LOW_MODE_OFF_ABOVE_ERR_C && predictedErr > LOW_MODE_OFF_ABOVE_ERR_C) {
-                    lowMode = 0;
+            // Heating low selects the lower HP setpoint. The compressor stops about 5 C
+            // above whichever setpoint is active, so low is only for a tank that has
+            // reached the upper setpoint. The 180 s tank rate stays in the log only.
+            const ratePerSec = tankRateCph / 3600;
+            let predictedErr = 0;
+            if (heatEnabled) {
+                predictedErr = heatErr - ratePerSec * node.lookAheadSec;
+                const hi = Number(targetSp1);
+                const tankNow = tankActual != null ? tankActual : tankTemp;
+                if (Number.isFinite(hi) && Number.isFinite(tankNow)) {
+                    if (tankNow >= hi) lowMode = 1;
+                    else if (tankNow <= hi - LOW_HOT_HYST_C) lowMode = 0;
                 }
+            } else if (coolEnabled) {
+                predictedErr = Math.max(coolErr, 0) - Math.max(0, ratePerSec) * node.lookAheadSec;
+                if (predictedErr < LOW_MODE_ERR_C) lowMode = 1;
+                else if (predictedErr > LOW_MODE_ERR_C) lowMode = 0;
             } else {
                 lowMode = 0;
+            }
+
+            // Forced-heat test: fixed 60 s period, duty is the share spent on the
+            // lower setpoint (low relay on). 100 keeps low on, 0 keeps the upper
+            // setpoint. Aligned to the clock minute. Normal heating ignores this.
+            let testPwmActive = false;
+            if (node.testPwmDuringForce && forceHeat === 1 && heatEnabled) {
+                testPwmActive = true;
+                const onSec = TEST_PWM_PERIOD_SEC * node.testPwmDutyPct / 100;
+                const phase = nowSec % TEST_PWM_PERIOD_SEC;
+                lowMode = phase < onSec ? 1 : 0;
             }
 
             const activeNow = heatEnabled || coolEnabled ? 1 : 0;
@@ -822,192 +866,88 @@ module.exports = function (RED) {
                 node.debug(`[hp-control:${node.name}] Low-mode transition: ${lowMode}`);
             }
 
-            // Check if it's time to adjust setpoints based on duty cycle
+            // Duty is observed only. It must not move the heating pair.
+            // The pair comes from the mpc-house full recalc (hpSetpointPair).
             let dutyText = "n/a";
-            let adjustReason = "hold";
-            let dutyAdjustmentMade = false;
+            let adjustReason = "plan-hold";
 
             if (nowSec - lastBiasAdjustTs >= BIAS_CHECK_INTERVAL_SEC) {
                 const duty = calculateDuty(nowSec);
                 dutyText = `${(duty * 100).toFixed(1)}%`;
-
-                if (targetSp1 == null || targetSp2 == null) {
-                    // No saved setpoints yet, initialize from current computed values
-                    const baseUpper = activeHeatTarget + 7; // Fallback initialization
-                    const computed = computeHeatSp(baseUpper, node.spread, lo, hi);
-                    targetSp1 = computed.sp1;
-                    targetSp2 = computed.sp2;
-                    adjustReason = "init";
-                    node.log(`[hp-control:${node.name}] Initialized target setpoints: SP1=${targetSp1.toFixed(2)}, SP2=${targetSp2.toFixed(2)}`);
-                } else if (duty < DUTY_EXTREME_MIN || duty > DUTY_EXTREME_MAX) {
-                    // Extreme duty: adjust by 2°C
-                    const step = duty < DUTY_EXTREME_MIN ? BIAS_STEP_EXTREME_C : -BIAS_STEP_EXTREME_C;
-                    targetSp1 += step;
-                    targetSp2 += step;
-                    adjustReason = duty < DUTY_EXTREME_MIN ? "raise-2C" : "lower-2C";
-                    dutyAdjustmentMade = true;
-                    node.warn(
-                        `[hp-control:${node.name}] EXTREME DUTY (${dutyText}): adjusting SP by ${step > 0 ? "+" : ""}${step}°C → ` +
-                            `SP1=${targetSp1.toFixed(2)}, SP2=${targetSp2.toFixed(2)}`
-                    );
-                } else if (duty < DUTY_TARGET_MIN || duty > DUTY_TARGET_MAX) {
-                    // Moderate duty: adjust by 1°C
-                    const step = duty < DUTY_TARGET_MIN ? BIAS_STEP_NORMAL_C : -BIAS_STEP_NORMAL_C;
-                    targetSp1 += step;
-                    targetSp2 += step;
-                    adjustReason = duty < DUTY_TARGET_MIN ? "raise-1C" : "lower-1C";
-                    dutyAdjustmentMade = true;
-                    node.log(
-                        `[hp-control:${node.name}] Out-of-range duty (${dutyText}): adjusting SP by ${step > 0 ? "+" : ""}${step}°C → ` +
-                            `SP1=${targetSp1.toFixed(2)}, SP2=${targetSp2.toFixed(2)}`
-                    );
-                } else {
-                    // Duty in good range
-                    adjustReason = "ok";
-                    node.debug(`[hp-control:${node.name}] Duty in range (${dutyText}): no adjustment needed`);
-                }
-
                 lastBiasAdjustTs = nowSec;
-
-                // Save state if adjustment was made
-                if (dutyAdjustmentMade || adjustReason === "init") {
-                    saveState();
-                }
+                node.log(`[hp-control:${node.name}] Duty ${dutyText} observed, heating pair not moved`);
             } else if (heatEnableTransitions.length > 0) {
-                // Display current duty and heating time (if we have some data) without logging warnings
                 const heatingTime = calculateHeatingTime(nowSec, heatEnableTransitions);
-                const duty = calculateDuty(nowSec, true); // silent=true
+                const duty = calculateDuty(nowSec, true);
                 dutyText = `${(duty * 100).toFixed(1)}% (${(heatingTime / 3600).toFixed(1)}h)`;
             }
 
-            // Calculate base upper setpoint:
-            // Priority 1: Tank setpoint + heat exchanger deltaT (if available from mpc-house)
-            // Priority 2: Tank target + 7°C (fallback)
-            let baseUpper;
-            if (tankSetpoint != null && P_max_12h != null) {
-                // Use physics-based calculation: HP setpoint = tank + heat exchanger temperature drop
-                const deltaT_hx = node.deltaT_base + node.deltaT_slope * P_max_12h;
-                const deltaT_clamped = Math.max(3.0, Math.min(10.0, deltaT_hx));
-                baseUpper = tankSetpoint + deltaT_clamped;
-                if (usingFallback) {
-                    node.log(
-                        `[hp-control:${node.name}] Switched to MPC: tank=${tankSetpoint.toFixed(1)}°C + ΔT=${deltaT_clamped.toFixed(1)}°C (P_max=${P_max_12h.toFixed(1)}kW) → base=${baseUpper.toFixed(1)}°C`
-                    );
-                    usingFallback = false;
-                }
-            } else {
-                baseUpper = activeHeatTarget + 7;
-                if (!usingFallback) {
-                    const reason = tankSetpoint == null ? "no tankSetpoint" : "no P_max_12h";
-                    node.log(`[hp-control:${node.name}] Using fallback (${reason}): target+7 = ${baseUpper.toFixed(1)}°C`);
-                    usingFallback = true;
-                }
-            }
+            // Cooling setpoints stay the fixed UI values.
+            const actualCoolSp1 = node.coolSpUpper;
+            const actualCoolSp2 = node.coolSpLower;
 
-            // Heating setpoints: use saved targets anchored to MPC-computed base
-            let heatSp1, heatSp2;
-            const { sp1: baseSp1, sp2: baseSp2 } = computeHeatSp(baseUpper, node.spread, lo, hi);
+            let heatSp1 = targetSp1 != null ? targetSp1 : 0;
+            let heatSp2 = targetSp2 != null ? targetSp2 : 0;
 
-            if (targetSp1 != null && targetSp2 != null) {
-                // Guard: persisted targets must not drift further than spread from the current
-                // MPC-computed base. Without this, a stale high value from a cold day would
-                // keep the HP running hot even after the supply target drops significantly.
-                const deviation = targetSp1 - baseSp1;
-                if (Math.abs(deviation) > node.spread) {
-                    node.warn(
-                        `[hp-control:${node.name}] targetSp1=${targetSp1.toFixed(1)}°C deviates ` +
-                            `${deviation.toFixed(1)}°C from MPC base=${baseSp1.toFixed(1)}°C ` +
-                            `(tankSP=${tankSetpoint != null ? tankSetpoint.toFixed(1) : "n/a"}°C) -- resetting to base`
-                    );
-                    targetSp1 = baseSp1;
-                    targetSp2 = baseSp2;
-                    lastBiasAdjustTs = nowSec; // reset duty timer -- let system stabilize before next duty check
-                    saveState();
-                }
-                heatSp1 = targetSp1;
-                heatSp2 = targetSp2;
-            } else {
-                // Fallback: compute from base (until first duty check initializes targets)
-                heatSp1 = baseSp1;
-                heatSp2 = baseSp2;
-            }
-
-            // Final floor enforcement: persisted/duty-adjusted targets may have drifted below
-            // spMin (e.g. after HP firmware clamps writes, or stale state from old config).
-            // SP2 must be >= spMin; SP1 must be >= SP2 + spread so they never collapse together.
-            heatSp2 = Math.max(lo, heatSp2);
-            heatSp1 = Math.max(heatSp2 + node.spread, heatSp1);
-
-            // Cooling setpoints: always use fixed UI config values
-            // (no dynamic calculation needed - removed legacy computeCoolSp call)
-            const actualCoolSp1 = node.coolSpUpper; // Fixed from UI, e.g., 17°C
-            const actualCoolSp2 = node.coolSpLower; // Fixed from UI, e.g., 14°C
-
-            // Write setpoints if they changed (sendChanged handles dedup)
-            const sp1Val = Number(heatSp1.toFixed(2));
-            const sp2Val = Number(heatSp2.toFixed(2));
-
-            // Wait until we've read back HP's actual setpoints before writing
-            // (Modbus channel working = heatSp1Actual not null)
             const modbusReady = heatSp1Actual != null && heatSp2Actual != null;
-
             if (!modbusReady) {
-                return; // Wait for Modbus readback first
+                return;
             }
 
-            // Check if HP's actual values differ from what we want.
-            // Minimum 1°C step to avoid flash wear -- sub-1°C fine-tuning is done via low/duty PWM.
-            const sp1NeedsWrite = Math.abs(heatSp1Actual - sp1Val) >= 1.0;
-            const sp2NeedsWrite = Math.abs(heatSp2Actual - sp2Val) >= 1.0;
-
-            // Also check if we've never written (for initialization)
-            const sp1Changed = heatSp1Written !== sp1Val;
-            const sp2Changed = heatSp2Written !== sp2Val;
-
-            // Suppress setpoint writes when HP is fully disabled: the HP ignores setpoints
-            // while off, and writing an unacceptable value (below HP hardware min) creates an
-            // infinite correction loop. When HP enables, the same compute() call will write.
-            if (!heatEnabled && !coolEnabled && !forceSetpointWrite) {
-                // no-op: skip setpoint write until demand returns
-            } else if ((sp1NeedsWrite || sp2NeedsWrite || forceSetpointWrite) && modbusReady) {
-                // Snapshot old actuals for log before optimistic update
-                const prevActual1 = heatSp1Actual;
-                const prevActual2 = heatSp2Actual;
-
-                const sp1Sent = sendChanged(node.outHeatSp1Topic, sp1Val);
-                const sp2Sent = sendChanged(node.outHeatSp2Topic, sp2Val);
-
-                if (sp1Sent || sp2Sent) {
-                    // Optimistically update actual values so the next compute() call before
-                    // Modbus readback doesn't see the same mismatch and write again (flash wear)
-                    if (sp1Sent) heatSp1Actual = sp1Val;
-                    if (sp2Sent) heatSp2Actual = sp2Val;
-
-                    // Log only when a write actually went out
-                    if (node.logLevel !== "off") {
-                        const sp1Msg = sp1Sent ? `SP1: ${prevActual1.toFixed(2)}°C → ${sp1Val}°C (${node.outHeatSp1Topic})` : `SP1: ${sp1Val}°C (${node.outHeatSp1Topic}, dedup)`;
-                        const sp2Msg = sp2Sent ? `SP2: ${prevActual2.toFixed(2)}°C → ${sp2Val}°C (${node.outHeatSp2Topic})` : `SP2: ${sp2Val}°C (${node.outHeatSp2Topic}, dedup)`;
-                        const reason = forceSetpointWrite ? " [FORCED]" : "";
-                        node.log(`[hp-control:${node.name}] WRITE heating: ${sp1Msg}, ${sp2Msg}${reason}`);
-                    }
-
-                    // Store what we wrote for validation
+            // Write ESTTW.2/.3 only when the recalc pair has moved by at least 1 C.
+            // ESSWW.3 still hops between those two registers. HTSW.2 does not rewrite them.
+            let pair = null;
+            try {
+                pair = node.context().global.get("hpSetpointPair");
+            } catch (e) {
+                pair = null;
+            }
+            if (pair && Number.isFinite(pair.hi) && Number.isFinite(pair.lo) && node.outHeatSp1Topic && node.outHeatSp2Topic) {
+                let sp2Val = Math.round(pair.lo);
+                let sp1Val = Math.round(pair.hi);
+                sp2Val = Math.max(lo, Math.min(hi - 1, sp2Val));
+                sp1Val = Math.max(sp2Val + 1, Math.min(hi, sp1Val));
+                heatSp1 = sp1Val;
+                heatSp2 = sp2Val;
+                const commandedChanged =
+                    heatSp1Written == null ||
+                    heatSp2Written == null ||
+                    Math.abs(sp1Val - heatSp1Written) >= 1 ||
+                    Math.abs(sp2Val - heatSp2Written) >= 1;
+                const alreadyThere = Math.abs(heatSp1Actual - sp1Val) < 1 && Math.abs(heatSp2Actual - sp2Val) < 1;
+                if (commandedChanged && alreadyThere) {
                     heatSp1Written = sp1Val;
                     heatSp2Written = sp2Val;
-                    lastSpWriteTs = nowSec;
-
-                    // Update persistent targets when we successfully write
-                    if (targetSp1 == null || targetSp2 == null) {
+                    targetSp1 = sp1Val;
+                    targetSp2 = sp2Val;
+                    node.log(`[hp-control:${node.name}] HP pair already ${sp1Val}/${sp2Val}, no write`);
+                } else if (commandedChanged) {
+                    const prev1 = heatSp1Actual;
+                    const prev2 = heatSp2Actual;
+                    const sp1Sent = sendChanged(node.outHeatSp1Topic, sp1Val);
+                    const sp2Sent = sendChanged(node.outHeatSp2Topic, sp2Val);
+                    if (sp1Sent || sp2Sent) {
+                        if (sp1Sent) heatSp1Actual = sp1Val;
+                        if (sp2Sent) heatSp2Actual = sp2Val;
+                        heatSp1Written = sp1Val;
+                        heatSp2Written = sp2Val;
+                        lastSpWriteTs = nowSec;
                         targetSp1 = sp1Val;
                         targetSp2 = sp2Val;
                         saveState();
+                        const cTxt = Number.isFinite(pair.center) ? pair.center.toFixed(1) : "n/a";
+                        const qTxt = Number.isFinite(pair.qKw) ? pair.qKw.toFixed(1) : "n/a";
+                        node.log(
+                            `[hp-control:${node.name}] WRITE heating pair from recalc: SP1 ${Number(prev1).toFixed(1)} -> ${sp1Val} (${node.outHeatSp1Topic}), ` +
+                                `SP2 ${Number(prev2).toFixed(1)} -> ${sp2Val} (${node.outHeatSp2Topic}) center=${cTxt}C Q=${qTxt}kW`
+                        );
                     }
                 }
-            } // end setpoint write block
+            }
 
             // Write cooling setpoints at the same time (if not in heat-only mode)
             if (!heatSpOnly) {
-                emitCoolSetpoints(nowSec, true);
+                emitCoolSetpoints(nowSec, false);
             }
 
             // Monitor compressor stall and activate bump if needed
@@ -1019,7 +959,7 @@ module.exports = function (RED) {
             // Apply bump override via XOR: if bump active, toggle lowMode output
             // Gate by heatEnabled: low mode without a heat request makes no sense and
             // could cause the HP to run unnecessarily (flash wear + unwanted operation)
-            const lowModeWithBump = (lowMode ? 1 : 0) ^ (bumpInProgress ? 1 : 0);
+            const lowModeWithBump = testPwmActive ? (lowMode ? 1 : 0) : ((lowMode ? 1 : 0) ^ (bumpInProgress ? 1 : 0));
             const effectiveLowMode = heatEnabled ? lowModeWithBump : 0;
             sendChanged(node.outLowModeTopic, effectiveLowMode);
 
@@ -1028,11 +968,11 @@ module.exports = function (RED) {
             const sp2Text = targetSp2 != null ? targetSp2.toFixed(1) : "n/a";
             const stateLogKey = `${runReason}|${lowMode}|${dutyText}|${sp1Text}|${sp2Text}|${adjustReason}|${heatEnabled}|${coolEnabled}`;
             if (node.logLevel !== "off" && stateLogKey !== prevStateLogKey) {
-                node.log(`[hp-control:${node.name || "unnamed"}] state ` + `run=${runReason} low=${lowMode} duty=${dutyText} target=${sp1Text}/${sp2Text}°C adj=${adjustReason}`);
+                node.log(`[hp-control:${node.name || "unnamed"}] state ` + `run=${runReason} low=${lowMode}${testPwmActive ? " pwm=" + node.testPwmDutyPct + "%" : ""} duty=${dutyText} target=${sp1Text}/${sp2Text}C adj=${adjustReason}`);
                 prevStateLogKey = stateLogKey;
             }
             if (node.logLevel === "verbose") {
-                const supplyStr = tankSetpoint != null ? `${Number(tankSetpoint).toFixed(2)}°C` : "n/a";
+                const supplyStr = tankSetpoint != null ? `${Number(tankSetpoint).toFixed(2)}C` : "n/a";
                 const autoCoolSuffix = autoCoolVerboseSuffix(coolActive);
                 const verboseKey =
                     `${enableCmd}|${forceHeat}|${forceCool}|${heatEnabled}|${coolEnabled}|${Number(tankTemp).toFixed(2)}|${Number(target).toFixed(2)}|` +
@@ -1046,7 +986,7 @@ module.exports = function (RED) {
                             `tank=${Number(tankTemp).toFixed(2)} target=${Number(target).toFixed(2)} supplyT=${supplyStr} ` +
                             `hErr=${heatErr.toFixed(2)} cErr=${coolErr.toFixed(2)} ` +
                             `dTdt=${tankRateCph.toFixed(1)}C/h predErr=${predictedErr.toFixed(2)} ` +
-                            `low=${lowMode} duty=${dutyText} targetSP=${sp1Text}/${sp2Text}°C adj=${adjustReason} ` +
+                            `low=${lowMode} duty=${dutyText} targetSP=${sp1Text}/${sp2Text}C adj=${adjustReason} ` +
                             `spH1=${heatSp1.toFixed(2)} spH2=${heatSp2.toFixed(2)} spC1=${actualCoolSp1.toFixed(2)} spC2=${actualCoolSp2.toFixed(2)}` +
                             autoCoolSuffix
                     );
@@ -1060,7 +1000,7 @@ module.exports = function (RED) {
                 node.status({
                     fill: heatEnabled || coolEnabled ? "green" : "grey",
                     shape: "dot",
-                    text: `${runReason} low=${lowMode ? 1 : 0} duty=${dutyText} target=${sp1Text}/${sp2Text}°C hErr=${heatErr.toFixed(1)} dTdt=${tankRateCph.toFixed(1)} predErr=${predictedErr.toFixed(1)}`
+                    text: `${runReason} low=${lowMode ? 1 : 0}${testPwmActive ? " pwm=" + node.testPwmDutyPct + "%" : ""} duty=${dutyText} target=${sp1Text}/${sp2Text}C hErr=${heatErr.toFixed(1)} dTdt=${tankRateCph.toFixed(1)} predErr=${predictedErr.toFixed(1)}`
                 });
             }
         }
@@ -1094,8 +1034,8 @@ module.exports = function (RED) {
 
                 if (sp1Diff > SP_TOLERANCE_C || sp2Diff > SP_TOLERANCE_C) {
                     corruptionMsg.push(
-                        `HEATING SP1: wrote ${heatSp1Written.toFixed(2)}°C, HP reports ${heatSp1Actual.toFixed(2)}°C (diff=${sp1Diff.toFixed(2)}°C), ` +
-                            `SP2: wrote ${heatSp2Written.toFixed(2)}°C, HP reports ${heatSp2Actual.toFixed(2)}°C (diff=${sp2Diff.toFixed(2)}°C)`
+                        `HEATING SP1: wrote ${heatSp1Written.toFixed(2)}C, HP reports ${heatSp1Actual.toFixed(2)}C (diff=${sp1Diff.toFixed(2)}C), ` +
+                            `SP2: wrote ${heatSp2Written.toFixed(2)}C, HP reports ${heatSp2Actual.toFixed(2)}C (diff=${sp2Diff.toFixed(2)}C)`
                     );
                     needRewrite = true;
                 }
@@ -1117,23 +1057,21 @@ module.exports = function (RED) {
 
                 if (sp1Diff > SP_TOLERANCE_C || sp2Diff > SP_TOLERANCE_C) {
                     corruptionMsg.push(
-                        `COOLING SP1: wrote ${coolSp1Written.toFixed(2)}°C, HP reports ${coolSp1Actual.toFixed(2)}°C (diff=${sp1Diff.toFixed(2)}°C), ` +
-                            `SP2: wrote ${coolSp2Written.toFixed(2)}°C, HP reports ${coolSp2Actual.toFixed(2)}°C (diff=${sp2Diff.toFixed(2)}°C)`
+                        `COOLING SP1: wrote ${coolSp1Written.toFixed(2)}C, HP reports ${coolSp1Actual.toFixed(2)}C (diff=${sp1Diff.toFixed(2)}C), ` +
+                            `SP2: wrote ${coolSp2Written.toFixed(2)}C, HP reports ${coolSp2Actual.toFixed(2)}C (diff=${sp2Diff.toFixed(2)}C)`
                     );
                     needRewrite = true;
                 }
             }
 
             if (needRewrite) {
-                node.warn(`[hp-control:${node.name}] CORRUPTION DETECTED: ${corruptionMsg.join("; ")} → forcing correction rewrite`);
+                node.warn(`[hp-control:${node.name}] Setpoint readback off by >= 1 C: ${corruptionMsg.join("; ")} -- heating pair is not rewritten from readback`);
 
                 // DON'T update targetSp1/targetSp2 here - they should only change via duty adjustments
                 // The corruption correction will just rewrite the current target values
 
-                // Force immediate setpoint rewrite for both heating and cooling
-                lastSpWriteTs = 0;
-                lastCoolSpWriteTs = 0;
-                compute(true, false); // Recompute and force write (heating + cooling)
+                // Do not rewrite here. compute() corrects a >= 1 C miss at most once per 12 h.
+                // Forcing a write on every readback is what wore the HP flash.
             }
         }
 
@@ -1141,9 +1079,10 @@ module.exports = function (RED) {
             const t = String(msg.topic || "").trim();
 
             if (!biasInitialized && node.outHeatSp1Topic && t === node.outHeatSp1Topic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) lastSent[t] = v; // seed dedup with actual HP value
-                initSp1 = Number(msg.payload);
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v === null) return;
+                lastSent[t] = v; // seed dedup with actual HP value
+                initSp1 = v;
                 tryInitBias();
                 return;
             }
@@ -1151,36 +1090,33 @@ module.exports = function (RED) {
             // Seeding lastSent here prevents writing back the same value that the HP already holds,
             // even when emitCoolSetpoints/emitHeatSetpoints is called with skipIntervalCheck=true.
             if (node.outHeatSp1Topic && t === node.outHeatSp1Topic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) {
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) {
                     heatSp1Actual = v;
-                    lastSent[t] = v; // seed dedup with actual HP value
+                    // Do not copy the readback into lastSent. That made every poll look like a new command.
                 }
                 return;
             }
             if (node.outHeatSp2Topic && t === node.outHeatSp2Topic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) {
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) {
                     heatSp2Actual = v;
-                    lastSent[t] = v; // seed dedup with actual HP value
                     validateAndCorrectSetpoints();
                 }
                 return;
             }
             if (node.outCoolSp1Topic && t === node.outCoolSp1Topic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) {
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) {
                     coolSp1Actual = v;
-                    lastSent[t] = v; // seed dedup with actual HP value
                     validateAndCorrectSetpoints();
                 }
                 return;
             }
             if (node.outCoolSp2Topic && t === node.outCoolSp2Topic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) {
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) {
                     coolSp2Actual = v;
-                    lastSent[t] = v; // seed dedup with actual HP value
                     validateAndCorrectSetpoints();
                 }
                 return;
@@ -1189,62 +1125,79 @@ module.exports = function (RED) {
             // sync lastSent so sendChanged detects any mismatch and corrects it on next compute().
             // This recovers from iolayer resets where hp-control's lastSent is stale vs iolayer state.
             if (node.outHeatEnableTopic && t === node.outHeatEnableTopic) {
-                lastSent[t] = as01(msg.payload);
+                const bit = as01(msg.payload);
+                if (bit === null) return;
+                lastSent[t] = bit;
                 compute(false, false);
                 return;
             }
             if (node.outCoolEnableTopic && t === node.outCoolEnableTopic) {
-                lastSent[t] = as01(msg.payload);
+                const bit = as01(msg.payload);
+                if (bit === null) return;
+                lastSent[t] = bit;
                 compute(false, false);
                 return;
             }
             if (node.outLowModeTopic && t === node.outLowModeTopic) {
-                lastSent[t] = as01(msg.payload);
+                const bit = as01(msg.payload);
+                if (bit === null) return;
+                lastSent[t] = bit;
                 compute(false, false);
                 return;
             }
             // Auto-cooling: decision from room-overheat-checker
             if (node.coolingRequiredTopic && t === node.coolingRequiredTopic) {
-                externalCoolingRequired = as01(msg.payload);
+                const bit = as01(msg.payload);
+                if (bit === null) return;
+                externalCoolingRequired = bit;
                 compute(false, false);
                 return;
             }
             if (node.spotPriceTopic && t === node.spotPriceTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) spotPrice = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) spotPrice = v;
                 compute(false, false);
                 return;
             }
             // HP bump monitoring inputs
             if (t === node.tankActualTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) tankActual = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) tankActual = v;
                 return;
             }
             if (t === node.compSpeedTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) compSpeed = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) compSpeed = v;
                 return;
             }
             if (t === node.avgValveOpenTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) avgValveOpenness = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) avgValveOpenness = v;
                 return;
             }
             if (t === node.gasEnableTopic) {
-                gasEnabled = as01(msg.payload);
+                const bit = as01(msg.payload);
+                gasEnabled = bit === null ? 0 : bit;
                 return;
             }
             if (t === node.tankTempTopic) {
-                const newTank = Number(msg.payload);
-                if (Number.isFinite(newTank)) {
-                    updateDerivative(newTank, Math.floor(Date.now() / 1000));
+                const newTank = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (newTank === null) {
+                    tankTemp = null;
+                    failSafeDisable("unknown tank");
+                    return;
                 }
+                updateDerivative(newTank, Math.floor(Date.now() / 1000));
                 tankTemp = newTank;
             } else if (t === node.targetTopic) {
-                target = Number(msg.payload);
+                target = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
             } else if (t === node.tankSetpointTopic) {
-                tankSetpoint = Number(msg.payload);
+                const n = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (n === null) {
+                    tankSetpoint = null;
+                    return;
+                }
+                tankSetpoint = n;
                 // Try to get P_max from mpc-house schedule context
                 try {
                     const mpcHouseNodes = RED.nodes.getNode(node.z); // Get flow
@@ -1272,15 +1225,23 @@ module.exports = function (RED) {
                 // Save MPC values to persistence for restart resilience
                 saveState();
 
-                // Tank setpoint received from mpc-house → recalculate and write HP setpoints immediately
+                // Tank setpoint received from mpc-house -> recalculate and write HP setpoints immediately
                 compute(false, true); // force setpoint write
                 return; // Don't fall through to normal compute
-            } else if (t === node.enableCmdTopic) enableCmd = as01(msg.payload);
-            else if (t === node.hcmwForceHeatTopic) forceHeat = as01(msg.payload);
-            else if (t === node.hcmwForceCoolTopic) forceCool = as01(msg.payload);
-            else if (t === node.spMinTopic) spMinDyn = Number(msg.payload);
-            else if (t === node.spMaxTopic) spMaxDyn = Number(msg.payload);
-            else return;
+            } else if (t === node.enableCmdTopic) {
+                const bit = as01(msg.payload);
+                enableCmd = bit === null ? 0 : bit;
+            } else if (t === node.hcmwForceHeatTopic) {
+                const bit = as01(msg.payload);
+                forceHeat = bit === null ? 0 : bit;
+            } else if (t === node.hcmwForceCoolTopic) {
+                const bit = as01(msg.payload);
+                forceCool = bit === null ? 0 : bit;
+            } else if (t === node.spMinTopic) {
+                spMinDyn = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+            } else if (t === node.spMaxTopic) {
+                spMaxDyn = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+            } else return;
             compute(false, false);
             if (t === node.targetTopic || t === node.spMinTopic || t === node.spMaxTopic) {
                 emitCoolSetpoints(Math.floor(Date.now() / 1000), false);

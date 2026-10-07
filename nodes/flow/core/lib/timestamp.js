@@ -4,7 +4,7 @@
  * Use in any node:
  *   const ts = require("<relative>/core/lib/timestamp.js");
  *
- * Status text:  ts.formatStatus()           -> DD.MM.YYYY HH:MM:SS,mmm
+ * Status text:  ts.formatStatus()           -> DD.MM.YYYY HH:MM:SS
  * Log fields:    ts.formatLogSuffix({...})  -> ts_s=..., ts_ms=..., wall=...
  * node.log is not prefixed (NR already timestamps). warn/error keep ts_ms/wall.
  * Epoch ms:      ts.nowMs()
@@ -48,7 +48,7 @@ function normalizeEpochSec(value) {
     return Math.floor(n);
 }
 
-function formatWall(epochMs) {
+function formatWall(epochMs, withMs) {
     const ms = normalizeEpochMs(epochMs);
     const d = new Date(ms);
     const dd = String(d.getDate()).padStart(2, "0");
@@ -57,12 +57,14 @@ function formatWall(epochMs) {
     const hh = String(d.getHours()).padStart(2, "0");
     const min = String(d.getMinutes()).padStart(2, "0");
     const ss = String(d.getSeconds()).padStart(2, "0");
+    const base = `${dd}.${mm}.${yyyy} ${hh}:${min}:${ss}`;
+    if (withMs === false) return base;
     const mss = String(d.getMilliseconds()).padStart(3, "0");
-    return `${dd}.${mm}.${yyyy} ${hh}:${min}:${ss},${mss}`;
+    return `${base},${mss}`;
 }
 
 function formatStatus(epochMs) {
-    return formatWall(epochMs);
+    return formatWall(epochMs, false);
 }
 
 /**

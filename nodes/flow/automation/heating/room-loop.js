@@ -177,12 +177,17 @@ module.exports = function (RED) {
             }
 
             if (t === node.spRoomTopic) {
-                node._lastRoomSP = Number(msg.payload);
+                node._lastRoomSP = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
                 return;
             }
 
             if (t === node.tRoomTopic) {
-                node._lastRoomT = Number(msg.payload);
+                const n = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (n === null) {
+                    node._lastRoomT = null;
+                    return;
+                }
+                node._lastRoomT = n;
                 if (typeof node._lastRoomT === "number" && typeof node._lastRoomSP === "number" && node.tRetOut) {
                     const now = Date.now();
 

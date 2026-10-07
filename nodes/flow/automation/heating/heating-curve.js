@@ -66,8 +66,8 @@ module.exports = function (RED) {
             if (Array.isArray(val) && val.length > 0) {
                 val = val[0];
             }
-            val = Number(val);
-            if (isNaN(val)) {
+            val = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+            if (val === null) {
                 return;
             }
             inputValue = val;

@@ -130,12 +130,11 @@ module.exports = function (RED) {
         };
 
         function num(v, defVal = 0) {
-            const n = Number(v);
-            return Number.isFinite(n) ? n : defVal;
+            const n = (v == null ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+            return n === null ? defVal : n;
         }
         function b01(v) {
-            const n = Number(v);
-            return Number.isFinite(n) && n !== 0 ? 1 : 0;
+            return (v == null || !Number.isFinite(Number(v)) ? null : (Number(v) !== 0 ? 1 : 0));
         }
         function clamp(v, lo, hi) {
             return Math.max(lo, Math.min(hi, v));
@@ -713,34 +712,81 @@ module.exports = function (RED) {
             const t = String(msg.topic || "").trim();
             const p = msg.payload;
 
-            if (t === node.qNeedBaseTopic) state.qBase = Math.max(0, num(p, 0));
-            else if (t === node.estTopic && p && typeof p === "object") {
-                if (p.roomErr != null) updateRoomErrTrend(num(p.roomErr, state.roomErr));
-                if (p.openFrac != null) state.openFrac = clamp(num(p.openFrac, 0), 0, 1);
-                if (p.tankTemp != null) state.tankTemp = num(p.tankTemp, state.tankTemp);
+            if (t === node.qNeedBaseTopic) {
+                const n = (p == null ? null : (Number.isFinite(Number(p)) ? Number(p) : null));
+                if (n === null) return;
+                state.qBase = Math.max(0, n);
+            } else if (t === node.estTopic && p && typeof p === "object") {
+                if ((p.roomErr != null && Number.isFinite(Number(p.roomErr)))) updateRoomErrTrend(num(p.roomErr, state.roomErr));
+                if ((p.openFrac != null && Number.isFinite(Number(p.openFrac)))) state.openFrac = clamp(num(p.openFrac, 0), 0, 1);
+                if ((p.tankTemp != null && Number.isFinite(Number(p.tankTemp)))) state.tankTemp = num(p.tankTemp, state.tankTemp);
             } else if (t === node.scheduleGasTopic) {
-                setSchGas(b01(p));
+                const bit = b01(p);
+                if (bit === null) return;
+                setSchGas(bit);
                 return;
             } else if (t === node.scheduleHpTopic) {
-                setSchHp(b01(p));
+                const bit = b01(p);
+                if (bit === null) return;
+                setSchHp(bit);
                 return;
-            } else if (t === node.testTopic1) state.tst1 = b01(p);
-            else if (t === node.testTopic2) state.tst2 = b01(p);
-            else if (t === node.testTopic3) state.tst3 = b01(p);
-            else if (t === node.forceGasTopic) {
-                state.fGas = b01(p);
+            } else if (t === node.testTopic1) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.tst1 = bit;
+            } else if (t === node.testTopic2) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.tst2 = bit;
+            } else if (t === node.testTopic3) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.tst3 = bit;
+            } else if (t === node.forceGasTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.fGas = bit;
             } else if (t === node.forceHpTopic) {
-                state.fHp = b01(p);
-            } else if (node.hsewGasTopic && t === node.hsewGasTopic) state.hsewGas = b01(p);
-            else if (node.hsewHpTopic && t === node.hsewHpTopic) state.hsewHp = b01(p);
-            else if (node.coolRequestTopic && t === node.coolRequestTopic) state.coolReq = b01(p);
-            else if (node.hcmwForceCoolTopic && t === node.hcmwForceCoolTopic) state.hcmwForceCool = b01(p);
-            else if (node.hcmwForceHeatTopic && t === node.hcmwForceHeatTopic) state.hcmwForceHeat = b01(p);
-            else if (t === node.disGasTopic) state.dGas = b01(p);
-            else if (t === node.disHpTopic) state.dHp = b01(p);
-            else if (t === node.gasAvailTopic) state.gasAvail = b01(p);
-            else if (t === node.hpAvailTopic) state.hpAvail = b01(p);
-            else return;
+                const bit = b01(p);
+                if (bit === null) return;
+                state.fHp = bit;
+            } else if (node.hsewGasTopic && t === node.hsewGasTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.hsewGas = bit;
+            } else if (node.hsewHpTopic && t === node.hsewHpTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.hsewHp = bit;
+            } else if (node.coolRequestTopic && t === node.coolRequestTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.coolReq = bit;
+            } else if (node.hcmwForceCoolTopic && t === node.hcmwForceCoolTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.hcmwForceCool = bit;
+            } else if (node.hcmwForceHeatTopic && t === node.hcmwForceHeatTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.hcmwForceHeat = bit;
+            } else if (t === node.disGasTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.dGas = bit;
+            } else if (t === node.disHpTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.dHp = bit;
+            } else if (t === node.gasAvailTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.gasAvail = bit;
+            } else if (t === node.hpAvailTopic) {
+                const bit = b01(p);
+                if (bit === null) return;
+                state.hpAvail = bit;
+            } else return;
 
             const tunePulse = t === node.qNeedBaseTopic;
             compute(tunePulse);

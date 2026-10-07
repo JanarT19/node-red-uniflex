@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Live datastream chart</title>
+    <script src="chart.js"></script>
+    <style>
+        :root {
+            color-scheme: light dark;
+            font-family: Arial, sans-serif;
+            --bg: #f4f6f8;
+            --panel: #ffffff;
+            --text: #17202a;
+            --muted: #667085;
+            --border: #cfd6df;
+            --accent: #1769aa;
+            --error: #b42318;
+        }
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
+        body { display: flex; flex-direction: column; margin: 0; padding: 12px; overflow: hidden; background: var(--bg); color: var(--text); }
+        header, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; }
+        header { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 10px; }
+        h1 { margin: 0 auto 0 0; font-size: 20px; }
+        label { display: inline-flex; align-items: center; gap: 5px; }
+        select, button { min-height: 30px; border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; background: var(--panel); color: var(--text); }
+        button { cursor: pointer; }
+        button:hover { border-color: var(--accent); }
+        #status { width: 100%; color: var(--muted); font-size: 13px; }
+        #status.error { color: var(--error); }
+        main { --stream-width: 370px; flex: 1; min-height: 0; display: grid; grid-template-columns: var(--stream-width) 8px minmax(0, 1fr); gap: 6px; }
+        .streams { min-width: 0; height: 100%; padding: 10px; overflow: auto; }
+        .splitter { position: relative; cursor: col-resize; border-radius: 4px; background: var(--border); touch-action: none; }
+        .splitter::after { content: ""; position: absolute; top: 50%; left: 2px; width: 4px; height: 48px; margin-top: -24px; border-radius: 2px; background: var(--accent); }
+        .splitter:hover, .splitter:focus { background: var(--accent); outline: none; }
+        body.resizing { cursor: col-resize; user-select: none; }
+        .stream-heading { position: sticky; top: -10px; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -10px -10px 8px; padding: 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
+        .streams h2 { flex: 1; min-width: 150px; font-size: 16px; margin: 0; }
+        .stream-filter.active { border-color: var(--accent); background: var(--accent); color: #ffffff; }
+        .stream-list-empty { padding: 18px 4px; color: var(--muted); text-align: center; }
+        body.wall-mode .timing-control { display: none; }
+        .stream-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) 78px; gap: 6px; align-items: center; padding: 7px 2px; border-bottom: 1px solid var(--border); }
+        .stream-name { overflow: hidden; }
+        .stream-name strong, .stream-name small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .stream-name small { color: var(--muted); margin-top: 2px; }
+        .stream-axis { width: 76px; }
+        .chart-panel { min-height: 0; padding: 8px; display: flex; flex-direction: column; }
+        .chart-wrap { position: relative; flex: 1; min-height: 0; }
+        #chart { width: 100%; height: 100%; }
+        #current { display: flex; flex-wrap: wrap; gap: 8px 16px; min-height: 24px; padding: 4px 8px; color: var(--muted); font-size: 13px; }
+        .current-item b { color: var(--text); }
+        #legend-tip { position: fixed; z-index: 1000; max-width: min(420px, calc(100vw - 16px)); padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); color: var(--text); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); font-size: 13px; pointer-events: none; }
+        #legend-tip[hidden] { display: none; }
+        @media (prefers-color-scheme: dark) {
+            :root { --bg: #11151a; --panel: #1b222b; --text: #e8edf2; --muted: #a9b4c0; --border: #3b4652; --accent: #5aa9e6; }
+        }
+        @media (max-width: 850px) {
+            html, body { height: auto; min-height: 100%; }
+            body { padding: 6px; overflow: auto; }
+            header { gap: 6px 8px; padding: 8px; margin-bottom: 6px; }
+            h1 { width: 100%; font-size: 18px; }
+            select, button { min-height: 28px; padding: 2px 6px; }
+            #status { font-size: 12px; }
+            main { flex: none; grid-template-columns: 1fr; gap: 4px; }
+            .streams { max-height: 240px; padding: 8px; }
+            .stream-heading { top: -8px; margin: -8px -8px 6px; padding: 8px; }
+            .streams h2 { min-width: 120px; font-size: 14px; }
+            .stream-row { grid-template-columns: 20px minmax(0, 1fr) 72px; gap: 4px; padding: 5px 2px; }
+            .stream-axis { width: 70px; }
+            .splitter { display: none; }
+            .chart-panel { min-height: 430px; padding: 4px; }
+            .chart-wrap { min-height: 380px; }
+            #current { gap: 4px 10px; padding: 3px 4px; font-size: 12px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1 id="title">Live datastream chart</h1>
+        <label class="timing-control">Refresh
+            <select id="refresh"></select>
+        </label>
+        <label class="timing-control">Timespan
+            <select id="timespan"></select>
+        </label>
+        <label>Left style
+            <select id="left-style">
+                <option value="line">Line</option>
+                <option value="area">Area</option>
+                <option value="stacked">Stacked area (sum)</option>
+            </select>
+        </label>
+        <label>Right style
+            <select id="right-style">
+                <option value="line">Line</option>
+                <option value="area">Area</option>
+                <option value="stacked">Stacked area (sum)</option>
+            </select>
+        </label>
+        <button id="clear" type="button">Clear buffer</button>
+        <div id="status">Connecting...</div>
+    </header>
+    <main id="layout">
+        <section class="panel streams">
+            <div class="stream-heading">
+                <h2>Data stream members</h2>
+                <button id="show-all" class="stream-filter" type="button">Show all</button>
+                <button id="show-selected" class="stream-filter" type="button">Show selected</button>
+            </div>
+            <div id="stream-list"></div>
+        </section>
+        <div id="splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize data stream list" tabindex="0" title="Drag to resize; double-click to reset"></div>
+        <section class="panel chart-panel">
+            <div id="current"></div>
+            <div class="chart-wrap"><canvas id="chart"></canvas></div>
+        </section>
+    </main>
+    <div id="legend-tip" role="tooltip" hidden></div>
+    <script>
+        "use strict";
+
+        const baseUrl = window.location.pathname.replace(/\/$/, "");
+        const palette = ["#1769aa", "#d84315", "#2e7d32", "#7b1fa2", "#00838f", "#c62828", "#6d4c41", "#455a64", "#ad7c00", "#3949ab", "#00897b", "#ef6c00", "#5e35b1", "#43a047", "#e53935", "#039be5"];
+        const ui = {
+            title: document.getElementById("title"),
+            refresh: document.getElementById("refresh"),
+            timespan: document.getElementById("timespan"),
+            leftStyle: document.getElementById("left-style"),
+            rightStyle: document.getElementById("right-style"),
+            clear: document.getElementById("clear"),
+            status: document.getElementById("status"),
+            layout: document.getElementById("layout"),
+            splitter: document.getElementById("splitter"),
+            streams: document.querySelector(".streams"),
+            streamList: document.getElementById("stream-list"),
+            showAll: document.getElementById("show-all"),
+            showSelected: document.getElementById("show-selected"),
+            current: document.getElementById("current"),
+            legendTip: document.getElementById("legend-tip")
+        };
+        let state = null;
+        let chart = null;
+        let pollTimer = null;
+        let requestPending = false;
+        let streamFilter = null;
+        let wallNow = null;
+        const wallMode = new URLSearchParams(window.location.search).get("wall") === "1";
+        const streamWidthStorageKey = `${baseUrl}:streamWidth`;
+        let lastWallTimingRequest = "";
+        if (wallMode) document.body.classList.add("wall-mode");
+
+        function setStreamWidth(value) {
+            const maximum = Math.max(260, Math.floor(window.innerWidth * 0.7));
+            const width = Math.max(260, Math.min(maximum, Math.round(value)));
+            ui.layout.style.setProperty("--stream-width", `${width}px`);
+            return width;
+        }
+
+        function loadStreamWidth() {
+            try {
+                const stored = Number(window.localStorage.getItem(streamWidthStorageKey));
+                if (Number.isFinite(stored) && stored > 0) setStreamWidth(stored);
+            } catch (error) {
+                console.warn(`Could not load stream panel width: ${error.message}`);
+            }
+        }
+
+        function saveStreamWidth(width) {
+            if (wallMode) {
+                window.parent.postMessage({ type: "uniflex-live-chart-stream-width", width }, window.location.origin);
+                return;
+            }
+            try {
+                window.localStorage.setItem(streamWidthStorageKey, String(width));
+            } catch (error) {
+                console.warn(`Could not save stream panel width: ${error.message}`);
+            }
+        }
+
+        function beginStreamResize(event) {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            const startX = event.clientX;
+            const startWidth = ui.streams.getBoundingClientRect().width;
+            ui.splitter.setPointerCapture(event.pointerId);
+            document.body.classList.add("resizing");
+
+            const move = (moveEvent) => setStreamWidth(startWidth + moveEvent.clientX - startX);
+            const finish = () => {
+                ui.splitter.removeEventListener("pointermove", move);
+                ui.splitter.removeEventListener("pointerup", finish);
+                ui.splitter.removeEventListener("pointercancel", finish);
+                document.body.classList.remove("resizing");
+                saveStreamWidth(parseFloat(getComputedStyle(ui.layout).getPropertyValue("--stream-width")));
+            };
+            ui.splitter.addEventListener("pointermove", move);
+            ui.splitter.addEventListener("pointerup", finish);
+            ui.splitter.addEventListener("pointercancel", finish);
+        }
+
+        ui.splitter.addEventListener("pointerdown", beginStreamResize);
+        ui.splitter.addEventListener("dblclick", () => saveStreamWidth(setStreamWidth(370)));
+        ui.splitter.addEventListener("keydown", (event) => {
+            if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+            event.preventDefault();
+            const current = parseFloat(getComputedStyle(ui.layout).getPropertyValue("--stream-width")) || 370;
+            saveStreamWidth(setStreamWidth(current + (event.key === "ArrowLeft" ? -20 : 20)));
+        });
+        window.addEventListener("resize", () => {
+            const current = parseFloat(getComputedStyle(ui.layout).getPropertyValue("--stream-width")) || 370;
+            setStreamWidth(current);
+        });
+        if (!wallMode) loadStreamWidth();
+
+        function displayUnit(unit) {
+            return unit === "_" ? "unitless" : unit;
+        }
+
+        function setStatus(text, error) {
+            ui.status.textContent = text;
+            ui.status.classList.toggle("error", !!error);
+        }
+
+        function fillSelect(select, values, suffix) {
+            const oldValue = select.value;
+            select.innerHTML = "";
+            values.forEach((value) => {
+                const option = document.createElement("option");
+                option.value = String(value);
+                option.textContent = `${value} ${suffix}`;
+                select.appendChild(option);
+            });
+            if (oldValue) select.value = oldValue;
+        }
+
+        function selectedWithout(topic) {
+            return state.settings.selected.filter((item) => item.topic !== topic);
+        }
+
+        function unitForAxis(selected, axis) {
+            const item = selected.find((entry) => entry.axis === axis);
+            return item ? state.catalog.find((entry) => entry.topic === item.topic)?.unit || null : null;
+        }
+
+        function axisAllowed(topic, axis) {
+            const stream = state.catalog.find((item) => item.topic === topic);
+            const remaining = selectedWithout(topic);
+            const ownAxisUnit = unitForAxis(remaining, axis);
+            const otherAxis = axis === "left" ? "right" : "left";
+            const otherAxisUnit = unitForAxis(remaining, otherAxis);
+            return (!ownAxisUnit || ownAxisUnit === stream.unit) && (!otherAxisUnit || otherAxisUnit !== stream.unit);
+        }
+
+        function renderStreamList() {
+            const selectedByTopic = new Map(state.settings.selected.map((item) => [item.topic, item]));
+            ui.streamList.innerHTML = "";
+
+            const visibleStreams = streamFilter === "selected" ? state.catalog.filter((stream) => selectedByTopic.has(stream.topic)) : state.catalog;
+            if (visibleStreams.length === 0) {
+                const empty = document.createElement("div");
+                empty.className = "stream-list-empty";
+                empty.textContent = streamFilter === "selected" ? "No selected datastreams." : "No configured datastreams.";
+                ui.streamList.appendChild(empty);
+                return;
+            }
+
+            visibleStreams.forEach((stream) => {
+                const selected = selectedByTopic.get(stream.topic);
+                const row = document.createElement("div");
+                row.className = "stream-row";
+
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.checked = !!selected;
+                checkbox.title = `Show ${stream.topic}`;
+
+                const name = document.createElement("div");
+                name.className = "stream-name";
+                const strong = document.createElement("strong");
+                strong.textContent = stream.topic;
+                strong.title = stream.label;
+                const small = document.createElement("small");
+                small.textContent = `${stream.description}; unit: ${displayUnit(stream.unit)}`;
+                small.title = small.textContent;
+                name.append(strong, small);
+
+                const axis = document.createElement("select");
+                axis.className = "stream-axis";
+                ["left", "right"].forEach((axisName) => {
+                    const option = document.createElement("option");
+                    option.value = axisName;
+                    option.textContent = axisName === "left" ? "Left" : "Right";
+                    option.disabled = !axisAllowed(stream.topic, axisName);
+                    axis.appendChild(option);
+                });
+                axis.value = selected?.axis || (axisAllowed(stream.topic, "left") ? "left" : "right");
+                axis.disabled = !selected;
+
+                checkbox.addEventListener("change", async () => {
+                    const next = selectedWithout(stream.topic);
+                    if (checkbox.checked) {
+                        const preferred = axisAllowed(stream.topic, axis.value) ? axis.value : axisAllowed(stream.topic, "left") ? "left" : axisAllowed(stream.topic, "right") ? "right" : null;
+                        if (!preferred) {
+                            checkbox.checked = false;
+                            setStatus(`No compatible axis is available for unit ${displayUnit(stream.unit)}`, true);
+                            return;
+                        }
+                        next.push({ topic: stream.topic, axis: preferred });
+                    }
+                    await saveSettings({ selected: next });
+                });
+
+                axis.addEventListener("change", async () => {
+                    if (!axisAllowed(stream.topic, axis.value)) {
+                        setStatus(`Unit ${displayUnit(stream.unit)} is not compatible with the ${axis.value} axis`, true);
+                        renderStreamList();
+                        return;
+                    }
+                    const next = selectedWithout(stream.topic);
+                    next.push({ topic: stream.topic, axis: axis.value });
+                    await saveSettings({ selected: next });
+                });
+
+                row.append(checkbox, name, axis);
+                ui.streamList.appendChild(row);
+            });
+        }
+
+        function updateStreamFilterButtons() {
+            ui.showAll.classList.toggle("active", streamFilter === "all");
+            ui.showSelected.classList.toggle("active", streamFilter === "selected");
+        }
+
+        function setStreamFilter(next) {
+            streamFilter = next;
+            updateStreamFilterButtons();
+            ui.streams.scrollTop = 0;
+            renderStreamList();
+        }
+
+        function chartTextColor() {
+            return getComputedStyle(document.documentElement).getPropertyValue("--text").trim();
+        }
+
+        function hideLegendTip() {
+            ui.legendTip.hidden = true;
+        }
+
+        function showLegendTip(event, legendItem, legend) {
+            const dataset = legend.chart.data.datasets[legendItem.datasetIndex];
+            if (!dataset?.description) return hideLegendTip();
+            const rect = legend.chart.canvas.getBoundingClientRect();
+            ui.legendTip.textContent = dataset.description;
+            ui.legendTip.style.left = `${Math.max(8, Math.min(window.innerWidth - 428, rect.left + event.x + 12))}px`;
+            ui.legendTip.style.top = `${Math.max(8, rect.top + event.y + 12)}px`;
+            ui.legendTip.hidden = false;
+        }
+
+        function currentChartTime() {
+            return Number.isFinite(wallNow) ? wallNow : state.serverTime;
+        }
+
+        function fitWallAxis(scale) {
+            if (wallMode && scale.options.display) scale.width = window.innerWidth <= 850 ? 52 : 84;
+        }
+
+        function updateWallTime(nextNow) {
+            wallNow = nextNow;
+            if (!chart || !state) return;
+            const windowStart = wallNow - state.settings.timespanMinutes * 60000;
+            chart.options.scales.x.min = windowStart;
+            chart.options.scales.x.max = wallNow;
+            chart.data.datasets.forEach((dataset) => {
+                if (dataset.stepped !== "after" || dataset.data.length === 0) return;
+                const last = dataset.data[dataset.data.length - 1];
+                if (last.wallEndpoint) {
+                    last.x = wallNow;
+                } else {
+                    dataset.data.push({ x: wallNow, y: last.y, wallEndpoint: true });
+                }
+            });
+            chart.update("none");
+        }
+
+        function applyWallTiming(refreshSeconds, timespanMinutes) {
+            if (!state) return;
+            if (state.settings.refreshSeconds === refreshSeconds && state.settings.timespanMinutes === timespanMinutes) {
+                lastWallTimingRequest = "";
+                return;
+            }
+            const requestKey = `${refreshSeconds}:${timespanMinutes}`;
+            if (requestKey === lastWallTimingRequest) return;
+            lastWallTimingRequest = requestKey;
+            saveSettings({ refreshSeconds, timespanMinutes }).finally(() => {
+                lastWallTimingRequest = "";
+            });
+        }
+
+        function renderChart() {
+            const now = currentChartTime();
+            const windowStart = now - state.settings.timespanMinutes * 60000;
+            const previousDataset = { left: null, right: null };
+            const axisStyles = state.settings.axisStyles || { left: "line", right: "area" };
+            const datasets = state.settings.selected.map((selected, index) => {
+                const stream = state.catalog.find((item) => item.topic === selected.topic);
+                const color = palette[index % palette.length];
+                const style = axisStyles[selected.axis];
+                const filled = style === "area" || style === "stacked";
+                const unitless = stream.unit === "_";
+                const data = (state.points[stream.topic] || []).map((point) => ({ x: point[0], y: point[1] }));
+                if (unitless) {
+                    const latest = state.latest[stream.topic];
+                    if (data.length > 0) {
+                        const last = data[data.length - 1];
+                        if (last.x < now) data.push({ x: now, y: last.y, wallEndpoint: true });
+                    } else if (latest) {
+                        data.push({ x: Math.max(windowStart, latest.timestamp), y: latest.value });
+                        if (latest.timestamp < now) data.push({ x: now, y: latest.value, wallEndpoint: true });
+                    }
+                }
+                let fill = false;
+                let stack;
+                let fillOpacity = "2e";
+                if (style === "area") {
+                    fill = "origin";
+                } else if (style === "stacked") {
+                    fill = previousDataset[selected.axis];
+                    if (fill === null) fill = "origin";
+                    stack = `${selected.axis}-axis`;
+                    fillOpacity = "55";
+                }
+                const dataset = {
+                    label: `${stream.topic} [${displayUnit(stream.unit)}]`,
+                    description: stream.description,
+                    data: data,
+                    yAxisID: selected.axis === "left" ? "yLeft" : "yRight",
+                    stack,
+                    fill: fill,
+                    borderColor: color,
+                    backgroundColor: `${color}${fillOpacity}`,
+                    borderDash: selected.axis === "right" ? [7, 4] : [],
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    pointHitRadius: 5,
+                    showLine: true,
+                    stepped: unitless ? "after" : false,
+                    spanGaps: true,
+                    parsing: false,
+                    normalized: true
+                };
+                previousDataset[selected.axis] = index;
+                return dataset;
+            });
+            const textColor = chartTextColor();
+            const leftUnit = state.axisUnits.left;
+            const rightUnit = state.axisUnits.right;
+            const options = {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                layout: {
+                    padding: {
+                        left: wallMode && !leftUnit ? (window.innerWidth <= 850 ? 52 : 84) : 0,
+                        right: wallMode && !rightUnit ? (window.innerWidth <= 850 ? 52 : 84) : 0
+                    }
+                },
+                interaction: { mode: "nearest", intersect: false },
+                plugins: {
+                    legend: {
+                        position: "top",
+                        labels: { color: textColor },
+                        onHover: showLegendTip,
+                        onLeave: hideLegendTip
+                    },
+                    tooltip: {
+                        callbacks: {
+                            title: (items) => items.length ? new Date(items[0].parsed.x).toLocaleTimeString() : ""
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        type: "linear",
+                        min: now - state.settings.timespanMinutes * 60000,
+                        max: now,
+                        ticks: {
+                            color: textColor,
+                            callback: (value) => new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+                        },
+                        title: { display: true, text: "Local time", color: textColor }
+                    },
+                    yLeft: {
+                        type: "linear",
+                        display: !!leftUnit,
+                        position: "left",
+                        stacked: axisStyles.left === "stacked",
+                        afterFit: fitWallAxis,
+                        ticks: { color: textColor },
+                        title: { display: !!leftUnit, text: leftUnit ? displayUnit(leftUnit) : "", color: textColor }
+                    },
+                    yRight: {
+                        type: "linear",
+                        display: !!rightUnit,
+                        position: "right",
+                        stacked: axisStyles.right === "stacked",
+                        afterFit: fitWallAxis,
+                        grid: { drawOnChartArea: false },
+                        ticks: { color: textColor },
+                        title: { display: !!rightUnit, text: rightUnit ? displayUnit(rightUnit) : "", color: textColor }
+                    }
+                }
+            };
+
+            if (!chart) {
+                chart = new Chart(document.getElementById("chart"), { type: "line", data: { datasets }, options });
+            } else {
+                chart.data.datasets = datasets;
+                chart.options = options;
+                chart.update("none");
+            }
+
+            ui.current.innerHTML = "";
+            state.settings.selected.forEach((selected) => {
+                const stream = state.catalog.find((item) => item.topic === selected.topic);
+                const current = state.latest[selected.topic];
+                const item = document.createElement("span");
+                item.className = "current-item";
+                const label = document.createElement("b");
+                label.textContent = `${stream.topic}: `;
+                item.appendChild(label);
+                item.appendChild(document.createTextNode(current ? `${current.value} ${displayUnit(stream.unit)}` : "waiting"));
+                ui.current.appendChild(item);
+            });
+        }
+
+        function applyState(nextState) {
+            state = nextState;
+            if (streamFilter === null) {
+                streamFilter = state.settings.selected.length > 0 ? "selected" : "all";
+                updateStreamFilterButtons();
+            }
+            ui.title.textContent = state.name;
+            fillSelect(ui.refresh, state.limits.refreshSeconds, "s");
+            fillSelect(ui.timespan, state.limits.timespanMinutes, "min");
+            ui.refresh.value = String(state.settings.refreshSeconds);
+            ui.timespan.value = String(state.settings.timespanMinutes);
+            ui.leftStyle.value = state.settings.axisStyles?.left || "line";
+            ui.rightStyle.value = state.settings.axisStyles?.right || "area";
+            renderStreamList();
+            renderChart();
+            const elapsed = state.activeSince ? Math.max(0, Math.floor((state.serverTime - state.activeSince) / 1000)) : 0;
+            const pointCount = Object.values(state.points).reduce((sum, points) => sum + points.length, 0);
+            if (state.metadataWarning) {
+                setStatus(state.metadataWarning, true);
+            } else {
+                setStatus(`Viewer active for ${elapsed}s; ${state.settings.selected.length} series; ${pointCount} buffered points`, false);
+            }
+        }
+
+        async function fetchJson(url, options) {
+            const response = await fetch(url, options);
+            const body = response.status === 204 ? null : await response.json();
+            if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
+            return body;
+        }
+
+        async function saveSettings(change) {
+            if (!state) return;
+            try {
+                const payload = {
+                    refreshSeconds: change.refreshSeconds ?? state.settings.refreshSeconds,
+                    timespanMinutes: change.timespanMinutes ?? state.settings.timespanMinutes,
+                    selected: change.selected ?? state.settings.selected,
+                    axisStyles: change.axisStyles ?? state.settings.axisStyles
+                };
+                applyState(await fetchJson(`${baseUrl}/settings`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                }));
+                schedulePoll();
+            } catch (error) {
+                setStatus(error.message, true);
+                await poll();
+            }
+        }
+
+        async function poll() {
+            if (requestPending) return;
+            requestPending = true;
+            try {
+                applyState(await fetchJson(`${baseUrl}/state`));
+            } catch (error) {
+                setStatus(`Disconnected: ${error.message}`, true);
+            } finally {
+                requestPending = false;
+                schedulePoll();
+            }
+        }
+
+        function schedulePoll() {
+            clearTimeout(pollTimer);
+            const delay = state ? state.settings.refreshSeconds * 1000 : 5000;
+            pollTimer = setTimeout(poll, delay);
+        }
+
+        ui.refresh.addEventListener("change", () => saveSettings({ refreshSeconds: Number(ui.refresh.value) }));
+        ui.timespan.addEventListener("change", () => saveSettings({ timespanMinutes: Number(ui.timespan.value) }));
+        ui.leftStyle.addEventListener("change", () => saveSettings({ axisStyles: { ...state.settings.axisStyles, left: ui.leftStyle.value } }));
+        ui.rightStyle.addEventListener("change", () => saveSettings({ axisStyles: { ...state.settings.axisStyles, right: ui.rightStyle.value } }));
+        ui.showAll.addEventListener("click", () => setStreamFilter("all"));
+        ui.showSelected.addEventListener("click", () => setStreamFilter("selected"));
+        ui.clear.addEventListener("click", async () => {
+            try {
+                applyState(await fetchJson(`${baseUrl}/clear`, { method: "POST" }));
+            } catch (error) {
+                setStatus(error.message, true);
+            }
+        });
+        window.addEventListener("message", (event) => {
+            if (!wallMode || event.origin !== window.location.origin || event.data?.type !== "uniflex-live-chart-wall-state") return;
+            const nextNow = Number(event.data.now);
+            if (Number.isFinite(nextNow)) updateWallTime(nextNow);
+            const width = Number(event.data.streamWidth);
+            if (Number.isFinite(width)) setStreamWidth(width);
+            const refreshSeconds = Number(event.data.refreshSeconds);
+            const timespanMinutes = Number(event.data.timespanMinutes);
+            if (Number.isFinite(refreshSeconds) && Number.isFinite(timespanMinutes)) {
+                applyWallTiming(refreshSeconds, timespanMinutes);
+            }
+        });
+        window.addEventListener("pagehide", () => {
+            clearTimeout(pollTimer);
+            navigator.sendBeacon(`${baseUrl}/close`, "");
+        });
+
+        poll();
+    </script>
+</body>
+</html>

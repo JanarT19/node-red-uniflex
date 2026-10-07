@@ -1,0 +1,99 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-room-overheat-checker", {
+        category: "heating-control",
+        color: "#B0E0E6",
+        defaults: {
+            name: { value: "" },
+            coolExcessOn: { value: 2.5, required: true },
+            coolExcessHyst: { value: 0.2, required: true },
+            coolPriceLimit: { value: 50, required: true },
+            coolPriceHyst: { value: 5, required: true },
+            staleThresholdHours: { value: 2, required: true },
+            excludeRooms: { value: "WG_air" },
+            roomToFowMap: { value: "" },
+            enableAutoFow: { value: true },
+            spotPriceTopic: { value: "PRENW.3" },
+            hcmwForceHeatTopic: { value: "HCMW.1" },
+            hcmwForceCoolTopic: { value: "HCMW.2" },
+            coolingRequiredTopic: { value: "heating/coolingRequired" },
+            outputTopic: { value: "MPCGW.9" }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-snowflake-o",
+        label: function () {
+            return this.name || "room overheat";
+        },
+        paletteLabel: "room overheat"
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-room-overheat-checker">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="room-overheat-checker">
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolExcessOn">Excess on (C above Tset)</label>
+        <input type="number" id="node-input-coolExcessOn" step="0.1" style="width:80px;">
+        <span style="margin-left:8px;color:#999;">Start when e &gt; E_ref + h (default 2.5)</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolExcessHyst">Excess hysteresis h (C)</label>
+        <input type="number" id="node-input-coolExcessHyst" step="0.05" style="width:80px;">
+        <span style="margin-left:8px;color:#999;">Symmetric: off when e &lt; E_ref - h</span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolPriceLimit">Price on (EUR/MWh)</label>
+        <input type="number" id="node-input-coolPriceLimit" step="1" style="width:80px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolPriceHyst">Price hysteresis (EUR/MWh)</label>
+        <input type="number" id="node-input-coolPriceHyst" step="1" style="width:80px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-staleThresholdHours">Stale forecast (h)</label>
+        <input type="number" id="node-input-staleThresholdHours" style="width:80px;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-excludeRooms">Exclude rooms</label>
+        <input type="text" id="node-input-excludeRooms" placeholder="WG_air">
+    </div>
+    <div class="form-row">
+        <label for="node-input-enableAutoFow">Auto FOW</label>
+        <input type="checkbox" id="node-input-enableAutoFow" style="width:auto;">
+    </div>
+    <div class="form-row">
+        <label for="node-input-roomToFowMap">Room to FOW map (JSON)</label>
+        <input type="text" id="node-input-roomToFowMap" placeholder="leave empty for k20 defaults">
+    </div>
+    <div class="form-row">
+        <label for="node-input-spotPriceTopic">Spot price in</label>
+        <input type="text" id="node-input-spotPriceTopic" placeholder="PRENW.3">
+    </div>
+    <div class="form-row">
+        <label for="node-input-hcmwForceHeatTopic">HCMW force heat</label>
+        <input type="text" id="node-input-hcmwForceHeatTopic" placeholder="HCMW.1">
+    </div>
+    <div class="form-row">
+        <label for="node-input-hcmwForceCoolTopic">HCMW force cool</label>
+        <input type="text" id="node-input-hcmwForceCoolTopic" placeholder="HCMW.2">
+    </div>
+    <div class="form-row">
+        <label for="node-input-coolingRequiredTopic">Cooling required out</label>
+        <input type="text" id="node-input-coolingRequiredTopic" placeholder="heating/coolingRequired">
+    </div>
+    <div class="form-row">
+        <label for="node-input-outputTopic">Monitor out (optional)</label>
+        <input type="text" id="node-input-outputTopic" placeholder="MPCGW.9">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-room-overheat-checker">
+    <p>Per-room auto-cooling arbitrator for k20-style floor cooling.</p>
+    <p>Reads <code>roomForecasts</code> from mpc-room-advanced. Starts when any room exceeds
+    <code>Tset + E_ref + h</code> (or forecast will), price is cheap, and HCMW is auto mode.</p>
+    <p>Outputs <code>heating/coolingRequired</code> for hp-control and auto-writes <code>FOW.*</code>
+    for hot rooms. Exclude wintergarden (<code>WG_air</code>) by default.</p>
+    <p>Forced cool (HCMW.2): auto FOW idle; use manual ForceOpenValve.</p>
+</script>

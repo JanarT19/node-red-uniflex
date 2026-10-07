@@ -1,0 +1,157 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-multivibrator", {
+        category: "uniflex utils",
+        color: "#C4B5A5",
+        icon: "font-awesome/fa-refresh",
+        defaults: {
+            name: { value: "" },
+            outputTopic: { value: "", required: true },
+            periodSec: { value: 10, validate: RED.validators.number() },
+            startValue: { value: 0 },
+            traceLabel: { value: "mv" },
+            directWrite: { value: true },
+            transport: { value: "raw_tcp" },
+            host: { value: "127.0.0.1" },
+            tcpPort: { value: 19080, validate: RED.validators.number() },
+            httpPort: { value: 80, validate: RED.validators.number() },
+            channelType: { value: "do" }
+        },
+        inputs: 0,
+        outputs: 1,
+        label: function () {
+            return this.name || "multivibrator";
+        },
+        paletteLabel: "multivibrator",
+
+        oneditprepare: function () {
+            function toggleDirectFields() {
+                const on = $("#node-input-directWrite").is(":checked");
+                $("#multivibrator-direct-fields").toggle(on);
+            }
+
+            function updateTipText() {
+                const output = $("#node-input-outputTopic").val() || "<not set>";
+                const period = $("#node-input-periodSec").val() || "10";
+                const label = $("#node-input-traceLabel").val() || "mv";
+                const direct = $("#node-input-directWrite").is(":checked");
+                const transport = $("#node-input-transport").val() || "raw_tcp";
+                let tip = `Toggle 0/1 on topic "${output}" every ${period}s. Starts on deploy.`;
+                if (direct) {
+                    tip += ` Direct iolayer write via ${transport} (no write-node mapping needed).`;
+                } else {
+                    tip += ` Message output only; wire to send-data-streams with a matching row.`;
+                }
+                tip += ` Trace step: ${label}.`;
+                $("#node-input-tip-text").html(tip);
+            }
+
+            $("#node-input-outputTopic, #node-input-periodSec, #node-input-traceLabel, #node-input-directWrite, #node-input-transport").on(
+                "input change",
+                function () {
+                    toggleDirectFields();
+                    updateTipText();
+                }
+            );
+
+            function queryControllerConfig() {
+                return $.getJSON("uniflex/controller-config").then(function (data) {
+                    return data || {};
+                });
+            }
+
+            function initializeAutocomplete($input) {
+                const allTopics = [];
+                queryControllerConfig().done(function (controllers) {
+                    for (const ctrl of Object.values(controllers)) {
+                        if (ctrl.datastreams) {
+                            for (const ds of Object.values(ctrl.datastreams)) {
+                                if (ds.topic) {
+                                    allTopics.push(ds.topic);
+                                }
+                            }
+                        }
+                    }
+                    $input.autocomplete({
+                        source: allTopics,
+                        minLength: 0
+                    }).focus(function () {
+                        $(this).autocomplete("search", "");
+                    });
+                });
+            }
+
+            initializeAutocomplete($("#node-input-outputTopic"));
+            toggleDirectFields();
+            updateTipText();
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-multivibrator">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="multivibrator">
+    </div>
+    <div class="form-row">
+        <label for="node-input-outputTopic"><i class="fa fa-sign-out"></i> Output topic</label>
+        <input type="text" id="node-input-outputTopic" placeholder="DO41W.7">
+    </div>
+    <div class="form-row">
+        <label for="node-input-periodSec"><i class="fa fa-clock-o"></i> Period (s)</label>
+        <input type="number" id="node-input-periodSec" min="0.1" step="0.1" placeholder="10">
+    </div>
+    <div class="form-row">
+        <label for="node-input-startValue"><i class="fa fa-play"></i> Start value</label>
+        <select id="node-input-startValue">
+            <option value="0">0</option>
+            <option value="1">1</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-traceLabel"><i class="fa fa-bug"></i> Trace step</label>
+        <input type="text" id="node-input-traceLabel" placeholder="mv">
+    </div>
+    <div class="form-row">
+        <label for="node-input-directWrite">&nbsp;</label>
+        <input type="checkbox" id="node-input-directWrite" style="width:auto; vertical-align:top; margin-right:5px;">
+        <label for="node-input-directWrite" style="width:auto">Direct iolayer write (recommended for tests)</label>
+    </div>
+    <div id="multivibrator-direct-fields">
+        <div class="form-row">
+            <label for="node-input-transport"><i class="fa fa-exchange"></i> Transport</label>
+            <select id="node-input-transport" style="width:220px">
+                <option value="raw_tcp">Raw TCP (port 19080)</option>
+                <option value="http">HTTP /setup (port 80)</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="node-input-host"><i class="fa fa-globe"></i> Host</label>
+            <input type="text" id="node-input-host" placeholder="127.0.0.1">
+        </div>
+        <div class="form-row">
+            <label for="node-input-tcpPort"><i class="fa fa-plug"></i> TCP port</label>
+            <input type="number" id="node-input-tcpPort" min="1" max="65535" placeholder="19080">
+        </div>
+        <div class="form-row">
+            <label for="node-input-httpPort"><i class="fa fa-plug"></i> HTTP port</label>
+            <input type="number" id="node-input-httpPort" min="1" max="65535" placeholder="80">
+        </div>
+        <div class="form-row">
+            <label for="node-input-channelType"><i class="fa fa-cog"></i> Channel type</label>
+            <select id="node-input-channelType" style="width:220px">
+                <option value="do">do (discrete output)</option>
+                <option value="di">di (discrete input / simulate)</option>
+                <option value="ai">ai</option>
+                <option value="ao">ao</option>
+            </select>
+        </div>
+    </div>
+    <div class="form-tips" id="node-input-tip-text"></div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-multivibrator">
+    <p>Astable multivibrator for test stimulus.</p>
+    <p>Toggles 0/1 every <code>periodSec</code> on <code>outputTopic</code> (format KEY.MEMBER, e.g. DO41W.7).</p>
+    <p>With <b>Direct iolayer write</b> enabled, sends setup commands to iolayer without a send-data-streams mapping row.</p>
+    <p>Prefers raw TCP port 19080; falls back to HTTP /setup if TCP is down.</p>
+</script>

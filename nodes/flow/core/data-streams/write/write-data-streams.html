@@ -37,7 +37,7 @@
                     return Number.isInteger(n) && n >= 0;
                 }
             }, // Gate duration in milliseconds
-            debugTopics: { value: "" }, // Comma-separated topic prefixes to debug (empty = all topics)
+            debugTopics: { value: "" }, // Comma-separated topic prefixes; empty = no debug logging
             mappings: { value: [] } // Store multiple mappings
         },
         inputs: 1,
@@ -198,6 +198,9 @@
                     .done(function (data) {
                         _controller = data;
                         rebuildKeySuggestionsCache();
+                        if (data.servicesError) {
+                            RED.notify(data.servicesError, { type: "warning", timeout: 10000 });
+                        }
                     })
                     .fail(function (jqXHR, textStatus, errorThrown) {
                         RED.notify("Failed to query controller configuration!", { type: "error", timeout: 3000 });
@@ -2446,9 +2449,17 @@
             <span style="margin-left:10px;color:#666;font-size:90%">Prevents feedback loops by ignoring reads for this duration after write</span>
         </div>
     <div class="form-row">
-      <label for="node-input-debugTopics"><i class="fa fa-bug"></i> Debug topics (comma-separated prefixes)</label>
-      <input type="text" id="node-input-debugTopics" placeholder="AVGW,TDW (empty = no logging)" style="width:300px">
-      <span style="margin-left:10px;color:#666;font-size:90%">Only log debug messages for topics starting with these prefixes. Leave empty to disable logging.</span>
+      <label for="node-input-debugTopics"><i class="fa fa-bug"></i> Debug log filter</label>
+      <input type="text" id="node-input-debugTopics" placeholder="P1C,P2C or P1C206S (empty = off)" style="width:300px">
+    </div>
+    <div class="form-row">
+      <label></label>
+      <div class="form-tips" style="max-width:520px">
+        Optional Node-RED log filter only; writes are unchanged.<br>
+        Comma-separated prefixes, matched with startsWith against mapping topic names
+        (e.g. P1C206S.1). Examples: P1C,P2C (all cooled comfort pulse topics);
+        P1C206S (one flat); AVGW (all AVGW members). Empty = no batch/send debug logs.
+      </div>
     </div>
 
         <div id="write-ds-loading" class="write-ds-loading">
@@ -2511,7 +2522,7 @@
     <p>This node gets its data from the controller configuration and the global context.</p>
     <p>In order to preserve the unit of the defined data stream, the payload is multiplied by the coefficient (if applicable).</p>
     <p><strong>Force write</strong>: when enabled on any row, this node adds <code>forced:true</code> to the <code>/setup</code> POST. The backend will then write to Modbus even if the value has not changed (useful for some devices).</p>
-    <p><strong>Note</strong>: for regtype <code>h!</code>/<code>c!</code the backend already performs direct Modbus writes, so Force write is usually unnecessary. Also, <code>forced:true</code> applies to the whole POST batch (all values sent together).</p>
+    <p><strong>Note</strong>: for regtype <code>h!</code>/<code>c!</code the backend already performs direct Modbus writes, so Force write is usually unnecessary. <code>forced:true</code> is a top-level <code>/setup</code> flag, so this node splits the batch: normal writes in one POST, forced writes (row Force write or <code>msg.forced</code>) in a second POST.</p>
 
     <p>The exact payload format depends on the message type. Example incoming messages:</p>
     <p>

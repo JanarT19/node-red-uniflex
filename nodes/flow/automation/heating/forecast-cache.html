@@ -1,0 +1,109 @@
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-forecast-cache", {
+        category: "uniflex home",
+        color: "#B8E2CF",
+        icon: "font-awesome/fa-database",
+        defaults: {
+            name: { value: "" },
+            calendarHost: { value: "localhost" },
+            calendarPort: { value: 80, validate: RED.validators.number() },
+            toutTitle: { value: "main_temp" },
+            windTitle: { value: "wind_speed" },
+            irradianceTitle: { value: "solar_irradiance" },
+            forecastStepMin: { value: 60, validate: RED.validators.number() },
+            fetchOnStartup: { value: true }
+        },
+        inputs: 1,
+        outputs: 0,
+        label: function () {
+            return this.name || "forecast cache";
+        },
+        paletteLabel: "forecast cache"
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-forecast-cache">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="forecast-cache" />
+    </div>
+
+    <hr />
+    <b>Calendar API</b>
+
+    <div class="form-row">
+        <label for="node-input-calendarHost"><i class="fa fa-server"></i> Host</label>
+        <input type="text" id="node-input-calendarHost" placeholder="localhost" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-calendarPort"><i class="fa fa-plug"></i> Port</label>
+        <input type="number" id="node-input-calendarPort" min="1" max="65535" />
+    </div>
+
+    <hr />
+    <b>Calendar Series</b>
+
+    <div class="form-row">
+        <label for="node-input-toutTitle"><i class="fa fa-thermometer-half"></i> Temperature</label>
+        <input type="text" id="node-input-toutTitle" placeholder="main_temp" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-windTitle"><i class="fa fa-flag"></i> Wind speed</label>
+        <input type="text" id="node-input-windTitle" placeholder="wind_speed" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-irradianceTitle"><i class="fa fa-sun-o"></i> Irradiance</label>
+        <input type="text" id="node-input-irradianceTitle" placeholder="solar_irradiance" />
+    </div>
+
+    <hr />
+    <b>Array Resolution</b>
+
+    <div class="form-row">
+        <label for="node-input-forecastStepMin"><i class="fa fa-clock-o"></i> Step (min)</label>
+        <input type="number" id="node-input-forecastStepMin" min="15" max="180" step="15" />
+        <div class="form-tips">Slot width in minutes. Calendar data is hourly, so 60 is typical. Horizon is auto-detected from available data.</div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-fetchOnStartup"><i class="fa fa-play"></i> Fetch on startup</label>
+        <input type="checkbox" id="node-input-fetchOnStartup" style="width: auto;" />
+        <div class="form-tips">Fetch 10s after deploy to populate context immediately.</div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-forecast-cache">
+    <h3>Forecast Cache</h3>
+    <p>
+        Fetches full forecast arrays (outdoor temperature, wind speed, solar irradiance) from
+        sql-calendar and stores them in <code>flow.forecastCache</code> for consumption by
+        <code>mpc-room-advanced</code> nodes during demand forecasting.
+        Also writes calendar series <code>main_temp_avg</code>: one outdoor-temperature mean
+        per local date, from today through the forecast. Past dates are not kept.
+    </p>
+
+    <h4>When to trigger</h4>
+    <p>
+        Wire from the weather fetch chain output (after openweather-fetcher writes to calendar).
+        Typically fires twice daily after weather forecast refresh.
+        Any input message triggers a fetch -- topic is ignored.
+    </p>
+
+    <h4>Flow Context</h4>
+    <p>Stores <code>flow.forecastCache</code> with keys:</p>
+    <ul>
+        <li><code>timestamp</code> -- when cache was written (ms)</li>
+        <li><code>baseSlot</code> -- start timestamp of slot 0 (unix seconds)</li>
+        <li><code>stepSec</code> -- slot width in seconds</li>
+        <li><code>slots</code> -- max array length (arrays may differ in length)</li>
+        <li><code>Tout</code> -- outdoor temperature array (°C)</li>
+        <li><code>wind</code> -- wind speed array (m/s)</li>
+        <li><code>irradiance</code> -- solar irradiance array (kW/m²)</li>
+    </ul>
+    <p>Array lengths are auto-determined from available calendar data. Consumers
+    should check array bounds and use <code>slots</code> or individual array lengths.</p>
+
+    <h4>Typical Wiring</h4>
+    <pre>
+[cronplus 04:30,16:30] → [openweather-fetcher] → [sql-calendar] → [forecast-cache]
+    </pre>
+</script>

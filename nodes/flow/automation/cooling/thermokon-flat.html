@@ -11,16 +11,9 @@
             writeTopics: { value: "" },
             modeTopics: { value: "" },
             displayTopics: { value: "" },
-            pirTopics: { value: "" },
-            pirZoneIndices: { value: "" },
-            r340ReadTopics: { value: "" },
             sanitaryWriteTopic: { value: "" },
-            r340HoldSec: {
-                value: 65535,
-                validate: function (v) {
-                    return v === "" || v == null || RED.validators.number(v);
-                }
-            },
+            sanDisplayTopic: { value: "" },
+            valveTopics: { value: "" },
             comfortPulseTopic: { value: "" },
             enableDebug: { value: false }
         },
@@ -54,45 +47,42 @@
                     $("#node-input-writeTopics").val([1, 2].map((m) => px.W + flat + "W." + m).join(","));
                     $("#node-input-modeTopics").val([1, 2].map((m) => px.M + flat + "W." + m).join(","));
                     $("#node-input-displayTopics").val([1, 2].map((m) => px.E + flat + "W." + m).join(","));
-                    $("#node-input-pirTopics").val("");
-                    $("#node-input-pirZoneIndices").val("");
-                    $("#node-input-r340ReadTopics").val("");
                     $("#node-input-sanitaryWriteTopic").val("");
                     $("#node-input-comfortPulseTopic").val("");
-                    $("#node-input-r340HoldSec").val("");
+                    $("#node-input-valveTopics").val("");
                 } else if (ft === "non-cooled-2") {
                     $("#node-input-forceTopic").val(px.P + flat + "S.1");
                     $("#node-input-writeTopics").val([1, 2, 3].map((m) => px.W + flat + "W." + m).join(","));
                     $("#node-input-modeTopics").val([1, 2, 3].map((m) => px.M + flat + "W." + m).join(","));
                     $("#node-input-displayTopics").val([1, 2, 3].map((m) => px.E + flat + "W." + m).join(","));
-                    $("#node-input-pirTopics").val("");
-                    $("#node-input-pirZoneIndices").val("");
-                    $("#node-input-r340ReadTopics").val("");
                     $("#node-input-sanitaryWriteTopic").val("");
                     $("#node-input-comfortPulseTopic").val("");
-                    $("#node-input-r340HoldSec").val("");
+                    $("#node-input-valveTopics").val("");
                 } else if (ft === "cooled-1") {
                     $("#node-input-forceTopic").val("");
                     $("#node-input-writeTopics").val("");
-                    $("#node-input-modeTopics").val(px.M + flat + "V.1");
-                    $("#node-input-displayTopics").val([1, 2].map((m) => px.E + flat + "W." + m).join(","));
-                    $("#node-input-pirTopics").val(p.pirM.map((m) => px.D + flat + "W." + m).join(","));
-                    $("#node-input-pirZoneIndices").val(p.pirZ.join(","));
-                    $("#node-input-r340ReadTopics").val(px.W + flat + "W.2");
-                    $("#node-input-sanitaryWriteTopic").val(px.W + flat + "W.1");
+                    if (flat === "213") {
+                        $("#node-input-modeTopics").val("MCC" + flat + "W.1");
+                        $("#node-input-sanitaryWriteTopic").val("");
+                        $("#node-input-valveTopics").val("");
+                        $("#node-input-sanDisplayTopic").val("");
+                    } else {
+                        $("#node-input-modeTopics").val(px.M + flat + "W.1");
+                        $("#node-input-sanitaryWriteTopic").val(px.W + flat + "W.1");
+                        $("#node-input-valveTopics").val("VAM" + flat + "W.2,VAM" + flat + "W.3");
+                    }
+                    $("#node-input-displayTopics").val("");
                     $("#node-input-comfortPulseTopic").val(px.P + flat + "S.1");
-                    $("#node-input-r340HoldSec").val(65535);
+                    $("#node-input-sanDisplayTopic").val(flat === "213" ? "" : "E0C" + flat + "S.1");
                 } else {
                     $("#node-input-forceTopic").val("");
                     $("#node-input-writeTopics").val("");
-                    $("#node-input-modeTopics").val(px.M + flat + "V.1");
-                    $("#node-input-displayTopics").val([1, 2, 3].map((m) => px.E + flat + "W." + m).join(","));
-                    $("#node-input-pirTopics").val(p.pirM.map((m) => px.D + flat + "W." + m).join(","));
-                    $("#node-input-pirZoneIndices").val(p.pirZ.join(","));
-                    $("#node-input-r340ReadTopics").val([9, 10].map((m) => px.W + flat + "W." + m).join(","));
+                    $("#node-input-modeTopics").val(px.M + flat + "W.1");
+                    $("#node-input-displayTopics").val("");
                     $("#node-input-sanitaryWriteTopic").val(px.W + flat + "W.1");
                     $("#node-input-comfortPulseTopic").val(px.P + flat + "S.1");
-                    $("#node-input-r340HoldSec").val(65535);
+                    $("#node-input-sanDisplayTopic").val(flat === "213" ? "" : "E0C" + flat + "S.1");
+                    $("#node-input-valveTopics").val("VBM" + flat + "W.2,VBM" + flat + "W.3,VBM" + flat + "W.4,VBM" + flat + "W.5");
                 }
             }
 
@@ -124,7 +114,10 @@
 
             $.getJSON("uniflex/controller-config", function (data) {
                 _controllers = data || {};
-                ["forceTopic", "writeTopics", "modeTopics", "displayTopics", "pirTopics", "r340ReadTopics", "sanitaryWriteTopic", "comfortPulseTopic"].forEach(function (id) {
+                [
+                    "forceTopic", "writeTopics", "modeTopics", "displayTopics",
+                    "sanitaryWriteTopic", "sanDisplayTopic", "valveTopics", "comfortPulseTopic"
+                ].forEach(function (id) {
                     initAutocomplete($("#node-input-" + id));
                 });
             }).fail(function () {
@@ -198,7 +191,7 @@
             <input type="text" id="node-input-name" placeholder="flat 201" title="Optional display name, e.g. flat 201" />
         </div>
         <div class="form-row">
-            <label for="node-input-flatType" title="non-cooled: P force-eco + panel sync (P=0). cooled: PIR + r340, no panel sync.">Flat type</label>
+            <label for="node-input-flatType" title="non-cooled: P force-eco + panel sync (P=0). cooled: sanitary follow via M/valve reads.">Flat type</label>
             <select id="node-input-flatType" title="non-cooled = thermokon only (no IDU). cooled = thermokon + separate idu-cooling node(s).">
                 <option value="non-cooled-1">non-cooled 1-room (+san)</option>
                 <option value="non-cooled-2">non-cooled 2-room (+san)</option>
@@ -239,27 +232,29 @@
             <div class="help-text">Mode register reads. 0=off, 2=comfort, 18=eco (typical).</div>
         </div>
 
-        <div class="form-divider tkf-cooled-only"></div>
-        <b class="tkf-cooled-only">Cooled flat: sanitary room thermokon W (not IDU jahutus)</b>
-        <div class="form-row tkf-cooled-only">
-            <label for="node-input-sanitaryWriteTopic" title="Thermokon r514 mode word for the sanitary zone only. Written when every mapped PIR zone is in eco. Not A/C cooling."
-                >W r514 sanitary room</label
-            >
-            <input
-                type="text"
-                id="node-input-sanitaryWriteTopic"
-                placeholder="WAC710W.1"
-                title="Example WAC710W.1 (cooled-1) or WBC812W.1 (cooled-2). Empty on non-cooled flats." />
-            <div class="help-text">WAC/WBC member 1. Thermokon eco/comfort mode for sanitary room when all PIR zones eco.</div>
-        </div>
+    <div class="form-divider tkf-cooled-only"></div>
+    <b class="tkf-cooled-only">Cooled flat: sanitary room thermokon W (not IDU jahutus)</b>
+    <div class="form-row tkf-cooled-only">
+        <label for="node-input-sanitaryWriteTopic"
+            title="Sanitary thermokon r514 write topic (panel / vacant-eco only; not auto-followed here).">W r514 sanitary room</label>
+        <input type="text" id="node-input-sanitaryWriteTopic" placeholder="WAC710W.1"
+            title="Example WAC710W.1 (cooled-1) or WBC812W.1 (cooled-2). Empty on non-cooled flats." />
+        <div class="help-text">WAC/WBC member 1. Sanitary r514 is panel-driven; vacant-eco tab kicks eco on vacancy. Node writes E0C/ECC from san M only.</div>
+    </div>
+    <div class="form-row tkf-cooled-only">
+        <label for="node-input-sanDisplayTopic"
+            title="Cooled flat sanitary eco display (E0C/ECC s DI). Written from san M r277 member .1.">E san display</label>
+        <input type="text" id="node-input-sanDisplayTopic" placeholder="E0C209S.1"
+            title="Cooled san only: E0C209S.1. Empty for kohvik 213 (no san, PIR room)." />
+    </div>
 
         <div class="form-divider"></div>
         <b>Display eco (E)</b>
         <div class="form-row">
-            <label for="node-input-displayTopics" title="E streams (virtual s DI). Node writes 1=eco, 0=comfort for UI. Non-cooled copies M; cooled calculates from PIR+r340."
+            <label for="node-input-displayTopics" title="E streams (virtual s DI). Node writes 1=eco, 0=comfort for UI. Non-cooled copies M r277; cooled liv/bed E not written here (san E0C/ECC from san M)."
                 >E display topics</label
             >
-            <input type="text" id="node-input-displayTopics" placeholder="E2N201W.1,E2N201W.2,E2N201W.3" title="E2N (non-cooled) or E1C/E2C (cooled). One member per zone." />
+            <input type="text" id="node-input-displayTopics" placeholder="E2N201W.1,E2N201W.2,E2N201W.3" title="E2N/E1N (non-cooled). Cooled: leave empty; san uses sanDisplayTopic (E0C/ECC)." />
             <div class="help-text">Display eco bits for SCADA / mobile. IDU nodes use E*.2/.3 for eco inhibit (threshold mode).</div>
         </div>
         <p class="form-tips tkf-cooled-only" style="font-size:0.85em;color:#666;margin:8px 0;">
@@ -267,37 +262,21 @@
             io-read for IDU set1.
         </p>
 
-        <div class="form-divider tkf-cooled-only"></div>
-        <b class="tkf-cooled-only">Cooled flat: PIR, r340 hold, comfort pulse (not sanitary A/C)</b>
-        <div class="form-row tkf-cooled-only">
-            <label for="node-input-pirTopics" title="D streams: PIR motion DI inputs. Order must match PIR zone indices. Cooled flats only.">PIR DI topics</label>
-            <input type="text" id="node-input-pirTopics" placeholder="" title="D1C member 2 (1-room) or D2C members 3,4 (2-room). Empty on non-cooled." />
-            <div class="help-text">Motion sensors. Triggers r340 comfort hold and E display logic.</div>
-        </div>
-        <div class="form-row tkf-cooled-only">
-            <label for="node-input-pirZoneIndices" title="Maps each PIR topic to a zone index in this node: 0=sanitary, 1=living, 2=bed. Same count as PIR topics."
-                >PIR zone indices (0=san)</label
-            >
-            <input type="text" id="node-input-pirZoneIndices" placeholder="1" style="width:80px" title="Example cooled-1: 1 (living PIR). cooled-2: 1,2 (living, bed)." />
-            <div class="help-text">0=san, 1=living, 2=bed. Parallel to PIR DI topics list.</div>
-        </div>
-        <div class="form-row tkf-cooled-only">
-            <label for="node-input-comfortPulseTopic" title="P1C/P2C s! comfort pulse from mypanel. Value 1 simulates PIR (~30 s); di2ao writes r337 on thermokon."
-                >P comfort pulse</label
-            >
-            <input type="text" id="node-input-comfortPulseTopic" placeholder="P1C209S.1" title="Example P1C209S.1 (1-room) or P2C312S.1 (2-room). Empty on non-cooled." />
-            <div class="help-text">Mypanel comfort start. NR holds comfort 30 s then clears P1C/P2C to 0.</div>
-        </div>
-        <div class="form-row tkf-cooled-only">
-            <label for="node-input-r340ReadTopics" title="WAC/WBC r340 hold register reads (seconds). One topic per PIR zone; parallel to PIR DI topics.">W r340 read topics</label>
-            <input type="text" id="node-input-r340ReadTopics" placeholder="WAC209W.2" title="cooled-1: WAC member 2. cooled-2: WBC members 9,10 (living, bed)." />
-            <div class="help-text">Live thermokon r340 (s). NR SM uses these reads, not a static hold field.</div>
-        </div>
-        <div class="form-row tkf-cooled-only">
-            <label for="node-input-r340HoldSec" title="Fallback hold seconds until first W r340 read arrives.">r340 fallback (s)</label>
-            <input type="number" id="node-input-r340HoldSec" min="0" style="width:100px" title="Used only until WAC/WBC r340 read is received." />
-            <div class="help-text">Fallback until first r340 read. Normal source is WAC/WBC register via IO read node.</div>
-        </div>
+    <div class="form-divider tkf-cooled-only"></div>
+    <div class="form-row tkf-cooled-only">
+        <label for="node-input-valveTopics"
+            title="VAM/VBM living+b bed cool/heat demand (0/1). 0-&gt;1 triggers san W r514=2.">V valve topics</label>
+        <input type="text" id="node-input-valveTopics" placeholder="VAM208W.2,VAM208W.3"
+            title="Living/bed VAM cool+heat members; not san VAM.1." />
+        <div class="help-text">L4: any listed valve 0-&gt;1 writes WAC/WBC.1=2 if san MAC.1 r277 != 2.</div>
+    </div>
+    <div class="form-row tkf-cooled-only">
+        <label for="node-input-comfortPulseTopic"
+            title="P1C/P2C s! comfort pulse. Writes real r337 via di2ao; NR clears after 30 s.">P comfort pulse</label>
+        <input type="text" id="node-input-comfortPulseTopic" placeholder="P1C209S.1"
+            title="P1C/P2C s! DI; NR clears after 30 s." />
+        <div class="help-text">P1C/P2C=1 for 30 s (real r337 via di2ao), then auto 0.</div>
+    </div>
 
         <div class="form-divider"></div>
         <div class="form-row">
@@ -312,12 +291,6 @@
     <p>One node per flat: thermokon eco/mode/display (L4). Cooled flats also need idu-cooling node(s) for A/C.</p>
     <p>IDU deadband and offset: <code>GDBW.1</code> / <code>GDBW.2</code> (aico global; r283 via ai2ao, set1 in idu-cooling-control).</p>
     <p><b>non-cooled:</b> P force-eco, P=0 panel sync (all W r514), M r277 to E, S to T.s mux.</p>
-    <p>
-        <b>cooled:</b> PIR + live WAC/WBC r340 read, P1C/P2C comfort pulse (mypanel), calculated E, thermokon sanitary-room r514 when all PIR zones eco (not IDU A/C), S to T.s mux.
-        Pair with idu-cooling node per IDU zone (living/bed only).
-    </p>
-    <p>
-        PIR hold state persists in NR file context. Default: <b>eco</b>. <b>P1C/P2C.1=1</b> (mypanel) starts 30 s comfort pulse; di2ao inverts thermokon r337; NR auto-clears to 0.
-    </p>
+    <p><b>cooled:</b> san E0C from san M r277. V valve 0-&gt;1 forces WAC/WBC.1=2 (san comfort). P1C test pulse (r337). Pair with idu-cooling (VAM cool member).</p>
     <p>Wire IO reads in; output to write-data-streams. Pair with one idu-cooling per IDU on cooled flats.</p>
 </script>

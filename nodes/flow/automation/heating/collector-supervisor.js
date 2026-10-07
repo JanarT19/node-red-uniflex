@@ -165,8 +165,8 @@ module.exports = function (RED) {
         }
 
         function asActiveFlag(payload) {
-            const v = Number(payload);
-            if (!Number.isFinite(v)) return null;
+            const v = (payload == null || !Number.isFinite(Number(payload)) ? null : (Number(payload) !== 0 ? 1 : 0));
+            if (v === null) return null;
             return v !== 0;
         }
 
@@ -630,7 +630,9 @@ module.exports = function (RED) {
         node.on("input", function (msg) {
             const topic = String(msg.topic || "");
             if (node.verboseLoggingTopic && topic === node.verboseLoggingTopic) {
-                node._verboseFromMsg = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                node._verboseFromMsg = !!bit;
                 node.warn(`[collector-supervisor:${node.name}] verbose logging ${node._verboseFromMsg ? "ON" : "OFF"} (from topic=${topic})`);
                 return;
             }
@@ -654,9 +656,9 @@ module.exports = function (RED) {
                 return;
             }
             if (node.onflowTopic && topic === node.onflowTopic) {
-                const f = Number(msg.payload);
+                const f = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
                 const prev = latestOnflow;
-                if (Number.isFinite(f) && prev !== f) {
+                if (f !== null && prev !== f) {
                     latestOnflow = f;
                     const trans = Number.isFinite(prev) ? `${prev}->${f}` : `->${f}`;
                     verbose(`IN onflow topic=${topic} value ${trans}`);
@@ -665,9 +667,9 @@ module.exports = function (RED) {
             }
             const loop = loops.find((l) => l.returnTopic && l.returnTopic === topic);
             if (loop) {
-                const v = Number(msg.payload);
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
                 const prev = loop.lastReturn;
-                if (Number.isFinite(v) && prev !== v) {
+                if (v !== null && prev !== v) {
                     loop.lastReturn = v;
                     appendEvalSampleFromIncoming();
                     const trans = Number.isFinite(prev) ? `${prev}->${v}` : `->${v}`;

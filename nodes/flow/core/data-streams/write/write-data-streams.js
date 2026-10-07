@@ -19,7 +19,7 @@ module.exports = function (RED) {
         }
         node.tcpPort = Number.isInteger(parseInt(config.tcpPort, 10)) ? parseInt(config.tcpPort, 10) : 19080;
         node.mappings = config.mappings || [];
-        node.debugTopics = (config.debugTopics || "").trim(); // Comma-separated list of topic prefixes to debug, empty = all
+        node.debugTopics = (config.debugTopics || "").trim(); // comma-separated topic prefixes; empty = no debug logging
         node.mappings = dedupeMappings(node.mappings);
 
         function buildRowsByTopic(mappings) {
@@ -62,6 +62,7 @@ module.exports = function (RED) {
         let tcpPostHttpProbeTimer = null;
         let tcpReconnectDelayMs = 1000;
         let activityBlinkOn = false;
+        let lastServicesWarning = null;
 
         function nextActivityShape() {
             activityBlinkOn = !activityBlinkOn;
@@ -105,6 +106,18 @@ module.exports = function (RED) {
             node.error("Controller configuration invalid");
             node.status({ fill: "red", shape: "dot", text: "Controller configuration invalid" });
             return;
+        }
+
+        function warnInvalidServicesMetadata() {
+            const warning = node.controller?.servicesError || null;
+            if (!warning) {
+                lastServicesWarning = null;
+                return;
+            }
+            if (warning !== lastServicesWarning) {
+                node.warn(`[write-data-streams] ${warning}; configured coefficients and labels may be affected`);
+                lastServicesWarning = warning;
+            }
         }
 
         function buildTcpFrame(postData = {}) {
@@ -642,7 +655,8 @@ module.exports = function (RED) {
                         index: index,
                         channelType: channelType,
                         payload: payload,
-                        topic: topic
+                        topic: topic,
+                        forced: !!msg.forced
                     };
                 } else {
                     // Add new write to batch
@@ -652,7 +666,8 @@ module.exports = function (RED) {
                         index: index,
                         channelType: channelType,
                         payload: payload,
-                        topic: topic
+                        topic: topic,
+                        forced: !!msg.forced
                     });
                 }
             }
@@ -669,16 +684,26 @@ module.exports = function (RED) {
                 entries.forEach(({ row, index: i }) => processWriteMapping(row, i, msg));
             });
 
-            // If we have writes to send, batch them into a single POST
-            if (batchWrites.length > 0) {
+            // Forced writes must not share a POST with normal writes: /setup forced
+            // is a top-level flag and would also force-write CTA set1 in the same batch.
+            const normalWrites = batchWrites.filter((w) => !w.forced);
+            const forceWrites = batchWrites.filter((w) => w.forced);
+
+            function sendWriteBatch(writes, forced) {
+                if (writes.length === 0) {
+                    return;
+                }
                 // Build batched POST request payload
                 const postData = {
                     localhost: {}
                 };
+                if (forced) {
+                    postData.forced = true;
+                }
 
                 const batchParameters = [];
 
-                batchWrites.forEach((write) => {
+                writes.forEach((write) => {
                     const { svcKey, index, channelType, payload, topic, rowIndex } = write;
 
                     // Add to POST payload
@@ -777,10 +802,15 @@ module.exports = function (RED) {
                         });
                     });
             }
+
+            sendWriteBatch(normalWrites, false);
+            sendWriteBatch(forceWrites, true);
         }
 
         // Listen for input messages - batch them if they arrive quickly
         node.on("input", function (msg) {
+            warnInvalidServicesMetadata();
+
             // Add message to batch
             messageBatch.push(msg);
             const currentBatchSize = messageBatch.length;
@@ -1067,7 +1097,7 @@ module.exports = function (RED) {
                 return key === topic && m.forceWrite;
             });
 
-            if (hasForceWrite) {
+            if (hasForceWrite || msg.forced) {
                 postData.forced = true;
             }
 

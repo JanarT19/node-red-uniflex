@@ -1,0 +1,117 @@
+<style>
+    #live-chart-open,
+    #live-chart-wall {
+        border-color: #b58b00 !important;
+        background: #f2c94c !important;
+        color: #2d2500 !important;
+        font-weight: 600;
+    }
+    #live-chart-open:hover,
+    #live-chart-wall:hover {
+        background: #ffd966 !important;
+    }
+</style>
+
+<script type="text/javascript">
+    RED.nodes.registerType("uniflex-live-chart", {
+        category: "uniflex utils",
+        color: "#8fc7e8",
+        defaults: {
+            name: { value: "" },
+            sourceReadNode: { value: "", required: true }
+        },
+        inputs: 1,
+        outputs: 0,
+        icon: "font-awesome/fa-line-chart",
+        label: function () {
+            return this.name || "live chart";
+        },
+        paletteLabel: "live chart",
+        oneditprepare: function () {
+            const node = this;
+            const sourceSelect = $("#node-input-sourceReadNode");
+            const chartButton = $("#live-chart-open");
+            const wallButton = $("#live-chart-wall");
+            const savedSource = node.sourceReadNode;
+
+            sourceSelect.empty().append($("<option></option>").val("").text("Select read data streams node..."));
+            RED.nodes.eachNode(function (candidate) {
+                if (candidate.type !== "uniflex-read-data-streams") return;
+                const mappingCount = Array.isArray(candidate.mappings) ? candidate.mappings.filter((row) => row.dataType === "value").length : 0;
+                const label = candidate.name || `parse data streams (${candidate.id})`;
+                sourceSelect.append($("<option></option>").val(candidate.id).text(`${label}: ${mappingCount} value members`));
+            });
+            sourceSelect.val(savedSource);
+
+            chartButton.on("click", function (event) {
+                event.preventDefault();
+                const root = String(RED.settings.httpNodeRoot || "").replace(/\/$/, "");
+                const url = `${window.location.origin}${root}/uniflex/live-chart/${node.id}`;
+                window.open(url, "_blank", "noopener");
+            });
+            wallButton.on("click", function (event) {
+                event.preventDefault();
+                const root = String(RED.settings.httpNodeRoot || "").replace(/\/$/, "");
+                const url = `${window.location.origin}${root}/uniflex/live-chart/wall?select=${encodeURIComponent(node.id)}`;
+                window.open(url, "_blank", "noopener");
+            });
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="uniflex-live-chart">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Live datastream chart">
+    </div>
+    <div class="form-row">
+        <label for="node-input-sourceReadNode"><i class="fa fa-list"></i> Read node</label>
+        <select id="node-input-sourceReadNode"></select>
+    </div>
+    <div class="form-row">
+        <label></label>
+        <button type="button" id="live-chart-open" class="red-ui-button">
+            <i class="fa fa-external-link"></i> Open local chart
+        </button>
+        <button type="button" id="live-chart-wall" class="red-ui-button">
+            <i class="fa fa-th-list"></i> Open chart wall
+        </button>
+    </div>
+    <div class="form-tips">
+        Wire the selected read data streams node to this node. Deploy before opening the chart.
+        The chart page lists only value members configured by that read node.
+        <br><b>Open local chart</b> opens only this chart node in a standalone tab.
+        <br><b>Open chart wall</b> opens the multi-chart view, where deployed chart nodes can be selected and compared in full-width rows with shared refresh and timespan controls.
+    </div>
+</script>
+
+<script type="text/html" data-help-name="uniflex-live-chart">
+    <p>Provides a local, single-user chart for step-response checks, PID tuning, and other short live diagnostics.</p>
+
+    <h3>Configuration</h3>
+    <p>Select an <b>uniflex-read-data-streams</b> node, wire that node's output to this node, and deploy. Use <b>Open local chart</b> to launch the browser page.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>A configured read-node mapping topic when separate-message mode is used.</dd>
+        <dt>payload <span class="property-type">number | object</span></dt>
+        <dd>A numeric value, or a topic-to-value object when together-message mode is used.</dd>
+    </dl>
+
+    <h3>Chart behavior</h3>
+    <ul>
+        <li>Refresh defaults to 5 seconds and timespan defaults to 10 minutes.</li>
+        <li>Each Y axis autoranges and accepts only one unit. If both axes are used, their units must differ.</li>
+        <li>Units come from the selected controller service's <code>out_unit</code>.</li>
+        <li>Each axis can use line, area, or stacked-area formatting. Stacked values are summed visually and should be used only for additive quantities.</li>
+        <li>Right-axis lines are dashed. Hover over a legend key to see the full datastream description.</li>
+        <li>Chart settings are saved in file context only when they change and are restored after deploys and restarts.</li>
+        <li>The chart wall shows selected deployed live-chart nodes in full-width rows for simultaneous comparison.</li>
+        <li>Data is buffered only while the chart page sends heartbeats. Buffers are cleared when the page closes or expires.</li>
+        <li>The local HTTP page is read-only with respect to controller data. It should be exposed remotely only through the temporary VPN used for diagnostics.</li>
+    </ul>
+
+    <h3>Outputs</h3>
+    <p>This node has no Node-RED outputs.</p>
+</script>

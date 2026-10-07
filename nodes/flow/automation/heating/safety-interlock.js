@@ -18,8 +18,7 @@ module.exports = function (RED) {
         const s = { eStop: 0, hpFault: 0, gasFault: 0, blocked: null };
 
         function b01(v) {
-            const n = Number(v);
-            return Number.isFinite(n) && n !== 0 ? 1 : 0;
+            return (v == null || !Number.isFinite(Number(v)) ? null : (Number(v) !== 0 ? 1 : 0));
         }
         function emit(topic, payload) {
             if (!topic) return;
@@ -38,9 +37,11 @@ module.exports = function (RED) {
 
         node.on("input", (msg) => {
             const t = String(msg.topic || "").trim();
-            if (t === node.eStopTopic) s.eStop = b01(msg.payload);
-            else if (t === node.hpFaultTopic) s.hpFault = b01(msg.payload);
-            else if (t === node.gasFaultTopic) s.gasFault = b01(msg.payload);
+            const bit = b01(msg.payload);
+            const fault = bit === null ? 1 : bit;
+            if (t === node.eStopTopic) s.eStop = fault;
+            else if (t === node.hpFaultTopic) s.hpFault = fault;
+            else if (t === node.gasFaultTopic) s.gasFault = fault;
             else return;
             compute();
         });

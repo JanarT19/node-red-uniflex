@@ -141,7 +141,7 @@
         <div class="form-row">
             <label for="node-input-iduSetpointTopic">IDU set1 write</label>
             <input type="text" id="node-input-iduSetpointTopic" placeholder="CTA206W.3" />
-            <div class="help-text">CTA/CTB set1: r513 + GDBW.1 deadband + GDBW.2 offset. Written while cooling in valve mode.</div>
+            <div class="help-text">CTA/CTB set1: r513 + GDBW.1 deadband + GDBW.2 offset. Written only while cooling is on.</div>
         </div>
 
         <div class="form-divider"></div>
@@ -157,7 +157,7 @@
         <div class="form-row">
             <label for="node-input-coolValveTopic">Cool valve topic</label>
             <input type="text" id="node-input-coolValveTopic" placeholder="VAM208W.3" />
-            <div class="help-text">VAM living cool .3 (1-room), VBM .3/.5 (2-room), VAM213W.1 kohvik. Used when demand mode=valve.</div>
+            <div class="help-text">VAM living cool .2/.3 (1-room), VBM .2/.5 (2-room), VAM213W.1/.2 kohvik IDU1/IDU2. Used when demand mode=valve.</div>
         </div>
 
         <div class="form-divider"></div>
@@ -207,7 +207,7 @@
         <div class="form-row">
             <label for="node-input-coolCmdTopic">Cool cmd topic</label>
             <input type="text" id="node-input-coolCmdTopic" placeholder="CAC206S.1" />
-            <div class="help-text">Single IDU: CAC&lt;flat&gt;S.1. Dual: CBC&lt;flat&gt;W.1 living, .2 bed. Value 1=on, 0=off.</div>
+            <div class="help-text">Single IDU: CAC&lt;flat&gt;S.1. Dual: CBC&lt;flat&gt;W.1 living, .2 bed. Value 1=on, 0=off. If CAS/CBS cool-mode stays 1 for 3 min after off, a forced CAD/CBD=159 is sent.</div>
         </div>
 
         <div class="form-row">
@@ -245,8 +245,10 @@
     <h4>Logic</h4>
     <ul>
         <li>Cool ON when temp &gt; therm SP + half GDBW.1 + hysteresis; OFF below therm SP + half GDBW.1 - hysteresis</li>
-        <li>IDU setpoint (CTA/CTB set1) = therm SP + GDBW.1 + GDBW.2; synced on therm SP / GDBW change and every 60 s</li>
+        <li>IDU setpoint (CTA/CTB set1) = therm SP + GDBW.1 + GDBW.2; written only while cool is on (therm SP / GDBW change and every 60 s)</li>
+        <li>If cool is off but CAS/CBS mode-cool stays 1 for 3 min, force-write CAD/CBD 159 (GW3-MOD off). Same-value CAC=0 does not reach Modbus.</li>
         <li>Cool OFF when CGOLS disable active, window open, or E display ECO active</li>
+        <li>Stalled/unknown input (JSON null): store unknown, do not keep last. Temp/SP/valve unknown = cool off and no set1; window/eco/CGOLS unknown = inhibit</li>
         <li>All temperatures in degrees C (dC conversion in read/write nodes)</li>
     </ul>
 

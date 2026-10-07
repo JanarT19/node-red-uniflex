@@ -68,8 +68,7 @@ module.exports = function (RED) {
             return Math.max(lo, Math.min(hi, v));
         }
         function as01(v) {
-            const n = Number(v);
-            return Number.isFinite(n) && n !== 0 ? 1 : 0;
+            return (v == null || !Number.isFinite(Number(v)) ? null : (Number(v) !== 0 ? 1 : 0));
         }
         function sendChanged(topic, payload) {
             if (!topic) return;
@@ -110,9 +109,19 @@ module.exports = function (RED) {
             sendDirect(node.setpointWriteTopic, Number(targetSp.toFixed(2)));
             node.debug(`[gas-control] setpoint write ${targetSp.toFixed(2)}C (${reason})`);
         }
+        function failSafeOff(reason) {
+            currentEnabled = 0;
+            sendChanged(node.outEnableTopic, 0);
+            if (node.outRequestTopic) sendChanged(node.outRequestTopic, 0);
+            updateStatus(reason || "unknown");
+        }
+
         function compute() {
-            if (!Number.isFinite(tankTemp) || !Number.isFinite(tankTarget)) return;
-            const enabled = enableCmd && !block ? 1 : 0;
+            if (!Number.isFinite(tankTemp) || !Number.isFinite(tankTarget)) {
+                failSafeOff("unknown tank");
+                return;
+            }
+            const enabled = enableCmd === 1 && block !== 1 ? 1 : 0;
             currentEnabled = enabled;
             const { lo, hi } = getClampLimits();
             const err = tankTarget - tankTemp;
@@ -192,23 +201,49 @@ module.exports = function (RED) {
 
         node.on("input", (msg) => {
             const t = String(msg.topic || "").trim();
-            if (t === node.tankTempTopic) tankTemp = Number(msg.payload);
-            else if (t === node.tankTargetTopic) tankTarget = Number(msg.payload);
-            else if (t === node.qNeedTopic) qNeed = Number(msg.payload);
-            else if (t === node.enableCmdTopic) enableCmd = as01(msg.payload);
-            else if (t === node.blockTopic) block = as01(msg.payload);
-            else if (t === node.spMinTopic) spMinDyn = Number(msg.payload);
-            else if (t === node.spMaxTopic) spMaxDyn = Number(msg.payload);
-            else if (t === node.setpointActualTopic) actualSetpoint = Number(msg.payload);
-            else if (t === node.pumpHeatingTopic) {
-                pumpHeating = msg.payload;
-                pumpHeatingTs = Date.now();
+            if (t === node.tankTempTopic) {
+                tankTemp = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+            } else if (t === node.tankTargetTopic) {
+                tankTarget = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+            } else if (t === node.qNeedTopic) {
+                const n = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                qNeed = n === null ? 0 : n;
+            } else if (t === node.enableCmdTopic) {
+                const bit = as01(msg.payload);
+                enableCmd = bit === null ? 0 : bit;
+            } else if (t === node.blockTopic) {
+                const bit = as01(msg.payload);
+                block = bit === null ? 1 : bit;
+            } else if (t === node.spMinTopic) {
+                spMinDyn = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+            } else if (t === node.spMaxTopic) {
+                spMaxDyn = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+            } else if (t === node.setpointActualTopic) {
+                actualSetpoint = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+            } else if (t === node.pumpHeatingTopic) {
+                if ((msg.payload == null)) {
+                    pumpHeating = null;
+                    pumpHeatingTs = Date.now();
+                } else {
+                    pumpHeating = msg.payload;
+                    pumpHeatingTs = Date.now();
+                }
             } else if (t === node.pumpDhwTopic) {
-                pumpDhw = msg.payload;
-                pumpDhwTs = Date.now();
+                if ((msg.payload == null)) {
+                    pumpDhw = null;
+                    pumpDhwTs = Date.now();
+                } else {
+                    pumpDhw = msg.payload;
+                    pumpDhwTs = Date.now();
+                }
             } else if (t === node.flameTopic) {
-                flame = msg.payload;
-                flameTs = Date.now();
+                if ((msg.payload == null)) {
+                    flame = null;
+                    flameTs = Date.now();
+                } else {
+                    flame = msg.payload;
+                    flameTs = Date.now();
+                }
             } else return;
             compute();
         });

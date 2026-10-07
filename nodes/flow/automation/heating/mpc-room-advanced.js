@@ -8,7 +8,7 @@ const fs = require("fs");
 const path = require("path");
 
 module.exports = function (RED) {
-    const NODE_VERSION = "4.4.0-solar-floor-lag";
+    const NODE_VERSION = "4.5.3-hcmw-ff";
 
     function MpcRoomAdvancedNode(config) {
         RED.nodes.createNode(this, config);
@@ -93,8 +93,14 @@ module.exports = function (RED) {
         const learningWindowEnd = parseInt(_bcfg ? (_bcfg.learningWindowEnd ?? 4) : (config.learningWindowEnd ?? 4));
 
         // Balance temperature: outdoor temp at which no net heating needed (internal gains cover losses).
-        // Net demand = Uroom * max(0, Tbalance + chargeK - Tout) -- replaces Tset in gross loss formula.
+        // Net demand = Uroom * max(0, Tbalance + chargeK - ToutBal).
+        // ToutBal is the local-date mean of outdoor temperature, read heatLeadH ahead of the slot.
+        // heatLeadH is the heating envelope time constant Ci/Uenv (~96 h).
+        // Free cooling has a much longer lag and is not used here.
         const Tbalance = Number(_bcfg ? (_bcfg.Tbalance ?? 15.0) : (config.Tbalance ?? 15.0));
+        const _ci = Number(_bcfg && _bcfg.Ci);
+        const _uenv = Number(_bcfg && _bcfg.Uenv_base);
+        const heatLeadH = (Number.isFinite(_ci) && _ci > 0 && Number.isFinite(_uenv) && _uenv > 0) ? (_ci / _uenv) : 96;
 
         function isLearningWindowOpen() {
             if (learningWindowStart < 0 || learningWindowEnd < 0) return true; // disabled
@@ -360,6 +366,13 @@ module.exports = function (RED) {
         // ======================================================================
 
         function computeChargeFF() {
+            const manual = node.context().global.get("hcmwManual");
+            if (manual && manual.rooms && Date.now() - (manual.ts || 0) < 2 * 3600 * 1000) {
+                const row = manual.rooms[node.name];
+                const deg = Number.isFinite(manual.maxDeg) && manual.maxDeg > 0 ? manual.maxDeg : 2;
+                if (manual.cool && row && row.cool) return -deg;
+                if (manual.heat && row && row.heat) return deg;
+            }
             const sig = node.context().global.get("chargeSignal");
             if (!sig || !sig.adj || !sig.baseSlot || !sig.stepSec) return 0;
             if (Date.now() - sig.timestamp > forecastCacheMaxAgeMs) return 0;
@@ -402,7 +415,7 @@ module.exports = function (RED) {
                 // Compute FF components in kW (power) using adaptive time lags (in hours)
                 // Solar FF uses two look-ahead horizons: floor circuits need an extra lead for
                 // pipe-to-surface thermal lag (floor_lead_hours from thermal model config).
-                const floor_lead_h = _hcfg ? _hcfg.floor_lead_hours || 2.0 : 2.0;
+                const floor_lead_h = _bcfg ? _bcfg.floor_lead_hours || 2.0 : 2.0;
                 const futureDate_solar_floor = new Date(Date.now() + (params.tau_solar + floor_lead_h) * 3600 * 1000);
                 const futureDate_solar_air = new Date(Date.now() + params.tau_solar * 3600 * 1000);
                 const futureDate_thermal = new Date(Date.now() + params.tau_thermal * 3600 * 1000);
@@ -601,10 +614,25 @@ module.exports = function (RED) {
             const chargeSig = node.context().global.get("chargeSignal");
             const chargeValid = chargeSig && chargeSig.adj && chargeSig.stepSec && Date.now() - chargeSig.timestamp < forecastCacheMaxAgeMs;
 
+            // Date mean at this slot, shifted forward by the heating time constant.
+            // Past the last forecast date, the last mean is kept.
+            function toutForBalance(k) {
+                const hourly = cache.Tout[k];
+                const arr = cache.ToutAvg;
+                if (!Array.isArray(arr) || arr.length === 0) return hourly;
+                let idx = k + Math.round((heatLeadH * 3600) / stepSec);
+                if (idx < 0) idx = 0;
+                if (idx >= arr.length) idx = arr.length - 1;
+                for (let i = idx; i >= 0; i--) {
+                    if (Number.isFinite(arr[i])) return arr[i];
+                }
+                return hourly;
+            }
+
             for (let k = 0; k < S; k++) {
                 const slotTs = baseSlot + k * stepSec;
                 const slotDate = new Date(slotTs * 1000);
-                const Tout_k = cache.Tout[k];
+                const Tout_k = toutForBalance(k);
                 const irr_k = cache.irradiance[k];
 
                 let chargeK = 0;
@@ -613,8 +641,7 @@ module.exports = function (RED) {
                     if (cSlot >= 0 && cSlot < chargeSig.adj.length) chargeK = chargeSig.adj[cSlot];
                 }
 
-                // Use Tbalance (instead of Tset) to account for internal gains:
-                // demand is zero when Tout >= Tbalance, matching the building's real balance point.
+                // Demand is zero when the shifted date mean is at or above Tbalance.
                 const Qloss = Uroom * Math.max(0, Tbalance + chargeK - Tout_k);
 
                 let Qsolar = 0;
@@ -674,7 +701,9 @@ module.exports = function (RED) {
             const sumDemand = Q_demand_room.reduce((a, b) => a + b, 0);
             const avgDemand = sumDemand / S;
             const maxDemand = Math.max(...Q_demand_room);
-            node.log(`[mpc-room-adv:${roomName}] Demand forecast: ${S} slots, avg=${avgDemand.toFixed(2)}kW max=${maxDemand.toFixed(2)}kW Uroom=${Uroom.toFixed(3)}kW/K`);
+            const bal0 = Number(toutForBalance(0));
+            const balTxt = Number.isFinite(bal0) ? bal0.toFixed(1) : "n/a";
+            node.log(`[mpc-room-adv:${roomName}] Demand forecast: ${S} slots, avg=${avgDemand.toFixed(2)}kW max=${maxDemand.toFixed(2)}kW Uroom=${Uroom.toFixed(3)}kW/K lead=${heatLeadH.toFixed(0)}h ToutBal=${balTxt}`);
 
             publishHealth(healthy);
         }
@@ -859,6 +888,12 @@ module.exports = function (RED) {
                     tReturnState[t] = parseFloat(msg.payload);
                     return;
                 }
+
+                // Learned FF params are applied only when adaptive FF is on.
+                const ffLearnMsg =
+                    (ffTimeLagsTopic && (t === ffTimeLagsTopic + ".1" || t === ffTimeLagsTopic + ".2")) ||
+                    (ffGainsTopic && (t === ffGainsTopic + ".1" || t === ffGainsTopic + ".2" || t === ffGainsTopic + ".3"));
+                if (ffLearnMsg && !useAdaptiveFF) return;
 
                 // FF time lags (from FTxW datastream, coeff=3600 converts to hours)
                 if (ffTimeLagsTopic && t === ffTimeLagsTopic + ".1" && msg.payload != null) {

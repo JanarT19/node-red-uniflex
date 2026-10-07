@@ -4,14 +4,14 @@ const ts = require("../../core/lib/timestamp.js");
 // Force open/close: output gate at sendValve level; normal control logic runs unaffected.
 //
 // Per tick the node solves:
-//   E_gap    = Cf × (Tf_set − Tf_ret)                     energy to close floor temp gap
-//   E_loss   = Uf × (Tf_ret − Troom) × dt                 floor→room loss during tick
+//   E_gap    = Cf x (Tf_set - Tf_ret)                     energy to close floor temp gap
+//   E_loss   = Uf x (Tf_ret - Troom) x dt                 floor->room loss during tick
 //   E_total  = E_gap + E_loss                              total energy to deliver
-//   Q_del    = K_room × (Tsupply − Tf_ret)                 delivery rate when valve open
-//   open_sec = E_total / Q_del × 3600                      required open time
+//   Q_del    = K_room x (Tsupply - Tf_ret)                 delivery rate when valve open
+//   open_sec = E_total / Q_del x 3600                      required open time
 
 module.exports = function (RED) {
-    const NODE_VERSION = "0.3.3-emergency-status-fix"; // Fixed emergency status to show actual need (HEAT/COOL) not system mode
+    const NODE_VERSION = "0.3.5-charge-hold"; // A planned charge slot is not closed by the room-satisfied cut
 
     function MpcFloorAdvancedNode(config) {
         RED.nodes.createNode(this, config);
@@ -79,6 +79,7 @@ module.exports = function (RED) {
         let closeTimer = null;
         let forceOpenRoom = false;
         let forceOpenSupervisor = false;
+        let chargeForceOpen = false;
         let forceClose = false;
         let _measurementOpenActive = false;
         let lastSentValvePayload = null;
@@ -94,7 +95,7 @@ module.exports = function (RED) {
         let adaptTrack = null;
         let adaptStartTimer = null;
 
-        // ── Helpers ──
+        // -- Helpers --
 
         function setStatus(text, fill) {
             node.status({ fill: fill || "blue", shape: "dot", text });
@@ -103,7 +104,7 @@ module.exports = function (RED) {
             if (node.verboseLogging || node._verboseFromMsg) node.debug(`[mpc-floor-adv:${node.name}] ${msg}`);
         }
 
-        // ── Valve output (with force gate) ──
+        // -- Valve output (with force gate) --
 
         function getEffectiveOutput() {
             return autoValveOpen ? 1 : 0;
@@ -111,11 +112,13 @@ module.exports = function (RED) {
         function getOutputReason() {
             if (forceOpenRoom || forceOpenSupervisor) return "force open (gate)";
             if (forceClose) return "force close (gate)";
+            if (chargeForceOpen) return "charge open";
             return autoValveOpen ? "auto open" : "auto close";
         }
         function sendValve(v, measurementNotifyPayload, reason) {
             if (forceOpenRoom || forceOpenSupervisor) v = 1;
             else if (forceClose) v = 0;
+            else if (chargeForceOpen) v = 1;
             const doValue = node.valveType === "NO" ? (v ? 0 : 1) : v ? 1 : 0;
             const topic = node.valveCmdTopic || "valve";
             const changed = lastSentValvePayload !== doValue;
@@ -183,7 +186,7 @@ module.exports = function (RED) {
             }
         }
 
-        // ── Adaptive K_room ──
+        // -- Adaptive K_room --
 
         function captureAdaptStart() {
             if (latestReturn == null) return;
@@ -265,7 +268,7 @@ module.exports = function (RED) {
             adaptTrack = null;
         }
 
-        // ── Room satisfaction guard (between-tick safety) ──
+        // -- Room satisfaction guard (between-tick safety) --
 
         let roomSatisfiedCutActive = false;
 
@@ -275,7 +278,68 @@ module.exports = function (RED) {
             return Number(latestRoomActual) > Number(latestRoomSetpoint) + node.roomSatisfiedMarginC;
         }
 
+        // Cheap-hour charge: while the current hp_ena slot is on, force open floors whose
+        // return (else room actual) is at or below the air setpoint, plus those closest above it.
+        function floorChargeActual() {
+            if (Number.isFinite(latestReturn)) return Number(latestReturn);
+            if (Number.isFinite(latestRoomActual)) return Number(latestRoomActual);
+            return null;
+        }
+        function computeChargeWant() {
+            if (coolingMode || forceClose) return false;
+            const plan = node.context().global.get("hpChargePlan");
+            if (!plan || !Array.isArray(plan.hp_ena) || !plan.stepSec || plan.baseSlot == null) return false;
+            if (Date.now() - (plan.timestamp || 0) > 20 * 3600 * 1000) return false;
+            const nowSec = Math.floor(Date.now() / 1000);
+            const idx = Math.floor((nowSec - plan.baseSlot) / plan.stepSec);
+            if (idx < 0 || idx >= plan.hp_ena.length || plan.hp_ena[idx] !== 1) return false;
+
+            const actual = floorChargeActual();
+            const airSp = Number(latestRoomSetpoint);
+            if (!Number.isFinite(actual) || !Number.isFinite(airSp)) return false;
+
+            const key = node.name || node.id;
+            const prev = node.context().global.get("floorChargeState") || {};
+            const nowMs = Date.now();
+            const fresh = {};
+            for (const [k, r] of Object.entries(prev)) {
+                if (r && nowMs - r.ts < 600000 && Number.isFinite(r.actual) && Number.isFinite(r.airSp)) fresh[k] = r;
+            }
+            fresh[key] = { actual: actual, airSp: airSp, ts: nowMs };
+            node.context().global.set("floorChargeState", fresh);
+
+            const below = [];
+            const above = [];
+            for (const [k, r] of Object.entries(fresh)) {
+                const d = r.actual - r.airSp;
+                if (d <= 0) below.push(k);
+                else above.push({ k: k, d: d });
+            }
+            if (below.indexOf(key) >= 0) return true;
+            if (above.length === 0) return false;
+            above.sort((a, b) => a.d - b.d);
+            const best = above[0].d;
+            for (let i = 0; i < above.length; i++) {
+                if (above[i].k === key && above[i].d <= best + 0.1) return true;
+            }
+            return false;
+        }
+        function applyChargeForce() {
+            const want = computeChargeWant();
+            if (want === chargeForceOpen) return;
+            chargeForceOpen = want;
+            const actual = floorChargeActual();
+            const airSp = Number(latestRoomSetpoint);
+            node.log(
+                `[mpc-floor-adv:${node.name}] charge force ${want ? 1 : 0}` +
+                    (Number.isFinite(actual) ? ` actual=${actual.toFixed(1)}` : "") +
+                    (Number.isFinite(airSp) ? ` airSp=${airSp.toFixed(1)}` : "")
+            );
+            sendEffectiveOutput(want ? "charge open" : "charge release");
+        }
+
         function checkRoomSatisfied() {
+            if (chargeForceOpen) return;
             if (!isRoomSatisfied()) {
                 roomSatisfiedCutActive = false;
                 return;
@@ -284,7 +348,7 @@ module.exports = function (RED) {
             roomSatisfiedCutActive = true;
             const Ti = Number(latestRoomActual);
             const Tset = Number(latestRoomSetpoint);
-            node.warn(`[mpc-floor-adv:${node.name}] ROOM SATISFIED CUT: Ti=${Ti.toFixed(1)} > Tset=${Tset.toFixed(1)}+${node.roomSatisfiedMarginC} → closing valve`);
+            node.warn(`[mpc-floor-adv:${node.name}] ROOM SATISFIED CUT: Ti=${Ti.toFixed(1)} > Tset=${Tset.toFixed(1)}+${node.roomSatisfiedMarginC} -> closing valve`);
             if (closeTimer) {
                 clearTimeout(closeTimer);
                 closeTimer = null;
@@ -296,7 +360,7 @@ module.exports = function (RED) {
             setStatus(`Room satisfied Ti=${Ti.toFixed(1)} (${ts.formatStatus()})`, "blue");
         }
 
-        // ── Core: model-based duty computation ──
+        // -- Core: model-based duty computation --
 
         function computeAndAct(periodSec) {
             verbose(
@@ -309,11 +373,11 @@ module.exports = function (RED) {
                 const Tset = Number(latestRoomSetpoint);
                 const error = Tset - Ti;
 
-                node.warn(`[mpc-floor-adv:${node.name}] COLD-START CHECK: Ti=${Ti.toFixed(1)} Tset=${Tset.toFixed(1)} error=${error.toFixed(1)}°C forceClose=${forceClose}`);
+                node.warn(`[mpc-floor-adv:${node.name}] COLD-START CHECK: Ti=${Ti.toFixed(1)} Tset=${Tset.toFixed(1)} error=${error.toFixed(1)}C forceClose=${forceClose}`);
 
                 if (error > 2.0 && !forceClose) {
                     node.warn(
-                        `[mpc-floor-adv:${node.name}] COLD-START EMERGENCY: Ti=${Ti.toFixed(1)} Tset=${Tset.toFixed(1)} error=${error.toFixed(1)}°C, no Tf setpoint → force valve open ${node.minOpenSec}s`
+                        `[mpc-floor-adv:${node.name}] COLD-START EMERGENCY: Ti=${Ti.toFixed(1)} Tset=${Tset.toFixed(1)} error=${error.toFixed(1)}C, no Tf setpoint -> force valve open ${node.minOpenSec}s`
                     );
                     autoValveOpen = true;
                     valveOpen = true;
@@ -330,11 +394,12 @@ module.exports = function (RED) {
                 return;
             }
 
-            // Room satisfaction guard
-            if (isRoomSatisfied()) {
+            // Room satisfaction guard. A planned charge slot stays open: the air is
+            // already near setpoint on purpose, and closing the valve throws the charge away.
+            if (isRoomSatisfied() && !computeChargeWant()) {
                 const Ti = Number(latestRoomActual);
                 const Tset = Number(latestRoomSetpoint);
-                node.warn(`[mpc-floor-adv:${node.name}] ROOM SATISFIED: Ti=${Ti.toFixed(1)} > Tset=${Tset.toFixed(1)}+${node.roomSatisfiedMarginC} → skip heating`);
+                node.warn(`[mpc-floor-adv:${node.name}] ROOM SATISFIED: Ti=${Ti.toFixed(1)} > Tset=${Tset.toFixed(1)}+${node.roomSatisfiedMarginC} -> skip heating`);
                 closeValve("room satisfied");
                 carryoverSec = 0;
                 setStatus(`Room satisfied Ti=${Ti.toFixed(1)} (${ts.formatStatus()})`, "blue");
@@ -369,7 +434,7 @@ module.exports = function (RED) {
             // Total energy the valve must deliver this tick
             const E_total = E_gap + E_floor_room;
 
-            // Supply-return ΔT for delivery rate
+            // Supply-return dT for delivery rate
             let dT_supply;
             if (Tsupply != null) {
                 dT_supply = Tsupply - Tf_ret;
@@ -392,7 +457,7 @@ module.exports = function (RED) {
 
             const Q_delivery = K_room_live * dT_supply;
             if (Math.abs(Q_delivery) < 0.001) {
-                closeValve("Q_delivery ≈ 0");
+                closeValve("Q_delivery ~ 0");
                 carryoverSec = 0;
                 return;
             }
@@ -449,9 +514,10 @@ module.exports = function (RED) {
             );
         }
 
-        // ── Tick handler ──
+        // -- Tick handler --
 
         function handleTick(msg) {
+            applyChargeForce();
             const nowSec = Math.floor(Date.now() / 1000);
             if (lastTickTsSec != null) {
                 const elapsed = nowSec - lastTickTsSec;
@@ -460,12 +526,12 @@ module.exports = function (RED) {
             lastTickTsSec = nowSec;
             if (pendingPeriodSec <= 0) pendingPeriodSec = Number(msg.payload?.periodSec || 0) || 300;
             awaitingSetpointAfterTick = true;
-            verbose(`tick periodSec=${pendingPeriodSec} → waiting setpoint`);
+            verbose(`tick periodSec=${pendingPeriodSec} -> waiting setpoint`);
             setStatus(`Tick; waiting setpoint (${ts.formatStatus()})`, "blue");
             sendEffectiveOutput("sync (tick)");
         }
 
-        // ── Input handler ──
+        // -- Input handler --
 
         node.on("input", (msg) => {
             const t = msg.topic || "";
@@ -476,10 +542,10 @@ module.exports = function (RED) {
             }
 
             if (t === node.setpointTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) latestSetpoint = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) latestSetpoint = v;
                 if (awaitingSetpointAfterTick && pendingPeriodSec) {
-                    verbose(`setpoint ${v} after tick → computeAndAct(${pendingPeriodSec})`);
+                    verbose(`setpoint ${v} after tick -> computeAndAct(${pendingPeriodSec})`);
                     awaitingSetpointAfterTick = false;
                     computeAndAct(pendingPeriodSec);
                     pendingPeriodSec = 0;
@@ -487,47 +553,49 @@ module.exports = function (RED) {
                 return;
             }
             if (t === node.returnTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) latestReturn = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) latestReturn = v;
+                applyChargeForce();
                 return;
             }
             if (t === node.supplyTempTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) latestSupplyTemp = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) latestSupplyTemp = v;
                 return;
             }
             if (t === node.roomActualTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) {
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) {
                     latestRoomActual = v;
+                    applyChargeForce();
                     checkRoomSatisfied();
 
                     // EMERGENCY HEATING ONLY: Force valve open when room too cold and valve is closed
-                    // Enter: error > 2.5°C AND valve would be closed by normal MPC
-                    // Exit: error < 2.0°C AND normal MPC also wants valve open
+                    // Enter: error > 2.5C AND valve would be closed by normal MPC
+                    // Exit: error < 2.0C AND normal MPC also wants valve open
                     if (latestRoomSetpoint != null && !forceClose && !coolingMode) {
                         const error = latestRoomSetpoint - v; // positive = too cold
 
-                        // Enter emergency mode: room too cold (> 2.5°C) and valve currently closed
+                        // Enter emergency mode: room too cold (> 2.5C) and valve currently closed
                         if (error > 2.5 && !emergencyOnOffMode && !valveOpen) {
                             emergencyOnOffMode = true;
                             autoValveOpen = true;
                             valveOpen = true;
 
-                            node.warn(`[mpc-floor-adv:${node.name}] EMERGENCY HEAT: Ti=${v.toFixed(1)} error=${error.toFixed(1)}°C, valve was closed → forcing OPEN`);
+                            node.warn(`[mpc-floor-adv:${node.name}] EMERGENCY HEAT: Ti=${v.toFixed(1)} error=${error.toFixed(1)}C, valve was closed -> forcing OPEN`);
                             sendEffectiveOutput(`emergency heat`);
-                            setStatus(`EMERGENCY HEAT Ti=${v.toFixed(1)} err=${error.toFixed(1)}°C (${ts.formatStatus()})`, "red");
+                            setStatus(`EMERGENCY HEAT Ti=${v.toFixed(1)} err=${error.toFixed(1)}C (${ts.formatStatus()})`, "red");
                             return;
                         }
 
                         // Stay in emergency mode and update status
                         if (emergencyOnOffMode) {
-                            // Exit emergency: error improved to < 2.0°C
+                            // Exit emergency: error improved to < 2.0C
                             if (error < 2.0) {
                                 emergencyOnOffMode = false;
                                 autoValveOpen = false;
                                 valveOpen = false;
-                                node.warn(`[mpc-floor-adv:${node.name}] EMERGENCY OFF: Ti=${v.toFixed(1)} error=${error.toFixed(1)}°C improved → resume normal control`);
+                                node.warn(`[mpc-floor-adv:${node.name}] EMERGENCY OFF: Ti=${v.toFixed(1)} error=${error.toFixed(1)}C improved -> resume normal control`);
                                 sendEffectiveOutput("emergency off");
                                 return;
                             }
@@ -537,13 +605,13 @@ module.exports = function (RED) {
                                 autoValveOpen = true;
                                 valveOpen = true;
                                 sendEffectiveOutput(`emergency heat`);
-                                setStatus(`EMERGENCY HEAT Ti=${v.toFixed(1)} err=${error.toFixed(1)}°C (${ts.formatStatus()})`, "red");
+                                setStatus(`EMERGENCY HEAT Ti=${v.toFixed(1)} err=${error.toFixed(1)}C (${ts.formatStatus()})`, "red");
                             } else {
                                 // Error went negative (room now too warm) - close valve but stay in emergency mode
                                 autoValveOpen = false;
                                 valveOpen = false;
                                 sendEffectiveOutput(`emergency wait`);
-                                setStatus(`Emergency: waiting, Ti=${v.toFixed(1)} err=${error.toFixed(1)}°C (${ts.formatStatus()})`, "yellow");
+                                setStatus(`Emergency: waiting, Ti=${v.toFixed(1)} err=${error.toFixed(1)}C (${ts.formatStatus()})`, "yellow");
                             }
                             return; // Skip normal MPC logic while in emergency
                         }
@@ -552,26 +620,31 @@ module.exports = function (RED) {
                 return;
             }
             if (t === node.roomSetpointTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) {
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) {
                     latestRoomSetpoint = v;
+                    applyChargeForce();
                     checkRoomSatisfied();
                 }
                 return;
             }
             if (t === node.coolingModeTopic) {
-                coolingMode = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                coolingMode = !!bit;
                 return;
             }
             if (t === node.dewPointTopic) {
-                const v = Number(msg.payload);
-                if (Number.isFinite(v)) dewPointC = v;
+                const v = (msg.payload == null ? null : (Number.isFinite(Number(msg.payload)) ? Number(msg.payload) : null));
+                if (v !== null) dewPointC = v;
                 return;
             }
 
             // Force open/close -- just set flag + gate output
             if (t === node.forceOpenTopic) {
-                const v = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                const v = !!bit;
                 if (forceOpenRoom === v) return;
                 forceOpenRoom = v;
                 node.log(`[mpc-floor-adv:${node.name}] force open (room) ${v ? 1 : 0}`);
@@ -582,7 +655,9 @@ module.exports = function (RED) {
                 return;
             }
             if (t === node.supervisorForceOpenTopic) {
-                const v = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                const v = !!bit;
                 if (forceOpenSupervisor === v) return;
                 forceOpenSupervisor = v;
                 node.log(`[mpc-floor-adv:${node.name}] force open (supervisor) ${v ? 1 : 0}`);
@@ -593,7 +668,9 @@ module.exports = function (RED) {
                 return;
             }
             if (t === node.forceCloseTopic) {
-                const v = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                const v = !!bit;
                 if (forceClose === v) return;
                 forceClose = v;
                 node.log(`[mpc-floor-adv:${node.name}] force close ${v ? 1 : 0}`);
@@ -604,7 +681,9 @@ module.exports = function (RED) {
                 return;
             }
             if (node.verboseLoggingTopic && t === node.verboseLoggingTopic) {
-                node._verboseFromMsg = !!Number(msg.payload);
+                const bit = (msg.payload == null || !Number.isFinite(Number(msg.payload)) ? null : (Number(msg.payload) !== 0 ? 1 : 0));
+                if (bit === null) return;
+                node._verboseFromMsg = !!bit;
                 verbose(`verbose ${node._verboseFromMsg ? "ON" : "OFF"}`);
                 return;
             }

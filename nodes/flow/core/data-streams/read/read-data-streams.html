@@ -6,9 +6,9 @@
             name: { value: "" },
             controller: { value: "", type: "uniflex-controller", required: true },
             outputMode: { value: "", validate: (v) => ["all", "change"].includes(v) },
-            msgType: { value: "", validate: (v) => ["separate", "together", "split"].includes(v) },
+            msgType: { value: "", validate: (v) => ["separate", "together"].includes(v) },
             mappings: { value: [] }, // Store multiple mappings
-            debugTopics: { value: "" }, // Comma-separated topic prefixes to log (empty = off)
+            debugTopics: { value: "" }, // Comma-separated topic prefixes; empty = no debug logging
             outputs: { value: 1 } // Node output ports
         },
         // Define the inputs of the node
@@ -19,9 +19,6 @@
             return this.name || (n ? `parse data streams: ${n}` : "parse data streams");
         },
         paletteLabel: () => "parse data streams",
-        outputLabels: function (i) {
-            return this.msgType === "split" && this.mappings && this.mappings[i] ? this.mappings[i].topic || `output #${i + 1}` : null;
-        },
         // Update form fields
         oneditprepare: function () {
             const node = this;
@@ -82,18 +79,10 @@
             $("#node-input-controller").change(queryControllerConfig);
 
             // Define event listeners for form fields
-            $("#node-input-msgType").change(defineOutputPorts);
             $("#mappings-container, #node-input-msgType, #node-input-outputMode").change(updateTipText);
 
             // Initialize the form fields
             initializeEditableList();
-            defineOutputPorts();
-
-            function defineOutputPorts() {
-                const msgType = $("#node-input-msgType").val();
-                const items = $("#mappings-container").editableList("items");
-                node.outputs = msgType === "split" ? items.length : 1;
-            }
 
             // Query variables related to controller configuration
             function queryControllerConfig() {
@@ -116,6 +105,9 @@
                     .done((d) => {
                         _controller = d;
                         node._controllerCache = d; // Store for access in oneditsave
+                        if (d.servicesError) {
+                            RED.notify(d.servicesError, { type: "warning", timeout: 10000 });
+                        }
                     })
                     .fail(() => {
                         console.error("Failed to query controller configuration!");
@@ -139,6 +131,8 @@
             }
 
             let currentSortColumn = "topic";
+            let currentSortDirection = "asc";
+            let sortScheduled = false;
 
             function initializeEditableList() {
                 $("#mappings-container").editableList({
@@ -171,7 +165,6 @@
                             title: "delete all data stream mappings",
                             click: function () {
                                 $("#mappings-container").editableList("empty");
-                                defineOutputPorts();
                                 updateTipText();
                             }
                         },
@@ -201,27 +194,35 @@
                         initializeAutocomplete(el.topicElement, onAutocompleteSelect);
 
                         updateTipText();
-                        defineOutputPorts();
                         refreshPlusButtonFor(container); // ensure button shows/updates
                     },
                     removeItem: function (data) {
                         updateTipText();
-                        defineOutputPorts();
                         refreshAllPlusButtons();
                     }
                 });
 
                 setTimeout(function () {
                     $("#sort-header-datastream").on("click", function () {
-                        currentSortColumn = "datastream";
+                        if (currentSortColumn === "datastream") {
+                            currentSortDirection = currentSortDirection === "asc" ? "desc" : "asc";
+                        } else {
+                            currentSortColumn = "datastream";
+                            currentSortDirection = "asc";
+                        }
                         updateSortIndicators();
-                        triggerSort();
+                        requestSort();
                     });
 
                     $("#sort-header-topic").on("click", function () {
-                        currentSortColumn = "topic";
+                        if (currentSortColumn === "topic") {
+                            currentSortDirection = currentSortDirection === "asc" ? "desc" : "asc";
+                        } else {
+                            currentSortColumn = "topic";
+                            currentSortDirection = "asc";
+                        }
                         updateSortIndicators();
-                        triggerSort();
+                        requestSort();
                     });
 
                     updateSortIndicators();
@@ -238,8 +239,26 @@
             }
 
             function updateSortIndicators() {
-                $(".sort-triangle").removeClass("active");
-                $(`#sort-triangle-${currentSortColumn}`).addClass("active");
+                $(".sort-triangle").removeClass("active").html("&#9650;");
+                $(`#sort-triangle-${currentSortColumn}`)
+                    .addClass("active")
+                    .html(currentSortDirection === "asc" ? "&#9650;" : "&#9660;");
+            }
+
+            function requestSort() {
+                if (sortScheduled) return;
+                sortScheduled = true;
+                setLoadingState(true, "Sorting mappings...");
+                requestAnimationFrame(() => {
+                    setTimeout(() => {
+                        try {
+                            triggerSort();
+                        } finally {
+                            sortScheduled = false;
+                            requestAnimationFrame(() => setLoadingState(false));
+                        }
+                    }, 0);
+                });
             }
 
             function triggerSort() {
@@ -265,8 +284,13 @@
                         ? idx
                         : (topic && topic.includes(".") ? parseInt(topic.split(".")[1], 10) : 0);
                     const normTopic = topic || (normKey && normIdx ? `${normKey}.${normIdx}` : "");
+                    const services = _controller.filteredServices || {};
+                    const allServices = _controller.services || {};
+                    const serviceName = manual
+                        ? normKey
+                        : services[normKey]?.servicename || allServices[normKey]?.servicename || normKey;
 
-                    const entry = { $li, key: normKey, index: normIdx || 0, topic: normTopic };
+                    const entry = { $li, key: normKey, serviceName, index: normIdx || 0, topic: normTopic };
 
                     if (!normTopic || !normKey) {
                         incompleteItems.push(entry);
@@ -278,12 +302,15 @@
                 sortedItems.sort((a, b) => {
                     let cmp = 0;
                     if (currentSortColumn === "datastream") {
-                        cmp = a.key.toLowerCase().localeCompare(b.key.toLowerCase());
+                        cmp = (a.serviceName || "").localeCompare(b.serviceName || "", undefined, { numeric: true, sensitivity: "base" });
+                        if (cmp === 0) {
+                            cmp = a.key.localeCompare(b.key, undefined, { numeric: true, sensitivity: "base" });
+                        }
                     } else {
-                        cmp = (a.topic || "").toLowerCase().localeCompare((b.topic || "").toLowerCase());
+                        cmp = (a.topic || "").localeCompare(b.topic || "", undefined, { numeric: true, sensitivity: "base" });
                     }
                     if (cmp === 0) cmp = a.index - b.index;
-                    return cmp;
+                    return currentSortDirection === "desc" ? -cmp : cmp;
                 });
 
                 // Reorder DOM in-place -- avoids triggering addItem callbacks (no autocomplete re-init).
@@ -550,7 +577,6 @@
                     topic: `${key}.${nextMember.index}`
                 };
                 $("#mappings-container").editableList("addItems", [newRow]);
-                defineOutputPorts();
                 updateTipText();
                 setTimeout(() => {
                     triggerSort();
@@ -588,7 +614,6 @@
                 }));
 
                 $("#mappings-container").editableList("addItems", newRows);
-                defineOutputPorts();
                 updateTipText();
                 setTimeout(() => {
                     triggerSort();
@@ -981,7 +1006,6 @@
 
                 // Add all mappings to the list
                 $("#mappings-container").editableList("addItems", list);
-                defineOutputPorts();
                 updateTipText();
 
                 RED.notify("Generated " + list.length + " data stream mappings", { type: "success", timeout: 3000 });
@@ -1356,16 +1380,23 @@
             </select>
         </div>
         <div class="form-row">
-            <label for="node-input-debugTopics"><i class="fa fa-filter"></i> Debug topics (comma)</label>
-            <input type="text" id="node-input-debugTopics" placeholder="e.g. IMODW,THFW" />
-            <div class="form-tips">Log only matching topic prefixes to Node-RED log; leave empty to disable.</div>
+            <label for="node-input-debugTopics"><i class="fa fa-filter"></i> Debug log filter</label>
+            <input type="text" id="node-input-debugTopics" placeholder="P1C,P2C or DI41W (empty = off)" style="width:300px" />
+        </div>
+        <div class="form-row">
+            <label></label>
+            <div class="form-tips" style="max-width:520px">
+                Optional Node-RED log filter only; output messages are unchanged.<br>
+                Comma-separated prefixes, matched with startsWith against mapping topic names
+                (e.g. P1C206S.1, DI41W.4). Examples: P1C,P2C (all cooled comfort pulse topics);
+                P1C206S (one flat); DI41W (all DI41W members). Empty = no read-path debug logs.
+            </div>
         </div>
         <div class="form-row">
             <label for="node-input-msgType"><i class="fa fa-sign-out"></i> Message type</label>
             <select id="node-input-msgType">
                 <option value="" disabled selected>Select message type...</option>
                 <option value="separate">Separate 'msg' objects (one output port)</option>
-                <option value="split">Separate 'msg' objects (multiple output ports)</option>
                 <option value="together">One comprehensive 'msg' object</option>
             </select>
         </div>
@@ -1403,7 +1434,7 @@
         <dd>Specifies the conditions when data will be output. Selecting <code>change</code> will output data only when the data stream differs from the previous value.</dd>
 
         <dt>message type <span class="property-type">string</span></dt>
-        <dd>Specifies the output format of messages. Messages can be output separately, together, or split to multiple ports.</dd>
+        <dd>Specifies whether values are output as separate messages or together in one comprehensive message.</dd>
 
         <dt>mappings <span class="property-type">object</span></dt>
         <dd>

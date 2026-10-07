@@ -151,16 +151,23 @@ module.exports = function (RED) {
         // Load runtime on startup
         loadRuntime();
 
+        if (node.enableSystemLog) {
+            node.log(
+                `Started: cmdIn=${node.pumpCmdInputTopic || "-"}, cmdOut=${node.pumpCmdTopic}, feedback=${node.pumpFeedbackTopic || "-"}`
+            );
+        }
+
         // Helper function for system logging
         function systemLog(level, message) {
-            if (node.enableSystemLog) {
-                // Use RED.log for system logging (can be extended to use settings.js configuration)
-                if (RED && RED.log) {
-                    RED.log[level](message);
-                } else {
-                    // Fallback to console if RED.log not available
-                    console[level === "error" ? "error" : level === "warn" ? "warn" : "log"](`[${node.name || "pump"}] ${message}`);
-                }
+            if (!node.enableSystemLog) {
+                return;
+            }
+            if (level === "error") {
+                node.error(message);
+            } else if (level === "warn") {
+                node.warn(message);
+            } else {
+                node.log(message);
             }
         }
 
@@ -278,6 +285,8 @@ module.exports = function (RED) {
             }
         }
 
+        publishRuntime();
+
         // ---- ERROR DETECTION
         function scheduleErrorCheck() {
             if (errorCheckTimer) {
@@ -314,12 +323,10 @@ module.exports = function (RED) {
                     feedbackMismatch = true;
                     const msg = `Feedback mismatch: feedback=${contactorFeedback}, relay=${relayState}`;
                     node.warn(msg);
-                    systemLog("warn", msg);
                 } else if (!mismatch && feedbackMismatch) {
                     feedbackMismatch = false;
                     const msg = `Feedback mismatch cleared`;
                     node.log(msg);
-                    systemLog("info", msg);
                 }
             }
             publishErrors();
@@ -341,13 +348,11 @@ module.exports = function (RED) {
                     noRun = true;
                     const msg = `No run detected: command=1 but no feedback/current after ${node.startDelaySec}s`;
                     node.warn(msg);
-                    systemLog("warn", msg);
                     publishErrors();
                 } else if (shouldBeRunning && noRun) {
                     noRun = false;
                     const msg = `No run cleared: feedback/current detected`;
                     node.log(msg);
-                    systemLog("info", msg);
                     publishErrors();
                 }
             }
@@ -382,7 +387,6 @@ module.exports = function (RED) {
                     overcurrent = true; // LATCHED
                     const msg = `OVERCURRENT LATCHED: ${currentActual.toFixed(1)}A > ${currentHiLimit.toFixed(1)}A`;
                     node.error(msg);
-                    systemLog("error", msg);
                     publishErrors();
                     updateStatus();
                 }
@@ -410,7 +414,6 @@ module.exports = function (RED) {
                     // Commanded OFF but still running - schedule retry after interval
                     if (!retryTimer) {
                         node.warn(`Command mismatch: commanded OFF but feedback shows ON - will retry after ${node.retryIntervalSec}s`);
-                        systemLog("warn", `Command mismatch: commanded OFF but feedback shows ON - will retry after ${node.retryIntervalSec}s`);
                         // Wait for retry interval before retrying
                         retryTimer = setTimeout(() => {
                             retryTimer = null;
@@ -435,7 +438,6 @@ module.exports = function (RED) {
                     // Commanded ON but not running after start delay - schedule retry after interval
                     if (!retryTimer) {
                         node.warn(`Command mismatch: commanded ON but feedback shows OFF after start delay - will retry after ${node.retryIntervalSec}s`);
-                        systemLog("warn", `Command mismatch: commanded ON but feedback shows OFF after start delay - will retry after ${node.retryIntervalSec}s`);
                         // Wait for retry interval before first retry
                         retryTimer = setTimeout(() => {
                             // After first retry, continue retrying periodically
@@ -493,7 +495,6 @@ module.exports = function (RED) {
                 noRun = false;
                 const msg = `No run cleared: feedback/current detected`;
                 node.log(msg);
-                systemLog("info", msg);
                 publishErrors();
             }
 
@@ -501,11 +502,9 @@ module.exports = function (RED) {
             if (newRunningState !== lastRunningState) {
                 if (newRunningState) {
                     node.log(`Pump STARTED (${node.feedbackType} mode)`);
-                    systemLog("info", `Pump STARTED (${node.feedbackType} mode)`);
                     startRuntimeTracking();
                 } else {
                     node.log(`Pump STOPPED (${node.feedbackType} mode)`);
-                    systemLog("info", `Pump STOPPED (${node.feedbackType} mode)`);
                     stopRuntimeTracking();
                 }
                 lastRunningState = newRunningState;
@@ -571,8 +570,7 @@ module.exports = function (RED) {
                     commandStartTime = null;
                 }
 
-                node.log(`Command changed: ${oldCmd} → ${commandState} (${commandState === 1 ? "start" : "stop"})`);
-                systemLog("info", `Command changed: ${oldCmd} → ${commandState} (${commandState === 1 ? "start" : "stop"})`);
+                node.log(`Command changed: ${oldCmd} -> ${commandState} (${commandState === 1 ? "start" : "stop"})`);
 
                 sendPumpCmd(commandState);
 
@@ -606,7 +604,6 @@ module.exports = function (RED) {
                 overcurrent = false;
                 const msg = `Overcurrent error RESET`;
                 node.log(msg);
-                systemLog("info", msg);
                 publishErrors();
                 updateStatus();
             }
@@ -647,25 +644,28 @@ module.exports = function (RED) {
                 let relayChanged = false;
 
                 if (Array.isArray(p) && p.length >= 2) {
-                    const newFeedback = Number(p[0]);
-                    const newRelay = Number(p[1]);
+                    const newFeedback = (p[0] == null ? null : (Number.isFinite(Number(p[0])) ? Number(p[0]) : null));
+                    const newRelay = (p[1] == null ? null : (Number.isFinite(Number(p[1])) ? Number(p[1]) : null));
+                    if (newFeedback === null && newRelay === null) return;
 
-                    if (contactorFeedback !== newFeedback) {
+                    if (newFeedback !== null && contactorFeedback !== newFeedback) {
                         contactorFeedback = newFeedback;
                         feedbackChanged = true;
                     }
-                    if (relayState !== newRelay) {
+                    if (newRelay !== null && relayState !== newRelay) {
                         relayState = newRelay;
                         relayChanged = true;
                     }
                 } else if (Array.isArray(p) && p.length === 1) {
-                    const newFeedback = Number(p[0]);
+                    const newFeedback = (p[0] == null ? null : (Number.isFinite(Number(p[0])) ? Number(p[0]) : null));
+                    if (newFeedback === null) return;
                     if (contactorFeedback !== newFeedback) {
                         contactorFeedback = newFeedback;
                         feedbackChanged = true;
                     }
                 } else {
-                    const newFeedback = Number(p);
+                    const newFeedback = (p == null ? null : (Number.isFinite(Number(p)) ? Number(p) : null));
+                    if (newFeedback === null) return;
                     if (contactorFeedback !== newFeedback) {
                         contactorFeedback = newFeedback;
                         feedbackChanged = true;
@@ -683,13 +683,20 @@ module.exports = function (RED) {
             // Current feedback mode: [actual, hiLimit]
             if (t === node.pumpCurrentTopic && node.feedbackType === "current") {
                 if (Array.isArray(p) && p.length >= 2) {
-                    currentActual = Number(p[0]);
-                    currentHiLimit = Number(p[1]);
+                    const act = (p[0] == null ? null : (Number.isFinite(Number(p[0])) ? Number(p[0]) : null));
+                    const hi = (p[1] == null ? null : (Number.isFinite(Number(p[1])) ? Number(p[1]) : null));
+                    if (act === null) return;
+                    currentActual = act;
+                    if (hi !== null) currentHiLimit = hi;
                     // loLimit comes from config: node.currentLoLimit
                 } else if (Array.isArray(p) && p.length === 1) {
-                    currentActual = Number(p[0]);
+                    const act = (p[0] == null ? null : (Number.isFinite(Number(p[0])) ? Number(p[0]) : null));
+                    if (act === null) return;
+                    currentActual = act;
                 } else {
-                    currentActual = Number(p);
+                    const act = (p == null ? null : (Number.isFinite(Number(p)) ? Number(p) : null));
+                    if (act === null) return;
+                    currentActual = act;
                 }
 
                 checkOvercurrent();
@@ -700,18 +707,25 @@ module.exports = function (RED) {
             // Fuse OFF input
             if (t === node.fuseOFFTopic) {
                 const val = Array.isArray(p) ? p[0] : p;
-                const newFuseOFF = Number(val);
+                const newFuseOFF = (val == null ? null : (Number.isFinite(Number(val)) ? Number(val) : null));
+                if (newFuseOFF === null) {
+                    if (fuseOFF !== 1) {
+                        fuseOFF = 1;
+                        node.error("External fuse unknown - treat as TRIPPED");
+                        publishErrors();
+                        updateStatus();
+                    }
+                    return;
+                }
 
                 if (newFuseOFF !== fuseOFF) {
                     fuseOFF = newFuseOFF;
                     if (fuseOFF === 1) {
                         const msg = `External fuse TRIPPED`;
                         node.error(msg);
-                        systemLog("error", msg);
                     } else {
                         const msg = `External fuse OK`;
                         node.log(msg);
-                        systemLog("info", msg);
                     }
                     publishErrors();
                     updateStatus();
